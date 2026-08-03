@@ -1,6 +1,6 @@
 [package]
 name = "wisty"
-version = "2.4.2"
+version = "2.5.0"
 description = "Plain text editor"
 license = "GPL-3.0-or-later"
 authors = ["Wisty contributors"]

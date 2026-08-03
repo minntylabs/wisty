@@ -5682,7 +5682,7 @@ dependencies = [
 
 [[package]]
 name = "wisty"
-version = "2.4.2"
+version = "2.5.0"
 dependencies = [
  "gtk",
  "hunspell-rs",

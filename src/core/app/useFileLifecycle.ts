@@ -30,6 +30,11 @@ type UseFileLifecycleDeps = {
     cancelSaveFileStream: (streamId: string) => Promise<void>;
   };
   fontPicker: FontPickerPort;
+  rememberedPosition: {
+    capture: () => Promise<void>;
+    restore: (filePath: string) => void;
+    migrate: (fromPath: string, toPath: string) => Promise<void>;
+  };
   errors: ErrorReporter;
   confirmOpenLargeFile: (filePath: string, sizeBytes: number) => Promise<boolean>;
   showFileTooLarge: (filePath: string, sizeBytes: number) => Promise<void>;
@@ -225,7 +230,19 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     }
   };
 
+  /**
+   * Flushes the outgoing file's remembered position before the editor is reset.
+   * Required for correctness, not just precision: a debounced capture still
+   * pending when the path changes would otherwise write the old file's position
+   * against the new file's key. Capture reads the path and position
+   * synchronously, so this need not be awaited.
+   */
+  const flushOutgoingPosition = () => {
+    void deps.rememberedPosition.capture();
+  };
+
   const loadEditorTextAsClean = (text: string) => {
+    flushOutgoingPosition();
     deps.editor.reset({ emitChange: false, addToHistory: false });
     if (text.length > 0) {
       deps.editor.append(text, { emitChange: false, addToHistory: false });
@@ -292,6 +309,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       }
     };
 
+    flushOutgoingPosition();
     deps.document.setUntitled();
     deps.document.markCleanAt(0);
     applySafeMode(false);
@@ -474,6 +492,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       deps.document.setFilePath(selected.filePath);
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(selected.filePath));
       await deps.settings.actions.addRecentFile(selected.filePath);
+      deps.rememberedPosition.restore(selected.filePath);
       deps.editor.focus();
     }, "Unable to open file");
   };
@@ -485,6 +504,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         deps.document.setFilePath(filePath);
         await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
         await deps.settings.actions.addRecentFile(filePath);
+        deps.rememberedPosition.restore(filePath);
         deps.editor.focus();
       } catch (error) {
         if (!await deps.fileIo.fileExists(filePath)) {
@@ -501,6 +521,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       deps.document.setFilePath(filePath);
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
       await deps.settings.actions.addRecentFile(filePath);
+      deps.rememberedPosition.restore(filePath);
       deps.editor.focus();
     }, "Unable to open launch file");
   };
@@ -511,6 +532,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     loadEditorTextAsClean(text);
     deps.document.setFilePath(filePath);
     await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
+    deps.rememberedPosition.restore(filePath);
     deps.editor.focus();
   };
 
@@ -598,7 +620,9 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         return;
       }
 
+      const previousPath = deps.document.state.filePath;
       await saveDocumentToPathViaStream(result.filePath);
+      await deps.rememberedPosition.migrate(previousPath, result.filePath);
       deps.document.setFilePath(result.filePath);
       deps.document.markCleanAt(deps.editor.getRevision());
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(result.filePath));

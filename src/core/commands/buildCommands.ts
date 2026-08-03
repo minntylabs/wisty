@@ -48,6 +48,11 @@ type BuildCommandsDeps = {
     enabled: Accessor<boolean>;
     setEnabled: (enabled: boolean) => void;
   };
+  rememberedPosition: {
+    canRemember: Accessor<boolean>;
+    isRemembered: Accessor<boolean>;
+    toggle: () => Promise<void>;
+  };
   settings: {
     state: {
       themeMode: "light" | "dark";
@@ -302,6 +307,15 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
       checked: () => deps.settings.state.activeLineHighlightEnabled
     },
     {
+      id: "view.rememberPosition",
+      label: "Remember Position",
+      refocusEditorOnMenuSelect: true,
+      // Needs a path to key the entry by, so it stays unavailable until saved.
+      enabled: () => deps.rememberedPosition.canRemember(),
+      run: () => deps.rememberedPosition.toggle(),
+      checked: () => deps.rememberedPosition.isRemembered()
+    },
+    {
       id: "view.statusBar",
       label: "Status Bar",
       refocusEditorOnMenuSelect: true,
@@ -414,6 +428,7 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
         { type: "command", commandId: "view.formatMode" },
         { type: "command", commandId: "view.activeLineHighlight" },
         { type: "command", commandId: "view.statusBar" },
+        { type: "command", commandId: "view.rememberPosition" },
         {
           type: "submenu",
           id: "view.spellCheck",

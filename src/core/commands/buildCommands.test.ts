@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { buildCommands } from "./buildCommands";
 import type { FormatViewMode } from "../settings/settingsTypes";
 
-const createDeps = (overrides: { formatViewMode?: FormatViewMode; activeLineHighlightEnabled?: boolean } = {}) => {
+const createDeps = (overrides: {
+  formatViewMode?: FormatViewMode;
+  activeLineHighlightEnabled?: boolean;
+  canRememberPosition?: boolean;
+  isPositionRemembered?: boolean;
+} = {}) => {
   const settingsState = {
     themeMode: "light" as const,
     textWrapEnabled: true,
@@ -15,6 +20,10 @@ const createDeps = (overrides: { formatViewMode?: FormatViewMode; activeLineHigh
   };
 
   let transcriptModeEnabled = false;
+  const rememberedPositionState = {
+    canRemember: overrides.canRememberPosition ?? true,
+    isRemembered: overrides.isPositionRemembered ?? false
+  };
 
   const deps = {
     platform: { isMac: false },
@@ -50,6 +59,13 @@ const createDeps = (overrides: { formatViewMode?: FormatViewMode; activeLineHigh
       enabled: () => transcriptModeEnabled,
       setEnabled: vi.fn((enabled: boolean) => {
         transcriptModeEnabled = enabled;
+      })
+    },
+    rememberedPosition: {
+      canRemember: () => rememberedPositionState.canRemember,
+      isRemembered: () => rememberedPositionState.isRemembered,
+      toggle: vi.fn(async () => {
+        rememberedPositionState.isRemembered = !rememberedPositionState.isRemembered;
       })
     },
     settings: {
@@ -209,5 +225,36 @@ describe("view.activeLineHighlight command", () => {
     const viewSection = sections.find((section) => section.id === "view");
     const ids = viewSection!.items.map((item) => (item.type === "command" ? item.commandId : item.type === "submenu" ? item.id : "separator"));
     expect(ids).toContain("view.activeLineHighlight");
+  });
+});
+
+describe("remember position command", () => {
+  it("sits in the View menu and reflects whether the file has a stored entry", () => {
+    const deps = createDeps({ isPositionRemembered: true });
+    const { definitions, sections } = buildCommands(deps);
+    const command = findCommand(definitions, "view.rememberPosition");
+
+    expect(command.label).toBe("Remember Position");
+    expect(command.checked?.()).toBe(true);
+    expect(sections.find((section) => section.id === "view")?.items).toContainEqual({
+      type: "command",
+      commandId: "view.rememberPosition"
+    });
+  });
+
+  it("is disabled for an untitled document, which has no path to key by", () => {
+    const deps = createDeps({ canRememberPosition: false });
+    const command = findCommand(buildCommands(deps).definitions, "view.rememberPosition");
+    expect(command.enabled?.()).toBe(false);
+  });
+
+  it("toggles the entry on and off", async () => {
+    const deps = createDeps();
+    const command = findCommand(buildCommands(deps).definitions, "view.rememberPosition");
+    expect(command.checked?.()).toBe(false);
+    await command.run();
+    expect(command.checked?.()).toBe(true);
+    await command.run();
+    expect(command.checked?.()).toBe(false);
   });
 });

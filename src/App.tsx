@@ -15,6 +15,7 @@ import { useFileLifecycle } from "./core/app/useFileLifecycle";
 import { useGlobalKeyRouting } from "./core/app/useGlobalKeyRouting";
 import { useMenuCommandPipeline } from "./core/app/useMenuCommandPipeline";
 import { useMenuState } from "./core/app/useMenuState";
+import { useRememberedPosition } from "./core/app/useRememberedPosition";
 import { useWindowTitleSync } from "./core/app/useWindowTitleSync";
 import { useErrorModalQueue } from "./core/app/useErrorModalQueue";
 import { createDocumentStore } from "./core/document/documentStore";
@@ -97,7 +98,16 @@ function App() {
     onCursorPositionChanged: setCursorPosition,
     onFormatModeChanged: (mode) => {
       void settingsStore.actions.setFormatViewMode(mode);
+    },
+    onViewPositionChanged: () => {
+      rememberedPosition.scheduleCapture();
     }
+  });
+
+  const rememberedPosition = useRememberedPosition({
+    editor: editorAdapter,
+    document: documentStore,
+    settings: settingsStore
   });
 
   const errors: ErrorReporter = {
@@ -141,6 +151,7 @@ function App() {
     editor: editorAdapter,
     document: documentStore,
     settings: settingsStore,
+    rememberedPosition,
     fileDialogs: {
       openTextFile,
       openTextFilePath,
@@ -247,7 +258,23 @@ function App() {
     if (nextRecentFiles.length !== recentFiles.length) {
       await settingsStore.actions.setRecentFiles(nextRecentFiles);
     }
+    await pruneRememberedPositions();
     await loadSpellDictionaries();
+  };
+
+  /** Drops remembered positions for files that no longer exist. */
+  const pruneRememberedPositions = async () => {
+    const entries = Object.entries(settingsStore.state.rememberedPositions);
+    if (entries.length === 0) {
+      return;
+    }
+    const surviving = await Promise.all(entries.map(async (entry) => (
+      await fileExists(entry[0]) ? entry : null
+    )));
+    const next = surviving.filter((entry) => entry !== null);
+    if (next.length !== entries.length) {
+      await settingsStore.actions.setRememberedPositions(Object.fromEntries(next));
+    }
   };
 
   const loadSpellDictionaries = async () => {
@@ -285,6 +312,7 @@ function App() {
       enabled: transcriptModeEnabled,
       setEnabled: setTranscriptModeEnabled
     },
+    rememberedPosition,
     spell: {
       dictionaries: spellDictionaries,
       showInstallHelp: showSpellInstallHelp,

@@ -1,9 +1,9 @@
-import { Compartment, EditorState, Transaction } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState, Transaction } from "@codemirror/state";
 import { defaultKeymap, history, indentWithTab, isolateHistory, redo, undo } from "@codemirror/commands";
 import { search, searchKeymap } from "@codemirror/search";
 import { drawSelection, dropCursor, EditorView, highlightActiveLine, keymap } from "@codemirror/view";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { AppSettings, FormatViewMode } from "../settings/settingsTypes";
+import { AppSettings, FormatViewMode, RememberedPosition } from "../settings/settingsTypes";
 import {
   createFormatting,
   setFormatModeEffect,
@@ -30,10 +30,15 @@ export type CursorPositionPayload = {
 const positionsEqual = (a: CursorPositionPayload, b: CursorPositionPayload): boolean =>
   (Object.keys(a) as (keyof CursorPositionPayload)[]).every((key) => a[key] === b[key]);
 
+const clampLine = (lineNumber: number, totalLines: number): number =>
+  Math.max(1, Math.min(totalLines, Math.floor(lineNumber)));
+
 type EditorAdapterOptions = {
   onDocChanged: (payload: DocChangedPayload) => void;
   onCursorPositionChanged: (payload: CursorPositionPayload) => void;
   onFormatModeChanged: (mode: FormatViewMode) => void;
+  /** Fired when the viewport or caret moves, so a remembered position can be re-captured. */
+  onViewPositionChanged?: () => void;
   getSettings: () => AppSettings;
 };
 
@@ -257,6 +262,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
         EditorView.updateListener.of((update) => {
           if (update.docChanged || update.selectionSet) {
             emitCursorPositionIfChanged(update.state);
+            options.onViewPositionChanged?.();
           }
 
           const previousMode = update.startState.field(formatting.modeField);
@@ -324,6 +330,56 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     }
   };
 
+  const handleScroll = () => {
+    options.onViewPositionChanged?.();
+  };
+
+  /**
+   * The first visible line and the caret, as line/column. Read from the
+   * scroller's top-left corner rather than from scrollTop, so the answer is in
+   * document terms and survives a later change of font, wrapping or window size.
+   */
+  const getViewPosition = (): RememberedPosition | null => {
+    const view = editorView;
+    if (!view) {
+      return null;
+    }
+
+    const bounds = view.scrollDOM.getBoundingClientRect();
+    const topPos = view.posAtCoords({ x: bounds.left + 1, y: bounds.top + 1 }, false);
+    const head = view.state.selection.main.head;
+    const cursorLine = view.state.doc.lineAt(head);
+
+    return {
+      topLine: view.state.doc.lineAt(topPos).number,
+      cursorLine: cursorLine.number,
+      cursorColumn: head - cursorLine.from
+    };
+  };
+
+  /**
+   * Restores a remembered position, clamping to the document as it is now — the
+   * file may have been edited elsewhere since, and a stale line number should
+   * land somewhere sensible rather than fail.
+   */
+  const setViewPosition = (position: RememberedPosition) => {
+    const view = editorView;
+    if (!view) {
+      return;
+    }
+
+    const { doc } = view.state;
+    const cursorLine = doc.line(clampLine(position.cursorLine, doc.lines));
+    const topLine = doc.line(clampLine(position.topLine, doc.lines));
+
+    view.dispatch({
+      selection: EditorSelection.cursor(
+        Math.min(cursorLine.from + position.cursorColumn, cursorLine.to)
+      ),
+      effects: EditorView.scrollIntoView(topLine.from, { y: "start" })
+    });
+  };
+
   const setHost = (node: HTMLDivElement) => {
     editorHost = node;
   };
@@ -338,6 +394,9 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
       state: createEditorState("")
     });
 
+    // Scrolling produces no transaction, so the update listener never sees it.
+    editorView.scrollDOM.addEventListener("scroll", handleScroll, { passive: true });
+
     emitCursorPositionIfChanged(editorView.state);
   };
 
@@ -345,6 +404,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     if (!editorView) {
       return;
     }
+    editorView.scrollDOM.removeEventListener("scroll", handleScroll);
     editorView.destroy();
     editorView = undefined;
   };
@@ -637,6 +697,8 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     append,
     reset,
     setLargeLineSafeMode,
+    getViewPosition,
+    setViewPosition,
     setTranscriptMode,
     isTranscriptModeEnabled,
     listSpellDictionaries,

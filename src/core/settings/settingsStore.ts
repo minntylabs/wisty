@@ -1,7 +1,15 @@
 import { createStore } from "solid-js/store";
 import { createSignal } from "solid-js";
 import { Store } from "@tauri-apps/plugin-store";
-import { AppSettings, DEFAULT_SETTINGS, FontStyle, FormatViewMode, ThemeMode } from "./settingsTypes";
+import {
+  AppSettings,
+  DEFAULT_SETTINGS,
+  FontStyle,
+  FormatViewMode,
+  MAX_REMEMBERED_POSITIONS,
+  RememberedPosition,
+  ThemeMode
+} from "./settingsTypes";
 
 const SETTINGS_FILE = "settings.json";
 
@@ -12,6 +20,43 @@ const isThemeMode = (value: unknown): value is ThemeMode => value === "light" ||
 const isFontStyle = (value: unknown): value is FontStyle => value === "normal" || value === "italic" || value === "oblique";
 
 const isFormatViewMode = (value: unknown): value is FormatViewMode => value === "formatted" || value === "plain";
+
+const isPositiveInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+const isRememberedPosition = (value: unknown): value is RememberedPosition => {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<RememberedPosition>;
+  return isPositiveInteger(candidate.topLine)
+    && isPositiveInteger(candidate.cursorLine)
+    && isPositiveInteger(candidate.cursorColumn);
+};
+
+const parseRememberedPositions = (value: unknown): Record<string, RememberedPosition> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(value).filter(([path, position]) => path.length > 0 && isRememberedPosition(position))
+  ) as Record<string, RememberedPosition>;
+};
+
+/**
+ * Re-inserts `filePath` last so plain object key order doubles as recency, then
+ * drops the oldest entries once over the cap. File paths are never integer-like
+ * keys, so insertion order is preserved.
+ */
+const withRememberedPosition = (
+  positions: Record<string, RememberedPosition>,
+  filePath: string,
+  position: RememberedPosition
+): Record<string, RememberedPosition> => {
+  const entries = Object.entries(positions).filter(([path]) => path !== filePath);
+  entries.push([filePath, position]);
+  return Object.fromEntries(entries.slice(-MAX_REMEMBERED_POSITIONS));
+};
 
 type SettingKey = keyof AppSettings;
 
@@ -112,6 +157,41 @@ export const createSettingsStore = () => {
     await saveSetting("recentFiles", next);
   };
 
+  const rememberPosition = async (filePath: string, position: RememberedPosition) => {
+    if (!filePath) {
+      return;
+    }
+    const next = withRememberedPosition(state.rememberedPositions, filePath, position);
+    setState({ rememberedPositions: next });
+    await saveSetting("rememberedPositions", next);
+  };
+
+  const forgetPosition = async (filePath: string) => {
+    if (!(filePath in state.rememberedPositions)) {
+      return;
+    }
+    const { [filePath]: _removed, ...next } = state.rememberedPositions;
+    setState({ rememberedPositions: next });
+    await saveSetting("rememberedPositions", next);
+  };
+
+  /** Follows a document to its new path on Save As, rather than orphaning the entry. */
+  const moveRememberedPosition = async (fromPath: string, toPath: string) => {
+    const position = state.rememberedPositions[fromPath];
+    if (!position || fromPath === toPath) {
+      return;
+    }
+    const { [fromPath]: _removed, ...rest } = state.rememberedPositions;
+    const next = withRememberedPosition(rest, toPath, position);
+    setState({ rememberedPositions: next });
+    await saveSetting("rememberedPositions", next);
+  };
+
+  const setRememberedPositions = async (positions: Record<string, RememberedPosition>) => {
+    setState({ rememberedPositions: positions });
+    await saveSetting("rememberedPositions", positions);
+  };
+
   const load = async () => {
     backingStore = await Store.load(SETTINGS_FILE);
 
@@ -128,6 +208,7 @@ export const createSettingsStore = () => {
     const loadedSpellCheckLanguage = await backingStore.get("spellCheckLanguage");
     const loadedLastDirectory = await backingStore.get("lastDirectory");
     const loadedRecentFiles = await backingStore.get("recentFiles");
+    const loadedRememberedPositions = await backingStore.get("rememberedPositions");
 
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
 
@@ -156,7 +237,8 @@ export const createSettingsStore = () => {
       lastDirectory: typeof loadedLastDirectory === "string" ? loadedLastDirectory : DEFAULT_SETTINGS.lastDirectory,
       recentFiles: Array.isArray(loadedRecentFiles) && loadedRecentFiles.every((f) => typeof f === "string")
         ? (loadedRecentFiles as string[]).slice(0, 3)
-        : DEFAULT_SETTINGS.recentFiles
+        : DEFAULT_SETTINGS.recentFiles,
+      rememberedPositions: parseRememberedPositions(loadedRememberedPositions)
     });
 
     setReady(true);
@@ -181,7 +263,11 @@ export const createSettingsStore = () => {
       setLastDirectory,
       addRecentFile,
       setRecentFiles,
-      removeRecentFile
+      removeRecentFile,
+      rememberPosition,
+      forgetPosition,
+      moveRememberedPosition,
+      setRememberedPositions
     }
   };
 };

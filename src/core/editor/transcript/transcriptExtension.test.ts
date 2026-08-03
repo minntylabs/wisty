@@ -27,8 +27,9 @@ const createView = (doc = SAMPLE) => {
     pointerPos = pos;
   };
 
-  const fire = (event: Event) => {
+  const fire = <T extends Event>(event: T): T => {
     view.contentDOM.dispatchEvent(event);
+    return event;
   };
 
   return {
@@ -38,7 +39,7 @@ const createView = (doc = SAMPLE) => {
       fire(new MouseEvent("mousemove", { bubbles: true }));
     },
     wheel(deltaY: number) {
-      fire(new WheelEvent("wheel", { deltaY, deltaMode: 0, bubbles: true, cancelable: true }));
+      return fire(new WheelEvent("wheel", { deltaY, deltaMode: 0, bubbles: true, cancelable: true }));
     },
     click(pos: number) {
       at(pos);
@@ -139,11 +140,26 @@ describe("wheel extension", () => {
     t.view.destroy();
   });
 
-  it("leaves the wheel alone while a label is anchored, so the document can scroll", () => {
+  it("does nothing at all while a label is anchored", () => {
     const t = createView();
     t.hover(3);
-    t.wheel(200);
+    const event = t.wheel(200);
     expect(t.selected()).toBe("ALICE:");
+    expect(event.defaultPrevented).toBe(true);
+    t.view.destroy();
+  });
+
+  it("lets the document scroll when the pointer is not over a turn", () => {
+    const t = createView();
+    t.hover(null);
+    expect(t.wheel(200).defaultPrevented).toBe(false);
+    t.view.destroy();
+  });
+
+  it("consumes the wheel while a word is anchored", () => {
+    const t = createView();
+    t.hover(13);
+    expect(t.wheel(200).defaultPrevented).toBe(true);
     t.view.destroy();
   });
 });

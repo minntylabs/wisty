@@ -388,11 +388,18 @@ const createEventHandlers = () => {
 
     wheel(event, view) {
       const anchor = view.state.field(anchorField);
-      // A label selection is atomic, so the wheel has nothing to extend. Letting
-      // the event through means hovering a label is also how you scroll the
-      // document without leaving the mode.
-      if (anchor?.kind !== "word") {
+      // Nothing anchored means the pointer is over the margin, a blank line or
+      // non-turn text, which is how you scroll the document without leaving the
+      // mode. Everything else the mode owns.
+      if (!anchor) {
         return false;
+      }
+
+      // A label selection is atomic: there is no offset to extend, so the wheel
+      // does nothing at all rather than falling through to word-anchoring.
+      if (anchor.kind === "label") {
+        event.preventDefault();
+        return true;
       }
 
       const bounds = offsetBounds(view.state, anchor);

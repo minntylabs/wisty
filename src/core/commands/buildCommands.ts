@@ -42,6 +42,11 @@ type BuildCommandsDeps = {
     toggleBold: () => void;
     toggleItalic: () => void;
     applyHeadingLevel: (level: number) => void;
+    setTranscriptMode: (enabled: boolean) => void;
+  };
+  transcriptMode: {
+    enabled: Accessor<boolean>;
+    setEnabled: (enabled: boolean) => void;
   };
   settings: {
     state: {
@@ -217,6 +222,18 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
       }
     },
     {
+      id: "edit.transcriptMode",
+      label: "Transcript Mode",
+      shortcut: "F4",
+      refocusEditorOnMenuSelect: true,
+      run: () => {
+        const enabled = !deps.transcriptMode.enabled();
+        deps.transcriptMode.setEnabled(enabled);
+        deps.editor.setTranscriptMode(enabled);
+      },
+      checked: () => deps.transcriptMode.enabled()
+    },
+    {
       id: "format.bold",
       label: "Bold",
       shortcut: commandShortcut(deps.platform.isMac, "B"),
@@ -357,7 +374,9 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
         { type: "command", commandId: "edit.paste" },
         { type: "separator" },
         { type: "command", commandId: "edit.find" },
-        { type: "command", commandId: "edit.find.altReplaceKey" }
+        { type: "command", commandId: "edit.find.altReplaceKey" },
+        { type: "separator" },
+        { type: "command", commandId: "edit.transcriptMode" }
       ]
     },
     {

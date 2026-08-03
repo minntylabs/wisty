@@ -14,6 +14,8 @@ const createDeps = (overrides: { formatViewMode?: FormatViewMode; activeLineHigh
     recentFiles: [] as string[]
   };
 
+  let transcriptModeEnabled = false;
+
   const deps = {
     platform: { isMac: false },
     closeFlow: {
@@ -41,7 +43,14 @@ const createDeps = (overrides: { formatViewMode?: FormatViewMode; activeLineHigh
       getFormatMode: vi.fn(() => settingsState.formatViewMode),
       toggleBold: vi.fn(),
       toggleItalic: vi.fn(),
-      applyHeadingLevel: vi.fn()
+      applyHeadingLevel: vi.fn(),
+      setTranscriptMode: vi.fn()
+    },
+    transcriptMode: {
+      enabled: () => transcriptModeEnabled,
+      setEnabled: vi.fn((enabled: boolean) => {
+        transcriptModeEnabled = enabled;
+      })
     },
     settings: {
       state: settingsState,

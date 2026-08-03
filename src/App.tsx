@@ -82,6 +82,9 @@ function App() {
     totalCharacters: 1
   });
   const [spellDictionaries, setSpellDictionaries] = createSignal<DictionaryInfo[]>([]);
+  // Deliberately not persisted: transcript mode is a per-session tidying tool,
+  // and its clicks are destructive enough that it should never be on at startup.
+  const [transcriptModeEnabled, setTranscriptModeEnabled] = createSignal(false);
   const errorModalQueue = useErrorModalQueue();
 
   let editorHostRef: HTMLDivElement | undefined;
@@ -278,6 +281,10 @@ function App() {
     fileLifecycle,
     editor: editorAdapter,
     settings: settingsStore,
+    transcriptMode: {
+      enabled: transcriptModeEnabled,
+      setEnabled: setTranscriptModeEnabled
+    },
     spell: {
       dictionaries: spellDictionaries,
       showInstallHelp: showSpellInstallHelp,

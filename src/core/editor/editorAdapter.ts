@@ -14,6 +14,7 @@ import {
 import { createSearchPanelAdapter } from "./searchPanelAdapter";
 import { createSpellService } from "../spellcheck/spellService";
 import { createSpellcheckExtension, requestSpellRescan } from "../spellcheck/spellcheckExtension";
+import { createTranscriptExtension } from "./transcript/transcriptExtension";
 
 type DocChangedPayload = {
   revision: number;
@@ -65,10 +66,14 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   let spellLoadedLanguage: string | undefined;
   let spellDictionaryDirty = false;
 
+  const transcriptExtension = createTranscriptExtension();
+  let transcriptEnabled = false;
+
   const wrapCompartment = new Compartment();
   const activeLineCompartment = new Compartment();
   const styleCompartment = new Compartment();
   const spellCompartment = new Compartment();
+  const transcriptCompartment = new Compartment();
 
   const formatting = createFormatting(() => options.getSettings().formatViewMode);
 
@@ -246,6 +251,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
         wrapCompartment.of(!largeLineSafeModeEnabled && settings.textWrapEnabled ? EditorView.lineWrapping : []),
         activeLineCompartment.of(settings.activeLineHighlightEnabled ? highlightActiveLine() : []),
         spellCompartment.of(spellEnabled ? spellExtension : []),
+        transcriptCompartment.of(transcriptEnabled ? transcriptExtension : []),
         styleCompartment.of(createStyleExtension()),
         formatting.extension,
         EditorView.updateListener.of((update) => {
@@ -479,6 +485,22 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     }
   };
 
+  /**
+   * Installs or removes the transcript-mode extension outright, so its
+   * destructive pointer handlers do not exist while the mode is off.
+   */
+  const setTranscriptMode = (enabled: boolean) => {
+    if (transcriptEnabled === enabled) {
+      return;
+    }
+    transcriptEnabled = enabled;
+    editorView?.dispatch({
+      effects: transcriptCompartment.reconfigure(enabled ? transcriptExtension : [])
+    });
+  };
+
+  const isTranscriptModeEnabled = () => transcriptEnabled;
+
   const setLargeLineSafeMode = (enabled: boolean) => {
     if (largeLineSafeModeEnabled === enabled) {
       return;
@@ -615,6 +637,8 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     append,
     reset,
     setLargeLineSafeMode,
+    setTranscriptMode,
+    isTranscriptModeEnabled,
     listSpellDictionaries,
     listAddedWords,
     removeAddedWord,

@@ -43,19 +43,36 @@ const hasFragment = (view: EditorView): boolean => {
 };
 
 describe("rendering", () => {
-  it("replaces each marker with an icon when visible", () => {
+  it("decorates each marker so CSS can paint an icon over it", () => {
     const { view } = createView();
-    expect(view.dom.querySelectorAll(".cm-marker-icon")).toHaveLength(3);
-    expect(view.dom.textContent).not.toContain("734.12");
+    expect(view.dom.querySelectorAll(".cm-marker")).toHaveLength(3);
+    view.destroy();
+  });
+
+  it("carries each marker's times on the element, for a click to read", () => {
+    const { view } = createView();
+    const first = view.dom.querySelector(".cm-marker");
+    expect(first?.getAttribute("data-marker-start")).toBe("734.12");
+    expect(first?.getAttribute("data-marker-end")).toBe("736.8");
+    view.destroy();
+  });
+
+  it("hides the token from assistive technology", () => {
+    // It stays in the document — replacing it is what crashed WebKitGTK — so
+    // it is hidden rather than absent.
+    const { view } = createView();
+    for (const el of view.dom.querySelectorAll(".cm-marker")) {
+      expect(el.getAttribute("aria-hidden")).toBe("true");
+    }
     view.destroy();
   });
 
   it("hides the icons with a class rather than rebuilding the decorations", () => {
     // Visibility is one class on the content element, so toggling it costs
-    // nothing per marker. The icons stay in the DOM and collapse via CSS.
+    // nothing per marker: the decorations are untouched and CSS does the rest.
     const { view } = createView(DOC, false);
     expect(view.contentDOM.classList.contains("cm-markers-hidden")).toBe(true);
-    expect(view.dom.textContent).not.toContain("734.12");
+    expect(view.dom.querySelectorAll(".cm-marker")).toHaveLength(3);
     view.destroy();
   });
 
@@ -68,11 +85,15 @@ describe("rendering", () => {
     view.destroy();
   });
 
-  it("never shows the raw marker text, hidden or shown", () => {
+  it("keeps the token in the document, decorated, in both states", () => {
+    // A deliberate trade. Removing it from the rendering — Decoration.replace —
+    // reads better, but CodeMirror surrounds a replaced range with image
+    // elements, which crashes WebKitGTK 2.52.3's accessibility layer when the
+    // line also holds a non-ASCII character. The text stays and CSS hides it.
     for (const visible of [true, false]) {
       const { view } = createView(DOC, visible);
-      expect(view.dom.textContent).not.toContain("734.12");
-      expect(view.dom.textContent).not.toContain("⟦");
+      expect(view.state.doc.toString()).toContain("⟦734.12–736.80⟧");
+      expect(view.dom.querySelectorAll(".cm-marker")).toHaveLength(3);
       view.destroy();
     }
   });

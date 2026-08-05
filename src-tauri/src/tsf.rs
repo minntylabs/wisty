@@ -136,6 +136,25 @@ fn complete_meta(
     serde_json::to_vec_pretty(&draft).map_err(|error| format!("Cannot serialise metadata: {error}"))
 }
 
+/// Whether two paths name the same file, resolving symlinks and `..`.
+///
+/// The output usually does not exist yet, so it cannot be canonicalised
+/// directly; its directory can be, which is enough to compare against a file
+/// that does exist.
+fn same_file(output: &Path, existing: &Path) -> bool {
+    let Ok(existing) = existing.canonicalize() else {
+        return false;
+    };
+    let resolved = match (output.parent(), output.file_name()) {
+        (Some(parent), Some(name)) => parent
+            .canonicalize()
+            .map(|dir| dir.join(name))
+            .unwrap_or_else(|_| output.to_path_buf()),
+        _ => output.to_path_buf(),
+    };
+    resolved == existing
+}
+
 /// The audio member's filename, taken from the source recording.
 ///
 /// The extension is kept because the audio is stored exactly as it arrived — there is
@@ -158,6 +177,17 @@ pub fn write_tsf(
     meta_draft: serde_json::Value,
     words: Option<&str>,
 ) -> Result<CreateTsfResult, String> {
+    // Writing the container over the recording it is packaging would leave the
+    // user without their recording where they left it. The bytes do survive
+    // inside the archive, but a file silently ceasing to be what it was is not
+    // something to do quietly.
+    if same_file(output_path, audio_path) {
+        return Err(
+            "The container would be written over the recording it is packaging. Choose a different name."
+                .to_string(),
+        );
+    }
+
     let facts = probe_audio(audio_path)?;
     let audio_member = audio_member_name(audio_path);
     let meta = complete_meta(meta_draft, &facts, &audio_member)?;
@@ -913,5 +943,31 @@ mod tests {
 
         let error = read_tsf(&path).unwrap_err();
         assert!(error.contains("not valid UTF-8"), "got: {error}");
+    }
+
+    #[test]
+    fn refuses_to_write_the_container_over_its_own_recording() {
+        let dir = temp_dir("selfdestruct");
+        let audio = dir.join("recording.m4a");
+        std::fs::write(&audio, wav_bytes(2)).unwrap();
+
+        let error = write_tsf(&audio, "text", &audio, draft(), None).unwrap_err();
+        assert!(error.contains("written over the recording"), "got: {error}");
+        assert!(
+            std::fs::read(&audio).unwrap().starts_with(b"RIFF"),
+            "the recording must be untouched"
+        );
+    }
+
+    #[test]
+    fn recognises_the_same_file_through_a_relative_path() {
+        let dir = temp_dir("samefile");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+        let roundabout = dir.join("sub").join("..").join("rec.wav");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+
+        assert!(same_file(&roundabout, &audio));
+        assert!(!same_file(&dir.join("other.tsf"), &audio));
     }
 }

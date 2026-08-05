@@ -134,9 +134,6 @@ const splitBlocks = (source: string): string[][] =>
     .map((block) => block.split("\n").filter((line) => line.trim().length > 0))
     .filter((lines) => lines.length > 0);
 
-const isMetadataBlock = (lines: string[]): boolean =>
-  /^(WEBVTT|NOTE|STYLE|REGION)\b/.test(lines[0].trim());
-
 /**
  * Every cue in a VTT or SRT document, in file order.
  *
@@ -148,10 +145,16 @@ export const parseSubtitles = (source: string): Cue[] => {
   const cues: Cue[] = [];
 
   for (const lines of splitBlocks(source)) {
-    if (isMetadataBlock(lines)) {
-      continue;
-    }
-    // An optional numeric or textual identifier may precede the timing line.
+    // A block is a cue if it contains a timing line, wherever that line sits.
+    // Deciding instead from the block's first word — WEBVTT, NOTE, STYLE,
+    // REGION — and skipping the whole block loses any cue that follows one of
+    // those without the blank line the spec asks for: the first cue of a file
+    // whose header runs straight into it would vanish, silently. Anything
+    // before the timing line is a header, a note, or the cue's own optional
+    // identifier, and none of them are needed.
+    //
+    // Safe because the spec forbids `-->` inside note text for exactly this
+    // reason, so a line containing one is a cue timing line and nothing else.
     const timingIndex = lines.findIndex((line) => TIMING_LINE.test(line));
     if (timingIndex === -1) {
       continue;

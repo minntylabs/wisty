@@ -50,6 +50,30 @@ Only cue.
     expect(cues[0].text).toBe("Only cue.");
   });
 
+  it("keeps the first cue when the header runs straight into it", () => {
+    // Missing the blank line after WEBVTT is a common malformation, and losing
+    // a cue to it would be invisible — the transcript would simply start one
+    // sentence late.
+    const cues = parseSubtitles(
+      "WEBVTT\n00:00:01.000 --> 00:00:02.000\nFirst cue.\n\n00:00:03.000 --> 00:00:04.000\nSecond.\n"
+    );
+    expect(cues.map((cue) => cue.text)).toEqual(["First cue.", "Second."]);
+  });
+
+  it("keeps a cue that follows a NOTE without a blank line", () => {
+    const cues = parseSubtitles(
+      "WEBVTT\n\nNOTE asr_model=large-v3\n00:00:01.000 --> 00:00:02.000\nAfter the note.\n"
+    );
+    expect(cues.map((cue) => cue.text)).toEqual(["After the note."]);
+  });
+
+  it("still ignores a note or style block that holds no cue", () => {
+    const cues = parseSubtitles(
+      "WEBVTT\n\nNOTE just a note\n\nSTYLE\n::cue { color: white }\n\n00:00:01.000 --> 00:00:02.000\nOnly cue.\n"
+    );
+    expect(cues.map((cue) => cue.text)).toEqual(["Only cue."]);
+  });
+
   it("accepts a cue identifier before the timing line", () => {
     const cues = parseSubtitles(`WEBVTT
 

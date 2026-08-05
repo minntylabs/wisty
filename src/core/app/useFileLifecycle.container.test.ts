@@ -1,0 +1,223 @@
+/**
+ * Opening and saving transcript containers.
+ *
+ * The save guard is the reason this file exists. A container holds the
+ * recording alongside the text, and the ordinary save path streams the
+ * editor's text to the document's path — which for a container would replace
+ * the archive with plain text and lose the audio. Nothing about that failure
+ * would be visible until someone went looking for the recording.
+ */
+
+import { describe, expect, it, vi } from "vitest";
+import { useFileLifecycle } from "./useFileLifecycle";
+import { createDocumentStore } from "../document/documentStore";
+
+const CONTAINER = "/archive/mum_11.tsf";
+const TRANSCRIPT = "ALICE: ⟦734.12–736.80⟧So we walked down.";
+
+const createHarness = (overrides: { containerText?: string } = {}) => {
+  const document = createDocumentStore();
+  const editorText = { value: "" };
+  const showError = vi.fn(async () => {});
+  const openContainer = vi.fn(async () => ({
+    transcript: overrides.containerText ?? TRANSCRIPT,
+    meta: { tsf_version: 1, audio: { file: "audio.m4a", duration: 1709.61 } },
+    audioBytes: 10_780_099
+  }));
+  const closeContainer = vi.fn(async () => {});
+  const startSaveFileStream = vi.fn(async (filePath: string) => ({ streamId: "s", filePath }));
+  const streamReadTextFile = vi.fn(async function* () {
+    yield { text: "plain text", bytesReadTotal: 10, fileSizeBytes: 10 };
+  });
+
+  const deps = {
+    editor: {
+      focus: () => {},
+      getText: () => editorText.value,
+      getDocLength: () => editorText.value.length,
+      getTextSlice: (from: number, to: number) => editorText.value.slice(from, to),
+      setText: (text: string) => {
+        editorText.value = text;
+      },
+      append: (text: string) => {
+        editorText.value += text;
+      },
+      reset: () => {
+        editorText.value = "";
+      },
+      setLargeLineSafeMode: () => {},
+      getRevision: () => 1
+    },
+    document,
+    settings: {
+      state: { lastDirectory: "", recentFiles: [] },
+      actions: {
+        setLastDirectory: async () => {},
+        addRecentFile: async () => {},
+        removeRecentFile: async () => {}
+      }
+    },
+    fileDialogs: {
+      openTextFilePath: async () => ({ kind: "opened" as const, filePath: CONTAINER }),
+      saveTextFilePathAs: async () => ({ kind: "saved" as const, filePath: "/tmp/other.txt" })
+    },
+    fileIo: {
+      getFileSize: async () => 10,
+      fileExists: async () => true,
+      readTextFile: async () => "plain text",
+      streamReadTextFile,
+      saveTextFile: async () => {},
+      getDirectoryFromFilePath: () => "/archive",
+      isContainerPath: (filePath: string) => filePath.toLowerCase().endsWith(".tsf"),
+      openContainer,
+      closeContainer
+    },
+    launchFileStream: {
+      startLaunchFileStream: async (filePath: string) => ({ streamId: "l", filePath, fileSizeBytes: 10 }),
+      readLaunchFileChunk: async () => ({ kind: "eof" as const, bytesReadTotal: 0, fileSizeBytes: 0 }),
+      cancelLaunchFileStream: async () => {},
+      closeLaunchFileStream: async () => {}
+    },
+    saveFileStream: {
+      startSaveFileStream,
+      writeSaveFileChunk: async () => ({ bytesWrittenTotal: 1 }),
+      finishSaveFileStream: async () => ({ bytesWrittenTotal: 1 }),
+      cancelSaveFileStream: async () => {}
+    },
+    fontPicker: { chooseEditorFont: async () => null },
+    rememberedPosition: {
+      capture: async () => {},
+      restore: () => {},
+      migrate: async () => {}
+    },
+    errors: { showError },
+    confirmOpenLargeFile: async () => true,
+    showFileTooLarge: async () => {}
+  } as unknown as Parameters<typeof useFileLifecycle>[0];
+
+  return {
+    lifecycle: useFileLifecycle(deps),
+    document,
+    editorText,
+    showError,
+    openContainer,
+    closeContainer,
+    startSaveFileStream,
+    streamReadTextFile
+  };
+};
+
+describe("opening a container", () => {
+  it("loads its transcript into the editor", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    expect(h.editorText.value).toBe(TRANSCRIPT);
+  });
+
+  it("marks the document as a container, not as text", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    expect(h.document.state.kind).toBe("container");
+    expect(h.document.state.filePath).toBe(CONTAINER);
+  });
+
+  it("never reads it through the text stream", async () => {
+    // The streaming reader decodes as UTF-8, which a zip is not.
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    expect(h.streamReadTextFile).not.toHaveBeenCalled();
+    expect(h.openContainer).toHaveBeenCalledWith(CONTAINER);
+  });
+
+  it("takes the same path when opened from a launch argument", async () => {
+    const h = createHarness();
+    await h.lifecycle.openLaunchFileAtPath(CONTAINER, 10_800_000);
+    expect(h.document.state.kind).toBe("container");
+    expect(h.editorText.value).toBe(TRANSCRIPT);
+  });
+
+  it("takes the same path through the open dialog", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFile();
+    expect(h.document.state.kind).toBe("container");
+  });
+});
+
+describe("releasing the recording", () => {
+  it("releases the previous container before opening a text file", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    h.closeContainer.mockClear();
+
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    expect(h.closeContainer).toHaveBeenCalled();
+    expect(h.document.state.kind).toBe("text");
+  });
+
+  it("releases it when a new empty document is started", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    h.closeContainer.mockClear();
+
+    await h.lifecycle.openFileFromTextAtPath("/tmp/other.txt", "text");
+    expect(h.closeContainer).toHaveBeenCalled();
+  });
+
+  it("opens the file even if releasing the previous one fails", async () => {
+    const h = createHarness();
+    h.closeContainer.mockRejectedValueOnce(new Error("lock poisoned"));
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    expect(h.editorText.value).toBe(TRANSCRIPT);
+  });
+});
+
+describe("saving a container is refused, not attempted", () => {
+  it("does not write the document text over the archive", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    await h.lifecycle.saveFile();
+
+    expect(h.startSaveFileStream).not.toHaveBeenCalled();
+    expect(h.showError).toHaveBeenCalled();
+  });
+
+  it("refuses Save As too", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    await h.lifecycle.saveFileAs();
+
+    expect(h.startSaveFileStream).not.toHaveBeenCalled();
+    expect(h.showError).toHaveBeenCalled();
+  });
+
+  it("says why, naming the file", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    await h.lifecycle.saveFile();
+
+    const call = h.showError.mock.calls[0] as unknown as [string, unknown];
+    expect(JSON.stringify(call[1])).toContain("mum_11.tsf");
+  });
+
+  it("leaves the document dirty rather than pretending it saved", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    h.document.setRevision(9);
+    expect(h.document.state.isDirty).toBe(true);
+
+    await h.lifecycle.saveFile();
+    expect(h.document.state.isDirty).toBe(true);
+  });
+
+  it("still saves an ordinary text document", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileFromTextAtPath("/tmp/notes.txt", "hello");
+
+    await h.lifecycle.saveFile();
+
+    expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/notes.txt");
+    expect(h.showError).not.toHaveBeenCalled();
+  });
+});

@@ -37,6 +37,13 @@
       },
       {
         "ext": [
+          "tsf"
+        ],
+        "mimeType": "application/zip",
+        "description": "Wisty transcript with audio"
+      },
+      {
+        "ext": [
           "md"
         ],
         "mimeType": "text/markdown",

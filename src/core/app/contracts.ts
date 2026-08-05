@@ -1,5 +1,6 @@
 import type { Accessor } from "solid-js";
 import type { FontStyle, FormatViewMode } from "../settings/settingsTypes";
+import type { DocumentKind } from "../document/documentStore";
 
 export type AsyncAction = () => Promise<void>;
 
@@ -76,6 +77,9 @@ export type FileIoPort = {
   ) => AsyncGenerator<TextStreamChunk, void, void>;
   saveTextFile: (filePath: string, text: string) => Promise<void>;
   getDirectoryFromFilePath: (filePath: string) => string;
+  isContainerPath: (filePath: string) => boolean;
+  openContainer: (filePath: string) => Promise<OpenContainerResult>;
+  closeContainer: () => Promise<void>;
 };
 
 export type AppendTextOptions = {
@@ -120,12 +124,19 @@ export type DocumentPort = {
   state: {
     filePath: string;
     fileName: string;
+    kind: DocumentKind;
     isDirty: boolean;
   };
   setRevision: (revision: number) => void;
   markCleanAt: (revision: number) => void;
-  setFilePath: (filePath: string) => void;
+  setFilePath: (filePath: string, kind?: DocumentKind) => void;
   setUntitled: () => void;
+};
+
+export type OpenContainerResult = {
+  transcript: string;
+  meta: Record<string, unknown>;
+  audioBytes: number;
 };
 
 export type FontSelection = {

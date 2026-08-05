@@ -21,9 +21,12 @@ import { useErrorModalQueue } from "./core/app/useErrorModalQueue";
 import { createDocumentStore } from "./core/document/documentStore";
 import { createEditorAdapter, type CursorPositionPayload } from "./core/editor/editorAdapter";
 import {
+  closeContainer,
   fileExists,
   getDirectoryFromFilePath,
   getFileSize,
+  isContainerPath,
+  openContainer,
   openTextFile,
   openTextFilePath,
   readTextFileAtPath,
@@ -163,7 +166,10 @@ function App() {
       readTextFile: readTextFileAtPath,
       streamReadTextFile: streamReadTextFileAtPath,
       saveTextFile,
-      getDirectoryFromFilePath
+      getDirectoryFromFilePath,
+      isContainerPath,
+      openContainer,
+      closeContainer
     },
     launchFileStream: {
       startLaunchFileStream,

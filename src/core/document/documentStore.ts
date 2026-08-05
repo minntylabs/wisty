@@ -1,8 +1,20 @@
 import { createStore } from "solid-js/store";
 
+/**
+ * What the open document actually is on disk.
+ *
+ * A container (.tsf) holds the transcript alongside its recording, so it cannot
+ * be written by streaming the editor's text at its path — that would replace
+ * the archive with plain text and lose the audio. Saving, Save As and the
+ * marker extension all need to know which they are dealing with, and deriving
+ * it from the extension at each of those places is how they come to disagree.
+ */
+export type DocumentKind = "text" | "container";
+
 export type DocumentMetaState = {
   filePath: string;
   fileName: string;
+  kind: DocumentKind;
   isDirty: boolean;
   currentRevision: number;
   baselineRevision: number;
@@ -23,6 +35,7 @@ export const createDocumentStore = () => {
   const [state, setState] = createStore<DocumentMetaState>({
     filePath: "",
     fileName: UNTITLED,
+    kind: "text",
     isDirty: false,
     currentRevision: 0,
     baselineRevision: 0
@@ -43,15 +56,22 @@ export const createDocumentStore = () => {
     });
   };
 
-  const setFilePath = (filePath: string) => {
+  /**
+   * `kind` defaults to "text", so every existing caller keeps marking the
+   * document a plain text file — which is what saving to a path through the
+   * text stream means. Only opening a container passes anything else, and it
+   * has to say so explicitly.
+   */
+  const setFilePath = (filePath: string, kind: DocumentKind = "text") => {
     setState({
       filePath,
-      fileName: fileNameFromPath(filePath)
+      fileName: fileNameFromPath(filePath),
+      kind
     });
   };
 
   const setUntitled = () => {
-    setState({ filePath: "", fileName: UNTITLED });
+    setState({ filePath: "", fileName: UNTITLED, kind: "text" });
   };
 
   return {

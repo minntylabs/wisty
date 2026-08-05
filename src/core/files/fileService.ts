@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { open as openFile, readTextFile, stat, writeTextFile } from "@tauri-apps/plugin-fs";
 
@@ -180,3 +181,45 @@ export const fileExists = async (filePath: string): Promise<boolean> => {
 };
 
 export const getDirectoryFromFilePath = (filePath: string): string => directoryFromPath(filePath);
+
+/** The extension a transcript container carries. */
+export const CONTAINER_EXTENSION = "tsf";
+
+/**
+ * Whether a path names a transcript container.
+ *
+ * By extension, because this decides which way to *read* the file, and the
+ * alternative is opening every file twice. The Rust side checks the actual zip
+ * signature before trusting the contents, so a mislabelled file is caught
+ * there with a message that says so.
+ */
+export const isContainerPath = (filePath: string): boolean =>
+  filePath.toLowerCase().endsWith(`.${CONTAINER_EXTENSION}`);
+
+export type OpenContainerResult = {
+  /** The document text: the transcript, with its time markers. */
+  transcript: string;
+  meta: Record<string, unknown>;
+  audioBytes: number;
+};
+
+/**
+ * Opens a container, returning its transcript and metadata.
+ *
+ * The recording stays in Rust, held for the document's lifetime. It is never
+ * sent across the bridge: it is tens of megabytes, and nothing on this side
+ * has any use for the bytes.
+ */
+export const openContainer = async (filePath: string): Promise<OpenContainerResult> => {
+  const result = await invoke<{
+    transcript: string;
+    meta: Record<string, unknown>;
+    audio_bytes: number;
+  }>("open_tsf", { path: filePath });
+  return { transcript: result.transcript, meta: result.meta, audioBytes: result.audio_bytes };
+};
+
+/** Releases the open container, freeing the audio Rust was holding. */
+export const closeContainer = async (): Promise<void> => {
+  await invoke("close_tsf");
+};

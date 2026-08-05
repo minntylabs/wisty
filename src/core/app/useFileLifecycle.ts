@@ -465,11 +465,51 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     deps.editor.focus();
   };
 
+  /**
+   * Releases any container Rust is holding for the previous document.
+   *
+   * Called before loading anything else, so the recording does not stay
+   * resident once the user has moved on. A failure here is deliberately
+   * swallowed: it must never stop the file they asked for from opening.
+   */
+  const releaseContainer = async () => {
+    try {
+      await deps.fileIo.closeContainer();
+    } catch {
+      // Nothing the user can act on, and nothing that should block the open.
+    }
+  };
+
+  /**
+   * Opens a transcript container.
+   *
+   * Deliberately separate from the text path rather than generalised into it:
+   * the two have nothing in common but a filename. In particular the size
+   * probe and the streaming reader both read the file as text, which a zip is
+   * not, so this must branch before either of them.
+   */
+  const openContainerAtPath = async (filePath: string) => {
+    await releaseContainer();
+    const container = await deps.fileIo.openContainer(filePath);
+    applySafeMode(false);
+    loadEditorTextAsClean(container.transcript);
+    deps.document.setFilePath(filePath, "container");
+    await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
+    await deps.settings.actions.addRecentFile(filePath);
+    deps.rememberedPosition.restore(filePath);
+    deps.editor.focus();
+  };
+
   const openFile = async () => {
     await runWithErrorMessage(async () => {
       const selected = await deps.fileDialogs.openTextFilePath(deps.settings.state.lastDirectory);
       if (selected.kind === "cancelled") {
         deps.editor.focus();
+        return;
+      }
+
+      if (deps.fileIo.isContainerPath(selected.filePath)) {
+        await openContainerAtPath(selected.filePath);
         return;
       }
 
@@ -500,6 +540,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   const openFileAtPath = async (filePath: string) => {
     await runWithErrorMessage(async () => {
       try {
+        if (deps.fileIo.isContainerPath(filePath)) {
+          await openContainerAtPath(filePath);
+          return;
+        }
+        await releaseContainer();
         await loadEditorFileAsCleanFromFsStream(filePath);
         deps.document.setFilePath(filePath);
         await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
@@ -517,6 +562,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
   const openLaunchFileAtPath = async (filePath: string, fileSizeBytes?: number) => {
     await runWithErrorMessage(async () => {
+      if (deps.fileIo.isContainerPath(filePath)) {
+        await openContainerAtPath(filePath);
+        return;
+      }
+      await releaseContainer();
       await loadEditorFileAsCleanFromLaunchStream(filePath, fileSizeBytes);
       deps.document.setFilePath(filePath);
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
@@ -527,6 +577,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   const openFileFromTextAtPath = async (filePath: string, text: string) => {
+    await releaseContainer();
     const useLargeLineSafeMode = text.length >= SAFE_MODE_PROBE_BYTES && !text.includes("\n");
     applySafeMode(useLargeLineSafeMode);
     loadEditorTextAsClean(text);
@@ -612,7 +663,40 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     }
   };
 
+  /**
+   * Saving a container is not implemented yet, and must not fall through to the
+   * text path.
+   *
+   * That path streams the editor's text to the document's path, which for a
+   * container would replace the archive — transcript, recording and metadata —
+   * with plain text. The recording would be gone. Until saving repacks the
+   * container properly, refusing is the only safe answer, and it has to be
+   * refused rather than merely hidden from the menu: Ctrl+S does not consult
+   * the menu.
+   */
+  const refuseContainerSave = async (): Promise<boolean> => {
+    if (deps.document.state.kind !== "container") {
+      return false;
+    }
+    await deps.errors.showError(
+      "Unable to save file",
+      toAppError(
+        new Error(
+          `${deps.document.state.fileName} holds its recording alongside the text, and saving it is not supported yet. Saving as plain text would discard the audio, so it has been refused.`
+        ),
+        "SAVE_FAILED",
+        "Unable to save file",
+        { context: "Unable to save file" }
+      )
+    );
+    deps.editor.focus();
+    return true;
+  };
+
   const saveFileAs = async () => {
+    if (await refuseContainerSave()) {
+      return;
+    }
     await runWithErrorMessage(async () => {
       const result = await deps.fileDialogs.saveTextFilePathAs(deps.settings.state.lastDirectory);
       if (result.kind === "cancelled") {
@@ -632,6 +716,9 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   const saveFile = async () => {
+    if (await refuseContainerSave()) {
+      return;
+    }
     if (!deps.document.state.filePath) {
       await saveFileAs();
       return;

@@ -277,6 +277,11 @@ pub struct OpenTsf {
     /// Decoded from on every play (step 6) and written back verbatim on save.
     pub audio: Vec<u8>,
     /// The audio member's name, so a repack writes it under the same name.
+    ///
+    /// Comes from the container's own meta.json, so it is untrusted input. It
+    /// is only ever used as a name *inside* a zip. If a later change uses it as
+    /// a path on disk, it must be validated first — "../../etc/passwd" is a
+    /// legal string here.
     pub audio_member: String,
     pub meta: serde_json::Value,
 }
@@ -306,16 +311,43 @@ pub struct OpenTsfResult {
     pub audio_bytes: usize,
 }
 
-/// Reads one member out of an archive without extracting the rest.
-fn read_member(archive: &Path, name: &str) -> Result<Vec<u8>, String> {
-    let file = File::open(archive)
-        .map_err(|error| format!("Cannot open {}: {error}", archive.display()))?;
-    let mut zip = ZipArchive::new(BufReader::new(file))
-        .map_err(|error| format!("Not a readable .tsf container: {error}"))?;
+/// Largest member this will read into memory.
+///
+/// The audio is held in memory for the document's lifetime, so a container
+/// beyond this could not be worked with anyway. Generous — a 28-minute
+/// recording is about 10MB, so this allows for many hours — but bounded, so a
+/// corrupt or hostile file fails with a message rather than by exhausting
+/// memory.
+const MAX_MEMBER_BYTES: u64 = 512 * 1024 * 1024;
+
+/// How much to reserve up front for a member.
+///
+/// A zip's declared uncompressed size comes from its own header, so it is a
+/// claim rather than a fact: a corrupt or crafted file can assert an enormous
+/// one. Reserving it directly would attempt that allocation and abort the
+/// process. The claim is only ever used as a hint, capped at something a real
+/// transcript could reach, and `read_to_end` grows the buffer as the data
+/// actually arrives.
+fn reserve_for(declared: u64) -> usize {
+    const HINT_LIMIT: u64 = 32 * 1024 * 1024;
+    declared.min(HINT_LIMIT) as usize
+}
+
+/// Reads one member from an already-open archive.
+fn read_member_from<R: std::io::Read + std::io::Seek>(
+    zip: &mut ZipArchive<R>,
+    name: &str,
+) -> Result<Vec<u8>, String> {
     let mut member = zip
         .by_name(name)
         .map_err(|_| format!("The container has no {name}"))?;
-    let mut contents = Vec::with_capacity(member.size() as usize);
+    if member.size() > MAX_MEMBER_BYTES {
+        return Err(format!(
+            "{name} is {} bytes, larger than this can open ({MAX_MEMBER_BYTES})",
+            member.size()
+        ));
+    }
+    let mut contents = Vec::with_capacity(reserve_for(member.size()));
     member
         .read_to_end(&mut contents)
         .map_err(|error| format!("Cannot read {name}: {error}"))?;
@@ -350,8 +382,17 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
         ));
     }
 
-    let meta: serde_json::Value = serde_json::from_slice(&read_member(archive, META_MEMBER)?)
-        .map_err(|error| format!("The container's meta.json is not valid JSON: {error}"))?;
+    // Opened once and read through: three separate opens would parse the
+    // central directory three times, and could take the transcript from one
+    // version of the file and the audio from another if it changed underneath.
+    let file = File::open(archive)
+        .map_err(|error| format!("Cannot open {}: {error}", archive.display()))?;
+    let mut zip = ZipArchive::new(BufReader::new(file))
+        .map_err(|error| format!("Not a readable .tsf container: {error}"))?;
+
+    let meta: serde_json::Value =
+        serde_json::from_slice(&read_member_from(&mut zip, META_MEMBER)?)
+            .map_err(|error| format!("The container's meta.json is not valid JSON: {error}"))?;
 
     match meta.get("tsf_version").and_then(serde_json::Value::as_u64) {
         Some(version) if version > SUPPORTED_TSF_VERSION => {
@@ -370,12 +411,14 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
         .ok_or_else(|| "The container's meta.json does not name its audio file".to_string())?
         .to_string();
 
-    let transcript = String::from_utf8(read_member(archive, TRANSCRIPT_MEMBER)?)
+    let transcript = String::from_utf8(read_member_from(&mut zip, TRANSCRIPT_MEMBER)?)
         .map_err(|_| format!("{TRANSCRIPT_MEMBER} is not valid UTF-8"))?;
-    let audio = read_member(archive, &audio_member)?;
+    let audio = read_member_from(&mut zip, &audio_member)?;
 
     Ok(OpenTsf {
-        path: archive.to_path_buf(),
+        // Absolute, so saving back later cannot be affected by the working
+        // directory having changed since the file was opened.
+        path: archive.canonicalize().unwrap_or_else(|_| archive.to_path_buf()),
         transcript,
         audio,
         audio_member,
@@ -816,5 +859,59 @@ mod tests {
         assert!(looks_like_container(&zip));
         assert!(!looks_like_container(&text));
         assert!(!looks_like_container(&dir.join("absent")));
+    }
+
+    #[test]
+    fn a_declared_size_never_drives_the_allocation_directly() {
+        // The number comes from the file's own header, so it is a claim. An
+        // absurd one must not become an allocation request.
+        assert_eq!(reserve_for(0), 0);
+        assert_eq!(reserve_for(1024), 1024);
+        assert_eq!(reserve_for(u64::MAX), 32 * 1024 * 1024);
+        assert_eq!(reserve_for(u64::MAX) as u64, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn the_path_recorded_on_open_is_absolute() {
+        let dir = temp_dir("relative");
+        let path = written(&dir, "text", None);
+        let container = read_tsf(&path).expect("read");
+        assert!(container.path.is_absolute());
+    }
+
+    #[test]
+    fn a_truncated_container_fails_with_a_message_not_a_panic() {
+        let dir = temp_dir("truncated");
+        let path = written(&dir, "some transcript text", None);
+        let whole = std::fs::read(&path).unwrap();
+        // Keep the zip signature so it gets past the cheap check, then cut it
+        // short — an interrupted copy looks exactly like this.
+        std::fs::write(&path, &whole[..whole.len() / 2]).unwrap();
+
+        let error = read_tsf(&path).unwrap_err();
+        assert!(!error.is_empty());
+    }
+
+    #[test]
+    fn a_container_whose_transcript_is_not_utf8_is_reported_as_such() {
+        let dir = temp_dir("notutf8");
+        let path = dir.join("bad.tsf");
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zip.start_file(META_MEMBER, options).unwrap();
+        zip.write_all(
+            serde_json::json!({ "tsf_version": 1, "audio": { "file": "a.wav" } })
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        zip.start_file(TRANSCRIPT_MEMBER, options).unwrap();
+        zip.write_all(&[0xff, 0xfe, 0xfd]).unwrap();
+        zip.start_file("a.wav", options).unwrap();
+        zip.write_all(b"x").unwrap();
+        zip.finish().unwrap();
+
+        let error = read_tsf(&path).unwrap_err();
+        assert!(error.contains("not valid UTF-8"), "got: {error}");
     }
 }

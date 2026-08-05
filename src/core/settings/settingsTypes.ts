@@ -38,6 +38,15 @@ export type AppSettings = {
   textWrapEnabled: boolean;
   activeLineHighlightEnabled: boolean;
   formatViewMode: FormatViewMode;
+  /**
+   * Whether time markers show as speaker icons in transcript containers.
+   *
+   * Only affects .tsf documents, which are the only ones that have markers.
+   * A preference rather than a mode: a transcript being read wants them out
+   * of the way, one being corrected wants them to hand, and that changes
+   * several times in a sitting.
+   */
+  markersVisible: boolean;
   statusBarEnabled: boolean;
   spellCheckEnabled: boolean;
   spellCheckLanguage: string;
@@ -60,6 +69,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   textWrapEnabled: true,
   activeLineHighlightEnabled: false,
   formatViewMode: "plain",
+  markersVisible: true,
   statusBarEnabled: true,
   spellCheckEnabled: false,
   spellCheckLanguage: "en_US",

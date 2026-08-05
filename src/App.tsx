@@ -318,6 +318,7 @@ function App() {
       enabled: transcriptModeEnabled,
       setEnabled: setTranscriptModeEnabled
     },
+    isContainerDocument: () => documentStore.state.kind === "container",
     rememberedPosition,
     spell: {
       dictionaries: spellDictionaries,

@@ -43,11 +43,14 @@ type BuildCommandsDeps = {
     toggleItalic: () => void;
     applyHeadingLevel: (level: number) => void;
     setTranscriptMode: (enabled: boolean) => void;
+    setMarkersVisible: (visible: boolean) => void;
   };
   transcriptMode: {
     enabled: Accessor<boolean>;
     setEnabled: (enabled: boolean) => void;
   };
+  /** Whether the open document is a transcript container, which alone has markers. */
+  isContainerDocument: Accessor<boolean>;
   rememberedPosition: {
     canRemember: Accessor<boolean>;
     isRemembered: Accessor<boolean>;
@@ -59,6 +62,7 @@ type BuildCommandsDeps = {
       textWrapEnabled: boolean;
       activeLineHighlightEnabled: boolean;
       formatViewMode: FormatViewMode;
+      markersVisible: boolean;
       statusBarEnabled: boolean;
       spellCheckEnabled: boolean;
       spellCheckLanguage: string;
@@ -69,6 +73,7 @@ type BuildCommandsDeps = {
       setTextWrapEnabled: (enabled: boolean) => Promise<void>;
       setActiveLineHighlightEnabled: (enabled: boolean) => Promise<void>;
       setStatusBarEnabled: (enabled: boolean) => Promise<void>;
+      setMarkersVisible: (visible: boolean) => Promise<void>;
       setSpellCheckEnabled: (enabled: boolean) => Promise<void>;
       setSpellCheckLanguage: (language: string) => Promise<void>;
     };
@@ -299,6 +304,20 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
       checked: () => deps.settings.state.formatViewMode === "formatted"
     },
     {
+      id: "view.markers",
+      label: "Time Markers",
+      refocusEditorOnMenuSelect: true,
+      // Only transcript containers carry markers, so the item is inert for
+      // anything else rather than silently doing nothing.
+      enabled: () => deps.isContainerDocument(),
+      run: async () => {
+        const visible = !deps.settings.state.markersVisible;
+        await deps.settings.actions.setMarkersVisible(visible);
+        deps.editor.setMarkersVisible(visible);
+      },
+      checked: () => deps.isContainerDocument() && deps.settings.state.markersVisible
+    },
+    {
       id: "view.activeLineHighlight",
       label: "Highlight Current Line",
       refocusEditorOnMenuSelect: true,
@@ -426,6 +445,7 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
         { type: "separator" },
         { type: "command", commandId: "view.wrap" },
         { type: "command", commandId: "view.formatMode" },
+        { type: "command", commandId: "view.markers" },
         { type: "command", commandId: "view.activeLineHighlight" },
         { type: "command", commandId: "view.statusBar" },
         { type: "command", commandId: "view.rememberPosition" },

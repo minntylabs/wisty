@@ -15,6 +15,7 @@ import { createSearchPanelAdapter } from "./searchPanelAdapter";
 import { createSpellService } from "../spellcheck/spellService";
 import { createSpellcheckExtension, requestSpellRescan } from "../spellcheck/spellcheckExtension";
 import { createTranscriptExtension } from "./transcript/transcriptExtension";
+import { createMarkers, setMarkersVisibleEffect } from "./markers/markerExtension";
 
 type DocChangedPayload = {
   revision: number;
@@ -72,13 +73,20 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   let spellDictionaryDirty = false;
 
   const transcriptExtension = createTranscriptExtension();
+  // Markers are installed per document rather than always, because tracking
+  // them costs work proportional to how many there are, and an ordinary text
+  // file has none to find. Measured at ~6ms per keystroke on a 10MB document,
+  // which is the difference between typing feeling fine and feeling broken.
+  const markers = createMarkers(() => options.getSettings().markersVisible);
   let transcriptEnabled = false;
+  let markersEnabled = false;
 
   const wrapCompartment = new Compartment();
   const activeLineCompartment = new Compartment();
   const styleCompartment = new Compartment();
   const spellCompartment = new Compartment();
   const transcriptCompartment = new Compartment();
+  const markerCompartment = new Compartment();
 
   const formatting = createFormatting(() => options.getSettings().formatViewMode);
 
@@ -257,6 +265,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
         activeLineCompartment.of(settings.activeLineHighlightEnabled ? highlightActiveLine() : []),
         spellCompartment.of(spellEnabled ? spellExtension : []),
         transcriptCompartment.of(transcriptEnabled ? transcriptExtension : []),
+        markerCompartment.of(markersEnabled ? markers.extension : []),
         styleCompartment.of(createStyleExtension()),
         formatting.extension,
         EditorView.updateListener.of((update) => {
@@ -561,6 +570,33 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
 
   const isTranscriptModeEnabled = () => transcriptEnabled;
 
+  /**
+   * Installs or removes marker handling, following the document rather than a
+   * user preference: only a transcript container has markers, and a document
+   * with none should not pay to look for them.
+   */
+  const setMarkersEnabled = (enabled: boolean) => {
+    if (markersEnabled === enabled) {
+      return;
+    }
+    markersEnabled = enabled;
+    editorView?.dispatch({
+      effects: markerCompartment.reconfigure(enabled ? markers.extension : [])
+    });
+  };
+
+  /**
+   * Shows or hides the marker icons. Separate from installing the extension:
+   * hiding is a view preference and costs one class on the content element,
+   * where uninstalling would stop the caret and edit protection working.
+   */
+  const setMarkersVisible = (visible: boolean) => {
+    if (!markersEnabled) {
+      return;
+    }
+    editorView?.dispatch({ effects: setMarkersVisibleEffect.of(visible) });
+  };
+
   const setLargeLineSafeMode = (enabled: boolean) => {
     if (largeLineSafeModeEnabled === enabled) {
       return;
@@ -701,6 +737,8 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     setViewPosition,
     setTranscriptMode,
     isTranscriptModeEnabled,
+    setMarkersEnabled,
+    setMarkersVisible,
     listSpellDictionaries,
     listAddedWords,
     removeAddedWord,

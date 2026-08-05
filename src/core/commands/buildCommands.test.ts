@@ -7,12 +7,15 @@ const createDeps = (overrides: {
   activeLineHighlightEnabled?: boolean;
   canRememberPosition?: boolean;
   isPositionRemembered?: boolean;
+  markersVisible?: boolean;
+  isContainerDocument?: boolean;
 } = {}) => {
   const settingsState = {
     themeMode: "light" as const,
     textWrapEnabled: true,
     activeLineHighlightEnabled: overrides.activeLineHighlightEnabled ?? false,
     formatViewMode: overrides.formatViewMode ?? "plain",
+    markersVisible: overrides.markersVisible ?? true,
     statusBarEnabled: true,
     spellCheckEnabled: false,
     spellCheckLanguage: "en_US",
@@ -50,11 +53,13 @@ const createDeps = (overrides: {
       openOrFocusReplacePanel: vi.fn(() => true),
       setFormatMode: vi.fn(),
       getFormatMode: vi.fn(() => settingsState.formatViewMode),
+      setMarkersVisible: vi.fn(),
       toggleBold: vi.fn(),
       toggleItalic: vi.fn(),
       applyHeadingLevel: vi.fn(),
       setTranscriptMode: vi.fn()
     },
+    isContainerDocument: () => overrides.isContainerDocument ?? false,
     transcriptMode: {
       enabled: () => transcriptModeEnabled,
       setEnabled: vi.fn((enabled: boolean) => {
@@ -77,6 +82,9 @@ const createDeps = (overrides: {
           settingsState.activeLineHighlightEnabled = enabled;
         }),
         setStatusBarEnabled: vi.fn(async () => {}),
+        setMarkersVisible: vi.fn(async (visible: boolean) => {
+          settingsState.markersVisible = visible;
+        }),
         setSpellCheckEnabled: vi.fn(async () => {}),
         setSpellCheckLanguage: vi.fn(async () => {})
       }

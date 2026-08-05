@@ -12,7 +12,7 @@ import type { LaunchFileStreamChunkResult } from "../window/launchArgService";
 import { toAppError, type AppErrorCode } from "../errors/appError";
 
 type UseFileLifecycleDeps = {
-  editor: Pick<EditorPort, "focus" | "getText" | "getDocLength" | "getTextSlice" | "setText" | "append" | "reset" | "setLargeLineSafeMode" | "getRevision">;
+  editor: Pick<EditorPort, "focus" | "getText" | "getDocLength" | "getTextSlice" | "setText" | "append" | "reset" | "setLargeLineSafeMode" | "getRevision" | "setMarkersEnabled">;
   document: Pick<DocumentPort, "state" | "setRevision" | "markCleanAt" | "setFilePath" | "setUntitled">;
   settings: Pick<SettingsPort, "state" | "actions">;
   fileDialogs: FileDialogsPort;
@@ -459,6 +459,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   const newFile = async () => {
+    await releaseContainer();
     applySafeMode(false);
     loadEditorTextAsClean("");
     deps.document.setUntitled();
@@ -473,6 +474,10 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    * swallowed: it must never stop the file they asked for from opening.
    */
   const releaseContainer = async () => {
+    // Marker handling goes with it. Every path that loads something other than
+    // a container passes through here, so this is the one place the extension
+    // is turned off, and a container turns it back on straight after.
+    deps.editor.setMarkersEnabled(false);
     try {
       await deps.fileIo.closeContainer();
     } catch {
@@ -492,6 +497,9 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     await releaseContainer();
     const container = await deps.fileIo.openContainer(filePath);
     applySafeMode(false);
+    // Before the text, so the markers are tracked from the moment it lands
+    // rather than being discovered by a later edit.
+    deps.editor.setMarkersEnabled(true);
     loadEditorTextAsClean(container.transcript);
     deps.document.setFilePath(filePath, "container");
     await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));

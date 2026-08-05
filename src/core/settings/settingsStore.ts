@@ -110,6 +110,11 @@ export const createSettingsStore = () => {
     await saveSetting("activeLineHighlightEnabled", enabled);
   };
 
+  const setMarkersVisible = async (markersVisible: boolean) => {
+    setState({ markersVisible });
+    await saveSetting("markersVisible", markersVisible);
+  };
+
   const setFormatViewMode = async (formatViewMode: FormatViewMode) => {
     setState({ formatViewMode });
     await saveSetting("formatViewMode", formatViewMode);
@@ -203,6 +208,7 @@ export const createSettingsStore = () => {
     const loadedTextWrapEnabled = await backingStore.get("textWrapEnabled");
     const loadedActiveLineHighlightEnabled = await backingStore.get("activeLineHighlightEnabled");
     const loadedFormatViewMode = await backingStore.get("formatViewMode");
+    const loadedMarkersVisible = await backingStore.get("markersVisible");
     const loadedStatusBarEnabled = await backingStore.get("statusBarEnabled");
     const loadedSpellCheckEnabled = await backingStore.get("spellCheckEnabled");
     const loadedSpellCheckLanguage = await backingStore.get("spellCheckLanguage");
@@ -225,6 +231,9 @@ export const createSettingsStore = () => {
         ? loadedActiveLineHighlightEnabled
         : DEFAULT_SETTINGS.activeLineHighlightEnabled,
       formatViewMode: isFormatViewMode(loadedFormatViewMode) ? loadedFormatViewMode : DEFAULT_SETTINGS.formatViewMode,
+      markersVisible: typeof loadedMarkersVisible === "boolean"
+        ? loadedMarkersVisible
+        : DEFAULT_SETTINGS.markersVisible,
       statusBarEnabled: typeof loadedStatusBarEnabled === "boolean"
         ? loadedStatusBarEnabled
         : DEFAULT_SETTINGS.statusBarEnabled,
@@ -257,6 +266,7 @@ export const createSettingsStore = () => {
       setTextWrapEnabled,
       setActiveLineHighlightEnabled,
       setFormatViewMode,
+      setMarkersVisible,
       setStatusBarEnabled,
       setSpellCheckEnabled,
       setSpellCheckLanguage,

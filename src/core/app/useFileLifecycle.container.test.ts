@@ -18,6 +18,8 @@ const TRANSCRIPT = "ALICE: ⟦734.12–736.80⟧So we walked down.";
 const createHarness = (overrides: { containerText?: string } = {}) => {
   const document = createDocumentStore();
   const editorText = { value: "" };
+  /** Ordered log of the calls whose relative order matters. */
+  const events: string[] = [];
   const showError = vi.fn(async () => {});
   const openContainer = vi.fn(async () => ({
     transcript: overrides.containerText ?? TRANSCRIPT,
@@ -26,6 +28,9 @@ const createHarness = (overrides: { containerText?: string } = {}) => {
   }));
   const closeContainer = vi.fn(async () => {});
   const startSaveFileStream = vi.fn(async (filePath: string) => ({ streamId: "s", filePath }));
+  const markersEnabled = vi.fn((enabled: boolean) => {
+    events.push(enabled ? "markers-on" : "markers-off");
+  });
   const streamReadTextFile = vi.fn(async function* () {
     yield { text: "plain text", bytesReadTotal: 10, fileSizeBytes: 10 };
   });
@@ -37,15 +42,19 @@ const createHarness = (overrides: { containerText?: string } = {}) => {
       getDocLength: () => editorText.value.length,
       getTextSlice: (from: number, to: number) => editorText.value.slice(from, to),
       setText: (text: string) => {
+        events.push("set-text");
         editorText.value = text;
       },
       append: (text: string) => {
+        events.push("append-text");
         editorText.value += text;
       },
       reset: () => {
+        events.push("reset");
         editorText.value = "";
       },
       setLargeLineSafeMode: () => {},
+      setMarkersEnabled: markersEnabled,
       getRevision: () => 1
     },
     document,
@@ -103,7 +112,9 @@ const createHarness = (overrides: { containerText?: string } = {}) => {
     openContainer,
     closeContainer,
     startSaveFileStream,
-    streamReadTextFile
+    streamReadTextFile,
+    markersEnabled,
+    events
   };
 };
 
@@ -140,6 +151,49 @@ describe("opening a container", () => {
     const h = createHarness();
     await h.lifecycle.openFile();
     expect(h.document.state.kind).toBe("container");
+  });
+});
+
+describe("marker handling follows the document", () => {
+  it("is switched on for a container", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    expect(h.markersEnabled).toHaveBeenLastCalledWith(true);
+  });
+
+  it("is switched on before the text arrives, not after", async () => {
+    // Otherwise the markers would be found by a later edit rather than being
+    // tracked from the moment the document loads.
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    expect(h.events).toEqual(["markers-off", "markers-on", "reset", "append-text"]);
+  });
+
+  it("is switched off for an ordinary text file", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    h.markersEnabled.mockClear();
+
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    expect(h.markersEnabled).toHaveBeenLastCalledWith(false);
+  });
+
+  it("is switched off for a new empty document", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    h.markersEnabled.mockClear();
+
+    await h.lifecycle.newFile();
+    expect(h.markersEnabled).toHaveBeenLastCalledWith(false);
+  });
+
+  it("is switched off when loading text at a path", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    h.markersEnabled.mockClear();
+
+    await h.lifecycle.openFileFromTextAtPath("/tmp/notes.txt", "plain");
+    expect(h.markersEnabled).toHaveBeenLastCalledWith(false);
   });
 });
 

@@ -16,7 +16,7 @@ dist-user/
 legacy-reference/
 
 # random working files
-ignore/
+dev_notes/
 
 # Rust/Tauri build artifacts
 src-tauri/target/

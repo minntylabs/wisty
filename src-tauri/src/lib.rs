@@ -879,7 +879,46 @@ fn cancel_save_file_stream(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Whether to point the web process at a dead accessibility bus, and why not to.
+///
+/// WebKitGTK 2.52.3 aborts its web process while emitting an AT-SPI
+/// selection-changed event: the caret's UTF-16 offset is converted to a UTF-8
+/// offset over the editable's accessible text and runs off the end of the
+/// buffer (`UTF16OffsetToUTF8`, AccessibilityObjectTextAtspi.cpp:257). It takes
+/// a replaced element inside the editable, a non-ASCII character after it, and
+/// the caret at the end of the text — which is an ordinary transcript line, as
+/// CodeMirror emits `<img class="cm-widgetBuffer">` around every replace
+/// decoration and the markers themselves are separated by an en dash. See
+/// dev_notes/webkit-replace-freeze-progress.md.
+///
+/// An invalid bus address is what stops it: the web process cannot reach the
+/// bus, so it never emits the event. `NO_AT_BRIDGE=1` does not help.
+///
+/// The cost is real — this makes Wisty inaccessible to screen readers — so
+/// `WISTY_ENABLE_A11Y` turns it off for anyone who needs the accessibility tree
+/// more than they need the editor not to crash. Drop the whole thing once a
+/// fixed WebKitGTK is widely shipped.
+#[cfg(target_os = "linux")]
+fn atspi_bus_override(a11y_requested: bool) -> Option<&'static str> {
+    if a11y_requested {
+        None
+    } else {
+        Some("disabled:")
+    }
+}
+
+/// Must run before GTK is initialised, since the web process inherits it.
+#[cfg(target_os = "linux")]
+fn disable_atspi_bridge() {
+    if let Some(address) = atspi_bus_override(std::env::var_os("WISTY_ENABLE_A11Y").is_some()) {
+        std::env::set_var("AT_SPI_BUS_ADDRESS", address);
+    }
+}
+
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    disable_atspi_bridge();
+
     let launch_file = match resolve_launch_file_arg() {
         Ok(value) => value,
         Err(error) => {
@@ -945,3 +984,18 @@ pub fn run() {
 mod spellcheck;
 mod tsf;
 mod window_title;
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::atspi_bus_override;
+
+    #[test]
+    fn disables_the_bus_by_default() {
+        assert_eq!(atspi_bus_override(false), Some("disabled:"));
+    }
+
+    #[test]
+    fn leaves_the_bus_alone_when_accessibility_is_asked_for() {
+        assert_eq!(atspi_bus_override(true), None);
+    }
+}

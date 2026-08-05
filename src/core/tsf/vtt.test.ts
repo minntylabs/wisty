@@ -220,10 +220,37 @@ describe("parseSubtitles — rejection", () => {
     expect(() => parseSubtitles("ALICE: just a plain transcript\n")).toThrow(SubtitleParseError);
   });
 
-  it("rejects a cue that ends before it starts", () => {
-    expect(() =>
-      parseSubtitles("WEBVTT\n\n00:00:05.000 --> 00:00:02.000\nBackwards.\n")
-    ).toThrow(SubtitleParseError);
+  it("keeps a backwards cue's text rather than discarding the whole file", () => {
+    // One bad timing must not cost the user 600 good cues. The words are the
+    // part worth keeping; the span collapses and is reported.
+    const cues = parseSubtitles(`WEBVTT
+
+00:00:01.000 --> 00:00:02.000
+Good.
+
+00:00:09.000 --> 00:00:03.000
+Backwards.
+
+00:00:10.000 --> 00:00:11.000
+Also good.
+`);
+    expect(cues).toHaveLength(3);
+    expect(cues[1].text).toBe("Backwards.");
+    expect(cues[1].end).toBe(cues[1].start);
+  });
+
+  it("reports a collapsed span so it can be surfaced before writing", () => {
+    const cues = parseSubtitles("WEBVTT\n\n00:00:05.000 --> 00:00:02.000\nBackwards.\n");
+    expect(validateCues(cues)).toContainEqual({ kind: "backwards", index: 0 });
+  });
+
+  it("does not report a cue that is merely instantaneous", () => {
+    // Whisper emits a few of these per recording, where a word's start and end
+    // coincide. The playback padding still gives half a second to hear, so it
+    // is not a fault and must not be reported as one.
+    const cues = parseSubtitles("WEBVTT\n\n00:00:05.000 --> 00:00:05.000\nYeah.\n");
+    expect(cues[0].end).toBe(cues[0].start);
+    expect(validateCues(cues)).toEqual([]);
   });
 
   it("skips a cue with no text rather than emitting an empty one", () => {

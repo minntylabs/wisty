@@ -29,6 +29,46 @@ import type { Cue } from "./vtt";
 const BLOCK_SEPARATOR = "\n\n";
 
 /**
+ * Longest speaker name transcriptParser will recognise (LABEL_PATTERN caps the
+ * name at 60 characters; a longer one stops the line being read as a turn).
+ */
+const MAX_SPEAKER_LENGTH = 60;
+
+/**
+ * A speaker name the transcript parser will actually accept as a label.
+ *
+ * The parser reads `NAME:` at the start of a line, rejects a name containing
+ * sentence punctuation — so ordinary prose with a colon is not mistaken for a
+ * turn — and caps the length. A name taken verbatim from a VTT voice span can
+ * violate all three, and the failures are quiet:
+ *
+ *   `<v Interviewer: Jane>` would yield "Interviewer: Jane: …", which parses as
+ *   a turn belonging to "Interviewer" with "Jane: …" as its words. The speaker
+ *   is then simply wrong, which is the fault this whole feature exists to help
+ *   someone correct.
+ *
+ *   `<v Dr. Smith>` would yield a line the parser declines to treat as a turn
+ *   at all, because of the full stop, so tidy mode would do nothing on it.
+ *
+ * So the label is adjusted to fit, and the recording's own name is preserved
+ * untouched in the cue data. Altering someone's speaker name is unwelcome, but
+ * less so than attributing their words to the wrong person.
+ */
+export const speakerLabel = (speaker: string): string => {
+  const cleaned = speaker
+    // Colons end the label, so one inside it would split the name.
+    .replace(/:/g, " -")
+    // Sentence punctuation makes the parser reject the name outright.
+    .replace(/[.!?,;]/g, "")
+    // A marker in a label would render as an icon on the speaker's name and be
+    // picked up as a real time by anything reading the document.
+    .replace(/[⟦⟧]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.slice(0, MAX_SPEAKER_LENGTH).trim();
+};
+
+/**
  * The transcript text for `cues`.
  *
  * Cue times are used exactly as given: this does not split, merge or re-time
@@ -45,7 +85,8 @@ export const buildTranscript = (cues: readonly Cue[]): string => {
       return;
     }
     const body = parts.join(" ");
-    blocks.push(currentSpeaker ? `${currentSpeaker}: ${body}` : body);
+    const label = currentSpeaker ? speakerLabel(currentSpeaker) : "";
+    blocks.push(label ? `${label}: ${body}` : body);
     parts = [];
   };
 

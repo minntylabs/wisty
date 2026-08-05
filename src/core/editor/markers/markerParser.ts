@@ -45,8 +45,16 @@ const MARKER_PATTERN = /⟦(\d+\.\d{2})–(\d+\.\d{2})⟧/g;
  * one silently, and a marker that parses but means something else is the worst
  * failure this format allows.
  */
-export const formatMarker = (start: number, end: number): string =>
-  `⟦${start.toFixed(2)}–${end.toFixed(2)}⟧`;
+export const formatMarker = (start: number, end: number): string => {
+  // A non-finite time would produce "⟦NaN–1.00⟧", which does not match the
+  // pattern above and so would sit in the transcript as literal text — a
+  // silent corruption traceable to whatever produced the number, long after
+  // the fact. Refusing here surfaces that bug where it happens.
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    throw new RangeError(`Marker times must be finite numbers, got ${start} and ${end}`);
+  }
+  return `⟦${start.toFixed(2)}–${end.toFixed(2)}⟧`;
+};
 
 /**
  * Every marker in `text`, in document order. `offset` is added to the reported

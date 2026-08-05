@@ -20,6 +20,12 @@ describe("formatMarker", () => {
     expect(formatMarker(1.5, 2.456)).toBe("⟦1.50–2.46⟧");
   });
 
+  it("refuses non-finite times rather than writing an unparseable token", () => {
+    expect(() => formatMarker(NaN, 1)).toThrow(RangeError);
+    expect(() => formatMarker(1, Infinity)).toThrow(RangeError);
+    expect(() => formatMarker(-Infinity, 1)).toThrow(RangeError);
+  });
+
   it("round-trips through parseMarkers", () => {
     for (const [start, end] of [
       [0, 0.5],

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTranscript } from "./transcriptBuilder";
+import { buildTranscript, speakerLabel } from "./transcriptBuilder";
 import { parseSubtitles } from "./vtt";
 import { parseMarkers } from "../editor/markers/markerParser";
 import { parseTurnLine, wordSpans } from "../editor/transcript/transcriptParser";
@@ -98,5 +98,63 @@ describe("output is compatible with the existing transcript parser", () => {
       (span) => span.from <= firstMarker.from && span.to >= firstMarker.to
     );
     expect(covering).toBeDefined();
+  });
+});
+
+/**
+ * A speaker name comes from someone else's file and lands in a position the
+ * transcript parser reads structurally. These are the ways a name taken
+ * verbatim would break it, all of them quietly.
+ */
+describe("speaker names are made safe for the transcript parser", () => {
+  const speakerOf = (vtt: string) => {
+    const text = build(vtt);
+    const line = text.split("\n")[0];
+    const turn = parseTurnLine({ number: 1, from: 0, to: line.length, text: line });
+    return turn?.speaker;
+  };
+  const cue = (name: string) =>
+    `WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<v ${name}>Some words here.\n`;
+
+  it("a colon would otherwise split the name and misattribute the turn", () => {
+    expect(speakerLabel("Interviewer: Jane")).toBe("Interviewer - Jane");
+    expect(speakerOf(cue("Interviewer: Jane"))).toBe("Interviewer - Jane");
+  });
+
+  it("a full stop would otherwise stop the line being a turn at all", () => {
+    expect(speakerLabel("Dr. Smith")).toBe("Dr Smith");
+    expect(speakerOf(cue("Dr. Smith"))).toBe("Dr Smith");
+  });
+
+  it("a comma likewise", () => {
+    expect(speakerOf(cue("Smith, John"))).toBe("Smith John");
+  });
+
+  it("marker characters would otherwise become a marker on the label", () => {
+    // The brackets and full stops go, so what is left cannot form a token. The
+    // remaining digits are mangled but harmless — the point is that the
+    // document contains one marker, the sentence's, and not a second one
+    // sitting in a speaker's name.
+    const text = build(cue("A⟦1.00–2.00⟧B"));
+    expect(parseMarkers(text)).toHaveLength(1);
+    expect(speakerOf(cue("A⟦1.00–2.00⟧B"))).toBe("A100–200B");
+  });
+
+  it("a name longer than the parser accepts is truncated to fit", () => {
+    const long = "Wilhelmina ".repeat(20).trim();
+    expect(speakerLabel(long).length).toBeLessThanOrEqual(60);
+    expect(speakerOf(cue(long))).toBe(speakerLabel(long));
+  });
+
+  it("ordinary names are left exactly as they are", () => {
+    for (const name of ["ALICE", "SPEAKER_00", "Jane Smith", "Interviewer 2"]) {
+      expect(speakerLabel(name)).toBe(name);
+    }
+  });
+
+  it("a name that sanitises away leaves the line unlabelled rather than broken", () => {
+    const text = build(cue("..."));
+    expect(text.startsWith(":")).toBe(false);
+    expect(text).toBe("⟦1.00–2.00⟧Some words here.");
   });
 });

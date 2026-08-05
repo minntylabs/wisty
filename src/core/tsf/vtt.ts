@@ -26,6 +26,12 @@ export type Cue = {
   text: string;
   /** From a `<v NAME>` voice span. Absent for SRT and for unmarked VTT cues. */
   speaker?: string;
+  /**
+   * Set when the file gave an end before the start, and the span was collapsed
+   * rather than the whole transcript being discarded. `validateCues` reports
+   * these; a cue that is simply instantaneous is not one of them.
+   */
+  clamped?: true;
 };
 
 export class SubtitleParseError extends Error {}
@@ -156,12 +162,15 @@ export const parseSubtitles = (source: string): Cue[] => {
     }
 
     const start = parseTimestamp(timing[1]);
-    const end = parseTimestamp(timing[2]);
-    if (end < start) {
-      throw new SubtitleParseError(
-        `Cue ends before it starts: ${timing[1]} --> ${timing[2]}`
-      );
-    }
+    // A cue that ends before it starts keeps its text and loses its span.
+    // Throwing would discard an entire transcript over one bad timing, and the
+    // words are the part worth keeping; a marker with nothing to play is
+    // visibly useless, where a guessed end would be quietly wrong.
+    // `validateCues` reports it as `zero-length` so it can be surfaced before a
+    // container is written.
+    const declaredEnd = parseTimestamp(timing[2]);
+    const end = Math.max(start, declaredEnd);
+    const clamped = declaredEnd < start;
 
     const body = lines.slice(timingIndex + 1).join(" ").trim();
     if (!body) {
@@ -182,11 +191,10 @@ export const parseSubtitles = (source: string): Cue[] => {
       if (!cleaned) {
         continue;
       }
-      cues.push(
-        segment.speaker
-          ? { start, end, text: cleaned, speaker: segment.speaker }
-          : { start, end, text: cleaned }
-      );
+      const cue: Cue = segment.speaker
+        ? { start, end, text: cleaned, speaker: segment.speaker }
+        : { start, end, text: cleaned };
+      cues.push(clamped ? { ...cue, clamped } : cue);
     }
   }
 
@@ -199,6 +207,7 @@ export const parseSubtitles = (source: string): Cue[] => {
 export type CueProblem =
   | { kind: "out-of-order"; index: number }
   | { kind: "overlap"; index: number }
+  | { kind: "backwards"; index: number }
   | { kind: "beyond-audio"; index: number; audioDuration: number };
 
 /**
@@ -221,6 +230,12 @@ export const validateCues = (cues: readonly Cue[], audioDuration?: number): CueP
       problems.push({ kind: "out-of-order", index });
     } else if (previous && !sameCue && cue.start < previous.end) {
       problems.push({ kind: "overlap", index });
+    }
+    // Only a span the file got impossibly wrong. An instantaneous cue is not a
+    // problem: whisper emits a few per recording where a word's start and end
+    // coincide, and the playback padding still gives half a second to hear.
+    if (cue.clamped) {
+      problems.push({ kind: "backwards", index });
     }
     if (audioDuration !== undefined && cue.start > audioDuration) {
       problems.push({ kind: "beyond-audio", index, audioDuration });

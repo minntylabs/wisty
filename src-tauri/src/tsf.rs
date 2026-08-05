@@ -297,21 +297,21 @@ const SUPPORTED_TSF_VERSION: u64 = 1;
 /// a crash. Ten megabytes, against extracting to disk or shipping it across the
 /// bridge.
 // `path` and `audio_member` are recorded on open and consumed by the save and
-// repack path (step 7), which does not exist yet. They are kept here rather than
+// repack path, which does not exist yet. They are kept here rather than
 // re-derived later because that is when they are known for certain.
 #[allow(dead_code)]
 pub struct OpenTsf {
-    /// Where it came from, for saving back to (step 7).
+    /// Where it came from, for saving back to when repacking exists.
     pub path: PathBuf,
     pub transcript: String,
-    /// Decoded from on every play (step 6) and written back verbatim on save.
+    /// Decoded from on every play, and written back verbatim on save.
     pub audio: Vec<u8>,
     /// The audio member's name, so a repack writes it under the same name.
     ///
     /// Comes from the container's own meta.json, so it is untrusted input. It
-    /// is only ever used as a name *inside* a zip. If a later change uses it as
-    /// a path on disk, it must be validated first — "../../etc/passwd" is a
-    /// legal string here.
+    /// is only ever used as a name *inside* a zip. The repack will be the first
+    /// thing to use it for anything else, and must validate it first —
+    /// "../../etc/passwd" is a legal string here.
     pub audio_member: String,
     pub meta: serde_json::Value,
 }

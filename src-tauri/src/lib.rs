@@ -933,10 +933,12 @@ pub fn run() {
             spellcheck::spell_add_word,
             spellcheck::spell_ignore_word,
             spellcheck::spell_list_added_words,
-            spellcheck::spell_remove_word
+            spellcheck::spell_remove_word,
+            tsf::create_tsf
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 mod spellcheck;
+mod tsf;
 mod window_title;

@@ -86,22 +86,26 @@ sudo pacman -S --needed webkit2gtk-4.1 gtk3 libappindicator-gtk3
 
 If you are building wisty from source, you will also need development packages.
 
+Spell check binds to hunspell through bindgen, which needs libclang at build time.
+It is easy to miss because the failure is a bindgen error rather than a missing
+package, so it is listed alongside the rest below.
+
 ### Ubuntu / Debian
 
 ```bash
-sudo apt install -y build-essential pkg-config libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+sudo apt install -y build-essential pkg-config libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libclang-dev
 ```
 
 ### Fedora
 
 ```bash
-sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config openssl-devel gtk3-devel webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel
+sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config openssl-devel gtk3-devel webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel clang-devel
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S --needed base-devel pkgconf openssl gtk3 webkit2gtk-4.1 libappindicator-gtk3 librsvg
+sudo pacman -S --needed base-devel pkgconf openssl gtk3 webkit2gtk-4.1 libappindicator-gtk3 librsvg clang
 ```
 
 ## Build and run

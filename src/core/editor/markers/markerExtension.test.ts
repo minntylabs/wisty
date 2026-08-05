@@ -12,7 +12,7 @@
 import { describe, expect, it } from "vitest";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { createMarkers, setMarkersVisibleEffect } from "./markerExtension";
+import { createMarkers, markersIn as trackedMarkers, setMarkersVisibleEffect } from "./markerExtension";
 import { parseMarkers } from "./markerParser";
 
 const M1 = "⟦734.12–736.80⟧";
@@ -50,20 +50,31 @@ describe("rendering", () => {
     view.destroy();
   });
 
-  it("collapses markers to nothing when hidden", () => {
+  it("hides the icons with a class rather than rebuilding the decorations", () => {
+    // Visibility is one class on the content element, so toggling it costs
+    // nothing per marker. The icons stay in the DOM and collapse via CSS.
     const { view } = createView(DOC, false);
-    expect(view.dom.querySelectorAll(".cm-marker-icon")).toHaveLength(0);
+    expect(view.contentDOM.classList.contains("cm-markers-hidden")).toBe(true);
     expect(view.dom.textContent).not.toContain("734.12");
     view.destroy();
   });
 
-  it("switches between the two on the visibility effect", () => {
+  it("toggles that class on the visibility effect", () => {
     const { view } = createView(DOC, false);
     view.dispatch({ effects: setMarkersVisibleEffect.of(true) });
-    expect(view.dom.querySelectorAll(".cm-marker-icon")).toHaveLength(3);
+    expect(view.contentDOM.classList.contains("cm-markers-hidden")).toBe(false);
     view.dispatch({ effects: setMarkersVisibleEffect.of(false) });
-    expect(view.dom.querySelectorAll(".cm-marker-icon")).toHaveLength(0);
+    expect(view.contentDOM.classList.contains("cm-markers-hidden")).toBe(true);
     view.destroy();
+  });
+
+  it("never shows the raw marker text, hidden or shown", () => {
+    for (const visible of [true, false]) {
+      const { view } = createView(DOC, visible);
+      expect(view.dom.textContent).not.toContain("734.12");
+      expect(view.dom.textContent).not.toContain("⟦");
+      view.destroy();
+    }
   });
 
   it("leaves the document text untouched either way", () => {
@@ -246,6 +257,72 @@ describe("undo restores markers exactly", () => {
     view.dispatch({ changes: { from: line.from, insert: `BOB: ${M3}Did you?` } });
     expect(view.state.doc.toString()).toBe(before);
     expect(markersIn(view)).toHaveLength(3);
+    view.destroy();
+  });
+});
+
+/**
+ * The marker list is maintained incrementally: positions away from the edit are
+ * mapped, and only the touched lines are re-read. Every case here asserts the
+ * result is identical to reading the whole document afresh, which is the
+ * standard the incremental path has to meet.
+ */
+describe("incremental marker tracking", () => {
+  const markersFrom = (view: EditorView) => trackedMarkers(view.state);
+  const truth = (view: EditorView) => parseMarkers(view.state.doc.toString());
+
+  const check = (spec: Parameters<EditorView["dispatch"]>[0], doc = DOC) => {
+    const { view } = createView(doc);
+    view.dispatch(spec);
+    expect(markersFrom(view)).toEqual(truth(view));
+    view.destroy();
+  };
+
+  it("insertion at the very start", () => check({ changes: { from: 0, insert: "XX " } }));
+
+  it("insertion in prose before a marker", () =>
+    check({ changes: { from: DOC.indexOf("So we"), insert: "hello " } }));
+
+  it("insertion flush against a marker's start", () =>
+    check({ changes: { from: DOC.indexOf(M1), insert: "Z" } }));
+
+  it("insertion flush against a marker's end", () =>
+    check({ changes: { from: DOC.indexOf(M1) + M1.length, insert: "Z" } }));
+
+  it("deleting prose between two markers", () =>
+    check({ changes: { from: DOC.indexOf("So we"), to: DOC.indexOf("So we") + 10, insert: "" } }));
+
+  it("deleting a whole marker", () =>
+    check({ changes: { from: DOC.indexOf(M2), to: DOC.indexOf(M2) + M2.length, insert: "" } }));
+
+  it("deleting a whole line", () =>
+    check({ changes: { from: DOC.lastIndexOf("\n") + 1, to: DOC.length, insert: "" } }));
+
+  it("joining two lines", () =>
+    check({ changes: { from: DOC.indexOf("\n"), to: DOC.indexOf("\n") + 2, insert: " " } }));
+
+  it("replacing the entire document", () =>
+    check({ changes: { from: 0, to: DOC.length, insert: "nothing left" } }));
+
+  it("a multi-change transaction", () =>
+    check({ changes: [{ from: 0, insert: "A" }, { from: DOC.indexOf("BOB"), insert: "B" }] }));
+
+  it("pasting a marker that did not exist before", () =>
+    check({ changes: { from: DOC.indexOf("So we"), insert: "⟦900.00–901.00⟧" } }));
+
+  it("pasting a whole new turn with markers", () =>
+    check({ changes: { from: 0, insert: `CAROL: ${M1}Pasted.\n\n` } }));
+
+  it("an edit spanning several lines at once", () =>
+    check({ changes: { from: 10, to: DOC.length - 5, insert: `x ${M2} y` } }));
+
+  it("stays correct across a run of consecutive edits", () => {
+    const { view } = createView();
+    view.dispatch({ changes: { from: 0, insert: "A" } });
+    view.dispatch({ changes: { from: DOC.indexOf("rained") + 1, insert: "!" } });
+    view.dispatch({ changes: { from: 5, to: 12, insert: "" } });
+    view.dispatch({ changes: { from: 0, insert: `${M3}` } });
+    expect(markersFrom(view)).toEqual(truth(view));
     view.destroy();
   });
 });

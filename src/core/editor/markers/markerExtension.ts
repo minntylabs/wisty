@@ -16,12 +16,12 @@ import {
   EditorState,
   Extension,
   Range,
-  RangeSet,
   StateEffect,
-  StateField
+  StateField,
+  Transaction
 } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, WidgetType } from "@codemirror/view";
-import { Marker, parseMarkers, splitsMarker } from "./markerParser";
+import { changeSplits, Marker, parseMarkers } from "./markerParser";
 
 /** Shows or hides the marker icons. Dispatched by the menu/keyboard toggle. */
 export const setMarkersVisibleEffect = StateEffect.define<boolean>();
@@ -31,8 +31,13 @@ export const setMarkersVisibleEffect = StateEffect.define<boolean>();
  * glyph so it stays crisp at any zoom and takes its colour from the theme.
  */
 class MarkerIconWidget extends WidgetType {
-  constructor(private readonly marker: Marker) {
+  readonly start: number;
+  readonly end: number;
+
+  constructor(marker: Marker) {
     super();
+    this.start = marker.start;
+    this.end = marker.end;
   }
 
   /**
@@ -41,14 +46,14 @@ class MarkerIconWidget extends WidgetType {
    * it, which matters because a replaced node loses any in-flight interaction.
    */
   eq(other: MarkerIconWidget): boolean {
-    return other.marker.start === this.marker.start && other.marker.end === this.marker.end;
+    return other.start === this.start && other.end === this.end;
   }
 
   toDOM(): HTMLElement {
     const wrapper = document.createElement("span");
     wrapper.className = "cm-marker-icon";
     // Both times, for a tooltip: the icon deliberately shows nothing itself.
-    wrapper.title = `${this.marker.start.toFixed(2)}–${this.marker.end.toFixed(2)}s`;
+    wrapper.title = `${this.start.toFixed(2)}–${this.end.toFixed(2)}s`;
     wrapper.setAttribute("aria-hidden", "true");
     wrapper.innerHTML =
       '<svg viewBox="0 0 16 16" width="11" height="11" fill="currentColor" focusable="false">' +
@@ -68,10 +73,85 @@ class MarkerIconWidget extends WidgetType {
   }
 }
 
-/** Markers in the current document, recomputed whenever the text changes. */
-const markerField = StateField.define<Marker[]>({
-  create: (state) => parseMarkers(state.doc.toString()),
-  update: (markers, tr) => (tr.docChanged ? parseMarkers(tr.state.doc.toString()) : markers)
+
+/**
+ * The lines an edit touched, in the new document, as whole-line ranges.
+ *
+ * Whole lines rather than the exact edited range because a marker cannot span a
+ * line break — the token is digits, a dot and a dash — so any marker the edit
+ * created, destroyed or altered lies entirely within one of these ranges. That
+ * is what makes patching only these ranges sufficient.
+ */
+const touchedLineRanges = (tr: Transaction): { from: number; to: number }[] => {
+  const doc = tr.state.doc;
+  const ranges: { from: number; to: number }[] = [];
+
+  tr.changes.iterChanges((_fromA, _toA, fromB, toB) => {
+    const from = doc.lineAt(fromB).from;
+    const to = doc.lineAt(toB).to;
+    const previous = ranges[ranges.length - 1];
+    // Changes arrive in document order, so overlapping or adjacent ranges can
+    // be merged as we go and each line is only ever scanned once.
+    if (previous && from <= previous.to) {
+      previous.to = Math.max(previous.to, to);
+    } else {
+      ranges.push({ from, to });
+    }
+  });
+
+  return ranges;
+};
+
+const decorationsFor = (text: string, offset: number): Range<Decoration>[] =>
+  parseMarkers(text, offset).map((marker) =>
+    Decoration.replace({ widget: new MarkerIconWidget(marker) }).range(marker.from, marker.to)
+  );
+
+/**
+ * The markers, held as a RangeSet rather than an array.
+ *
+ * The data structure is the whole point. A RangeSet is a persistent B-tree, so
+ * mapping it through an edit reuses every subtree the edit did not touch, and
+ * `between` finds the markers overlapping a span without walking the rest. An
+ * array would force every consumer — decorations, atomic ranges, the change
+ * filter — to touch all markers on every keystroke, which is work proportional
+ * to the document rather than to what the user just did.
+ *
+ * Kept up to date in two steps:
+ *
+ *   - `map` moves everything the edit did not touch, in time proportional to
+ *     the size of the change rather than the number of markers;
+ *   - each touched line is then replaced wholesale: its old markers are
+ *     filtered out and the line is read afresh. Mapping can move what it
+ *     already knows about, but only a rescan finds a marker that has just been
+ *     pasted, or completed by typing its last character.
+ */
+const markerField = StateField.define<DecorationSet>({
+  create: (state) => Decoration.set(decorationsFor(state.doc.toString(), 0), true),
+
+  update(markers, tr) {
+    if (!tr.docChanged) {
+      return markers;
+    }
+    let updated = markers.map(tr.changes);
+    for (const range of touchedLineRanges(tr)) {
+      updated = updated.update({
+        filterFrom: range.from,
+        filterTo: range.to,
+        filter: () => false,
+        add: decorationsFor(tr.state.doc.sliceString(range.from, range.to), range.from),
+        sort: true
+      });
+    }
+    return updated;
+  },
+
+  provide: (field) => [
+    // Both facets read the field directly. Neither rebuilds anything, which is
+    // what keeps a keystroke's cost independent of the document's length.
+    EditorView.decorations.from(field),
+    EditorView.atomicRanges.of((view) => view.state.field(field))
+  ]
 });
 
 const createVisibilityField = (getInitialVisible: () => boolean) =>
@@ -84,30 +164,16 @@ const createVisibilityField = (getInitialVisible: () => boolean) =>
         }
       }
       return visible;
-    }
+    },
+    // Visibility is a class on the editor, not a property of each decoration.
+    // Hiding markers is then one string changing rather than every marker being
+    // rebuilt, and the icons collapse to nothing in CSS — so the caret and
+    // deletion behaviour atomicRanges provides is identical either way.
+    provide: (field) =>
+      EditorView.contentAttributes.compute([field], (state) =>
+        state.field(field) ? { class: "" } : { class: "cm-markers-hidden" }
+      )
   });
-
-/**
- * Both states replace the token: shown swaps in the icon, hidden collapses it
- * to nothing. Only the widget differs, so the caret and deletion behaviour
- * that `atomicRanges` provides is identical either way — a marker is never
- * partially present.
- */
-const buildDecorations = (markers: readonly Marker[], visible: boolean): DecorationSet => {
-  const ranges: Range<Decoration>[] = markers.map((marker) =>
-    (visible
-      ? Decoration.replace({ widget: new MarkerIconWidget(marker) })
-      : Decoration.replace({})
-    ).range(marker.from, marker.to)
-  );
-  return Decoration.set(ranges, true);
-};
-
-const markerRanges = (markers: readonly Marker[]): RangeSet<Decoration> =>
-  RangeSet.of(
-    markers.map((marker) => Decoration.replace({}).range(marker.from, marker.to)),
-    true
-  );
 
 /**
  * Rejects any change that would leave a fragment of a marker behind.
@@ -117,6 +183,9 @@ const markerRanges = (markers: readonly Marker[]): RangeSet<Decoration> =>
  * paste, find-and-replace, select-all-and-retype, and programmatic edits. The
  * transaction is rejected whole rather than repaired, because a partial repair
  * would silently change what the user asked for.
+ *
+ * Only the markers overlapping each change are examined — `between` walks that
+ * span, not the document.
  */
 const createChangeFilter = () =>
   EditorState.changeFilter.of((tr) => {
@@ -124,17 +193,42 @@ const createChangeFilter = () =>
       return true;
     }
     const markers = tr.startState.field(markerField, false);
-    if (!markers || markers.length === 0) {
+    if (!markers) {
       return true;
     }
     let damages = false;
     tr.changes.iterChanges((fromA, toA) => {
-      if (splitsMarker(markers, fromA, toA)) {
-        damages = true;
+      if (damages) {
+        return;
       }
+      markers.between(fromA, toA, (from, to) => {
+        if (changeSplits({ from, to }, fromA, toA)) {
+          damages = true;
+          return false;
+        }
+        return undefined;
+      });
     });
     return !damages;
   });
+
+/** Every marker in the document. Walks them all, so not for the hot path. */
+export const markersIn = (state: EditorState): Marker[] => {
+  const markers: Marker[] = [];
+  const set = state.field(markerField, false);
+  if (!set) {
+    return markers;
+  }
+  const cursor = set.iter();
+  while (cursor.value) {
+    const widget = (cursor.value.spec as { widget?: MarkerIconWidget }).widget;
+    if (widget) {
+      markers.push({ from: cursor.from, to: cursor.to, start: widget.start, end: widget.end });
+    }
+    cursor.next();
+  }
+  return markers;
+};
 
 const markerTheme = EditorView.baseTheme({
   ".cm-marker-icon": {
@@ -150,6 +244,9 @@ const markerTheme = EditorView.baseTheme({
   ".cm-marker-icon:hover": {
     opacity: "1"
   },
+  ".cm-markers-hidden .cm-marker-icon": {
+    display: "none"
+  },
   "&light .cm-marker-icon": {
     color: "#2563eb"
   },
@@ -159,7 +256,7 @@ const markerTheme = EditorView.baseTheme({
 });
 
 export type MarkersExtension = {
-  markerField: StateField<Marker[]>;
+  markerField: StateField<DecorationSet>;
   visibilityField: StateField<boolean>;
   extension: Extension;
 };
@@ -170,18 +267,6 @@ export const createMarkers = (getInitialVisible: () => boolean): MarkersExtensio
   return {
     markerField,
     visibilityField,
-    extension: [
-      markerField,
-      visibilityField,
-      EditorView.decorations.compute([markerField, visibilityField], (state) =>
-        buildDecorations(state.field(markerField), state.field(visibilityField))
-      ),
-      // Stepping over a marker rather than into it, so the caret can never sit
-      // inside "734.12" and produce a token that still parses but points
-      // somewhere wrong.
-      EditorView.atomicRanges.of((view) => markerRanges(view.state.field(markerField))),
-      createChangeFilter(),
-      markerTheme
-    ]
+    extension: [markerField, visibilityField, createChangeFilter(), markerTheme]
   };
 };

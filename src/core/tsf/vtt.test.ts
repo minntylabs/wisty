@@ -124,6 +124,50 @@ He wrote &lt;b&gt;bold&lt;/b&gt; in the chat.
     expect(cues[0].text).toBe("He wrote <b>bold</b> in the chat.");
   });
 
+  it("splits a cue with a mid-cue speaker change into one cue per speaker", () => {
+    const cues = parseSubtitles(`WEBVTT
+
+00:00:01.000 --> 00:00:05.000
+<v ALICE>Did you go?</v> <v BOB>I did.
+`);
+    expect(cues).toHaveLength(2);
+    expect(cues[0]).toEqual({ start: 1, end: 5, text: "Did you go?", speaker: "ALICE" });
+    expect(cues[1]).toEqual({ start: 1, end: 5, text: "I did.", speaker: "BOB" });
+  });
+
+  it("keeps text before the first voice span, unattributed", () => {
+    const cues = parseSubtitles(`WEBVTT
+
+00:00:01.000 --> 00:00:05.000
+Narration. <v BOB>Then me.
+`);
+    expect(cues).toHaveLength(2);
+    expect(cues[0]).toEqual({ start: 1, end: 5, text: "Narration." });
+    expect(cues[1].speaker).toBe("BOB");
+  });
+
+  it("handles three speakers in one cue", () => {
+    const cues = parseSubtitles(`WEBVTT
+
+00:00:01.000 --> 00:00:05.000
+<v A>One. <v B>Two. <v C>Three.
+`);
+    expect(cues.map((cue) => cue.speaker)).toEqual(["A", "B", "C"]);
+    expect(cues.every((cue) => cue.start === 1 && cue.end === 5)).toBe(true);
+  });
+
+  it("does not invent per-speaker timings for a shared cue", () => {
+    // Every segment carries the cue's own span: the file never said when each
+    // speaker within it started, and guessing would be fabricating timings.
+    const cues = parseSubtitles(`WEBVTT
+
+00:00:10.000 --> 00:00:20.000
+<v A>Short. <v B>A considerably longer utterance here.
+`);
+    expect(cues[0]).toMatchObject({ start: 10, end: 20 });
+    expect(cues[1]).toMatchObject({ start: 10, end: 20 });
+  });
+
   it("strips other inline markup", () => {
     const cues = parseSubtitles(`WEBVTT
 
@@ -222,6 +266,15 @@ describe("validateCues", () => {
       { kind: "beyond-audio", index: 1, audioDuration: 100 },
       { kind: "beyond-audio", index: 2, audioDuration: 100 }
     ]);
+  });
+
+  it("does not treat segments of one cue as overlapping", () => {
+    const segments = parseSubtitles(`WEBVTT
+
+00:00:01.000 --> 00:00:05.000
+<v A>One. <v B>Two.
+`);
+    expect(validateCues(segments)).toEqual([]);
   });
 
   it("does not complain when the audio is long enough", () => {

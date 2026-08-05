@@ -40,9 +40,6 @@ const TIMESTAMP = /^(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})$/;
 /** The cue timing line, e.g. `00:12:14.120 --> 00:12:16.800 align:start`. */
 const TIMING_LINE = /^(\S+)\s*-->\s*(\S+)(?:\s+.*)?$/;
 
-/** A voice span opening a cue: `<v ALICE>` or `<v.loud ALICE>`. */
-const VOICE_SPAN = /^<v(?:\.[^\s>]*)*\s+([^>]*)>/;
-
 const parseTimestamp = (value: string): number => {
   const match = TIMESTAMP.exec(value.trim());
   if (!match) {
@@ -57,18 +54,45 @@ const parseTimestamp = (value: string): number => {
   );
 };
 
+/** A voice span: `<v ALICE>`, or `<v.loud ALICE>` with classes. */
+const VOICE_SPAN = /<v(?:\.[^\s>]*)*\s+([^>]*)>/g;
+
+type Segment = { speaker?: string; text: string };
+
 /**
- * Strips a leading voice span, returning the speaker and the remaining text.
+ * Splits a cue payload into one segment per speaker.
+ *
+ * WebVTT permits a speaker change inside a single cue, and usually there is at
+ * most one voice span at the start. Handling the general case matters because
+ * the alternative is worse than not parsing the file at all: a second span
+ * would be stripped as ordinary markup and its words attributed to the first
+ * speaker — a silent misattribution, which is the exact fault this whole
+ * feature exists to let someone correct.
+ *
  * A closing `</v>` is optional in the spec and is removed wherever it appears.
  */
-const extractSpeaker = (text: string): { speaker?: string; text: string } => {
-  const match = VOICE_SPAN.exec(text);
-  if (!match) {
-    return { text };
+const splitBySpeaker = (payload: string): Segment[] => {
+  const pattern = new RegExp(VOICE_SPAN.source, "g");
+  const segments: Segment[] = [];
+  let lastIndex = 0;
+  let speaker: string | undefined;
+
+  const push = (text: string, who?: string) => {
+    const cleaned = text.replace(/<\/v>/g, "").trim();
+    if (cleaned) {
+      segments.push(who ? { speaker: who, text: cleaned } : { text: cleaned });
+    }
+  };
+
+  for (let match = pattern.exec(payload); match !== null; match = pattern.exec(payload)) {
+    push(payload.slice(lastIndex, match.index), speaker);
+    const name = decodeEntities(match[1].trim());
+    speaker = name || undefined;
+    lastIndex = match.index + match[0].length;
   }
-  const speaker = decodeEntities(match[1].trim());
-  const remainder = text.slice(match[0].length).replace(/<\/v>/g, "").trim();
-  return speaker ? { speaker, text: remainder } : { text: remainder };
+  push(payload.slice(lastIndex), speaker);
+
+  return segments;
 };
 
 /** Removes any other VTT inline markup (<b>, <i>, <c.classname>, timestamps). */
@@ -143,14 +167,27 @@ export const parseSubtitles = (source: string): Cue[] => {
     if (!body) {
       continue;
     }
-    const { speaker, text } = extractSpeaker(body);
-    // Tags are stripped before entities are decoded, so a `&lt;b&gt;` in the
-    // transcript survives as literal text instead of becoming markup to remove.
-    const cleaned = decodeEntities(stripInlineTags(text)).replace(/\s+/g, " ").trim();
-    if (!cleaned) {
-      continue;
+    // One cue per speaker segment. Segments share the cue's times: the file
+    // says when the cue was spoken, not when each speaker within it was, and
+    // dividing the span by text length would be inventing timings. Playing
+    // either segment replays the whole cue, which is the same trade made
+    // elsewhere — hearing slightly too much is harmless, attributing words to
+    // the wrong person is not.
+    for (const segment of splitBySpeaker(body)) {
+      // Tags are stripped before entities are decoded, so a `&lt;b&gt;` in the
+      // transcript survives as literal text rather than becoming markup to remove.
+      const cleaned = decodeEntities(stripInlineTags(segment.text))
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!cleaned) {
+        continue;
+      }
+      cues.push(
+        segment.speaker
+          ? { start, end, text: cleaned, speaker: segment.speaker }
+          : { start, end, text: cleaned }
+      );
     }
-    cues.push(speaker ? { start, end, text: cleaned, speaker } : { start, end, text: cleaned });
   }
 
   if (cues.length === 0) {
@@ -177,9 +214,12 @@ export const validateCues = (cues: readonly Cue[], audioDuration?: number): CueP
   const problems: CueProblem[] = [];
   cues.forEach((cue, index) => {
     const previous = cues[index - 1];
+    // An identical span is not an overlap: it is a second speaker within one
+    // cue, which parseSubtitles splits into segments sharing the cue's times.
+    const sameCue = previous && cue.start === previous.start && cue.end === previous.end;
     if (previous && cue.start < previous.start) {
       problems.push({ kind: "out-of-order", index });
-    } else if (previous && cue.start < previous.end) {
+    } else if (previous && !sameCue && cue.start < previous.end) {
       problems.push({ kind: "overlap", index });
     }
     if (audioDuration !== undefined && cue.start > audioDuration) {

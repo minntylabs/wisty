@@ -52,10 +52,10 @@ export const formatMarker = (start: number, end: number): string =>
  * Every marker in `text`, in document order. `offset` is added to the reported
  * positions, so a caller holding a slice can report document coordinates.
  *
- * Transcripts are small — a 28-minute interview is tens of kilobytes with
- * 100-150 markers — so scanning the whole document is cheap enough that the
- * callers do it on every document change rather than tracking positions
- * incrementally.
+ * That offset is what lets the editor rescan a single line and place the
+ * results in document coordinates, rather than reading the whole document on
+ * every keystroke. A 28-minute interview holds around 620 markers, so scanning
+ * all of them is not something to do per keypress.
  */
 export const parseMarkers = (text: string, offset = 0): Marker[] => {
   const markers: Marker[] = [];
@@ -100,11 +100,15 @@ export const markerAt = (markers: readonly Marker[], pos: number): Marker | null
  * or stop parsing and become prose. That is the one silent failure available
  * here: a marker that still looks like a marker but points somewhere else.
  */
+export const changeSplits = (
+  marker: { from: number; to: number },
+  from: number,
+  to: number
+): boolean =>
+  (from > marker.from && from < marker.to) || (to > marker.from && to < marker.to);
+
 export const splitsMarker = (markers: readonly Marker[], from: number, to: number): boolean =>
-  markers.some(
-    (marker) =>
-      (from > marker.from && from < marker.to) || (to > marker.from && to < marker.to)
-  );
+  markers.some((marker) => changeSplits(marker, from, to));
 
 /**
  * `spans` with any part overlapping a marker removed, and spans that were

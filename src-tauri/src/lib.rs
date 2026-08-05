@@ -908,6 +908,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(LaunchArgState::new(launch_file))
         .manage(spellcheck::SpellState::default())
+        .manage(tsf::TsfState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -934,7 +935,9 @@ pub fn run() {
             spellcheck::spell_ignore_word,
             spellcheck::spell_list_added_words,
             spellcheck::spell_remove_word,
-            tsf::create_tsf
+            tsf::create_tsf,
+            tsf::open_tsf,
+            tsf::close_tsf
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

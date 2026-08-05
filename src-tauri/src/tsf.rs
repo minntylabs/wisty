@@ -12,7 +12,8 @@
 //! marker format defined in exactly one place.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::sync::Mutex;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -23,7 +24,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Timestamp;
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipWriter};
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 /// The transcript member's name inside the archive. Fixed: a reader looks for it by
 /// name, and meta.json names only the audio member, which can vary.
@@ -247,6 +248,171 @@ fn write_archive(
     writer
         .flush()
         .map_err(|error| format!("Cannot flush the container: {error}"))?;
+    Ok(())
+}
+
+/// The highest container version this build understands.
+///
+/// A file carrying a higher number was written by a newer Wisty and may use the
+/// format in ways this one would misread, so it is refused rather than opened
+/// hopefully. Additive changes do not move this — unknown *keys* are carried
+/// through untouched, which is what lets the format grow without a bump.
+const SUPPORTED_TSF_VERSION: u64 = 1;
+
+/// A container the user currently has open.
+///
+/// The audio is held in memory for the document's lifetime: symphonia needs
+/// something implementing Read + Seek, and a Cursor over these bytes satisfies
+/// it, so playback needs no temp file to extract to and none to clean up after
+/// a crash. Ten megabytes, against extracting to disk or shipping it across the
+/// bridge.
+// `path` and `audio_member` are recorded on open and consumed by the save and
+// repack path (step 7), which does not exist yet. They are kept here rather than
+// re-derived later because that is when they are known for certain.
+#[allow(dead_code)]
+pub struct OpenTsf {
+    /// Where it came from, for saving back to (step 7).
+    pub path: PathBuf,
+    pub transcript: String,
+    /// Decoded from on every play (step 6) and written back verbatim on save.
+    pub audio: Vec<u8>,
+    /// The audio member's name, so a repack writes it under the same name.
+    pub audio_member: String,
+    pub meta: serde_json::Value,
+}
+
+/// Deliberately hand-written rather than derived: a derived Debug would put the
+/// transcript text and ten megabytes of audio into any panic message or log
+/// line that formatted this. Sizes are all anyone debugging needs.
+impl std::fmt::Debug for OpenTsf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenTsf")
+            .field("path", &self.path)
+            .field("audio_member", &self.audio_member)
+            .field("audio_bytes", &self.audio.len())
+            .field("transcript_chars", &self.transcript.len())
+            .finish()
+    }
+}
+
+#[derive(Default)]
+pub struct TsfState(pub Mutex<Option<OpenTsf>>);
+
+#[derive(Debug, Serialize)]
+pub struct OpenTsfResult {
+    /// The document text, for the editor. The frontend never sees the archive.
+    pub transcript: String,
+    pub meta: serde_json::Value,
+    pub audio_bytes: usize,
+}
+
+/// Reads one member out of an archive without extracting the rest.
+fn read_member(archive: &Path, name: &str) -> Result<Vec<u8>, String> {
+    let file = File::open(archive)
+        .map_err(|error| format!("Cannot open {}: {error}", archive.display()))?;
+    let mut zip = ZipArchive::new(BufReader::new(file))
+        .map_err(|error| format!("Not a readable .tsf container: {error}"))?;
+    let mut member = zip
+        .by_name(name)
+        .map_err(|_| format!("The container has no {name}"))?;
+    let mut contents = Vec::with_capacity(member.size() as usize);
+    member
+        .read_to_end(&mut contents)
+        .map_err(|error| format!("Cannot read {name}: {error}"))?;
+    Ok(contents)
+}
+
+/// True when `path` begins with the zip signature.
+///
+/// Checked by content rather than by extension, so a file named .tsf that is
+/// not a container is reported as what it is instead of failing later with
+/// something less obvious.
+pub fn looks_like_container(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut signature = [0u8; 4];
+    file.read_exact(&mut signature).is_ok() && &signature == b"PK\x03\x04"
+}
+
+/// Reads a container: its transcript, its metadata and its audio.
+///
+/// Separate from the command so the reading can be tested without Tauri state,
+/// the same split `write_tsf` and `create_tsf` already use.
+pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
+    if !archive.is_file() {
+        return Err(format!("No such file: {}", archive.display()));
+    }
+    if !looks_like_container(archive) {
+        return Err(format!(
+            "{} is not a .tsf container (it does not start with a zip header)",
+            archive.display()
+        ));
+    }
+
+    let meta: serde_json::Value = serde_json::from_slice(&read_member(archive, META_MEMBER)?)
+        .map_err(|error| format!("The container's meta.json is not valid JSON: {error}"))?;
+
+    match meta.get("tsf_version").and_then(serde_json::Value::as_u64) {
+        Some(version) if version > SUPPORTED_TSF_VERSION => {
+            return Err(format!(
+                "This transcript was written by a newer version of Wisty (format {version}); this build understands up to {SUPPORTED_TSF_VERSION}."
+            ));
+        }
+        Some(_) => {}
+        None => return Err("The container's meta.json has no tsf_version".to_string()),
+    }
+
+    let audio_member = meta
+        .get("audio")
+        .and_then(|audio| audio.get("file"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "The container's meta.json does not name its audio file".to_string())?
+        .to_string();
+
+    let transcript = String::from_utf8(read_member(archive, TRANSCRIPT_MEMBER)?)
+        .map_err(|_| format!("{TRANSCRIPT_MEMBER} is not valid UTF-8"))?;
+    let audio = read_member(archive, &audio_member)?;
+
+    Ok(OpenTsf {
+        path: archive.to_path_buf(),
+        transcript,
+        audio,
+        audio_member,
+        meta,
+    })
+}
+
+/// Opens a .tsf: the transcript and metadata are returned, the audio is kept.
+#[tauri::command]
+pub fn open_tsf(state: tauri::State<'_, TsfState>, path: String) -> Result<OpenTsfResult, String> {
+    let container = read_tsf(Path::new(&path))?;
+    let result = OpenTsfResult {
+        transcript: container.transcript.clone(),
+        meta: container.meta.clone(),
+        audio_bytes: container.audio.len(),
+    };
+
+    let mut open = state
+        .0
+        .lock()
+        .map_err(|error| format!("Cannot take the open-container lock: {error}"))?;
+    *open = Some(container);
+
+    Ok(result)
+}
+
+/// Releases the open container, freeing the audio it was holding.
+///
+/// Called when the document is closed or replaced. Without it the bytes would
+/// stay resident after the user moved on to an ordinary text file.
+#[tauri::command]
+pub fn close_tsf(state: tauri::State<'_, TsfState>) -> Result<(), String> {
+    let mut open = state
+        .0
+        .lock()
+        .map_err(|error| format!("Cannot take the open-container lock: {error}"))?;
+    *open = None;
     Ok(())
 }
 
@@ -492,5 +658,163 @@ mod tests {
         let result = write_tsf(&output, "text", &audio, draft(), Some(&"x".repeat(50_000)))
             .expect("write");
         assert_eq!(result.bytes, std::fs::metadata(&output).unwrap().len());
+    }
+
+    /// A container on disk, for the reading tests.
+    fn written(dir: &Path, transcript: &str, words: Option<&str>) -> PathBuf {
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(2)).unwrap();
+        let output = dir.join("out.tsf");
+        let mut meta = draft();
+        if words.is_some() {
+            meta.as_object_mut()
+                .unwrap()
+                .insert("words".into(), serde_json::json!(WORDS_MEMBER));
+        }
+        write_tsf(&output, transcript, &audio, meta, words).expect("write");
+        output
+    }
+
+    #[test]
+    fn reads_back_what_was_written() {
+        let dir = temp_dir("read");
+        let transcript = "ALICE: \u{27E6}0.00\u{2013}1.00\u{27E7}Hello.";
+        let path = written(&dir, transcript, None);
+
+        let container = read_tsf(&path).expect("read");
+        assert_eq!(container.transcript, transcript);
+        assert_eq!(container.audio_member, "audio.wav");
+        assert_eq!(container.audio, wav_bytes(2));
+        assert_eq!(container.meta["tsf_version"], 1);
+        assert_eq!(container.path, path);
+    }
+
+    #[test]
+    fn a_round_trip_preserves_the_audio_exactly() {
+        let dir = temp_dir("roundtrip");
+        let path = written(&dir, "text", None);
+        assert_eq!(read_tsf(&path).unwrap().audio, wav_bytes(2));
+    }
+
+    #[test]
+    fn reads_a_container_that_carries_word_timings() {
+        let dir = temp_dir("readwords");
+        let path = written(&dir, "text", Some("[{\"start\":0}]"));
+        let container = read_tsf(&path).expect("read");
+        assert_eq!(container.meta["words"], WORDS_MEMBER);
+    }
+
+    #[test]
+    fn refuses_a_file_that_is_not_a_container() {
+        let dir = temp_dir("notzip");
+        let path = dir.join("fake.tsf");
+        std::fs::write(&path, b"ALICE: this is just a text file\n").unwrap();
+        let error = read_tsf(&path).unwrap_err();
+        assert!(error.contains("not a .tsf container"), "got: {error}");
+    }
+
+    #[test]
+    fn refuses_a_missing_file() {
+        let dir = temp_dir("missing");
+        assert!(read_tsf(&dir.join("nope.tsf")).unwrap_err().contains("No such file"));
+    }
+
+    #[test]
+    fn refuses_a_container_from_a_newer_format_version() {
+        // Unknown keys are carried through, but a version bump means breaking
+        // changes, so opening hopefully would risk misreading the file.
+        let dir = temp_dir("newer");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+        let path = dir.join("out.tsf");
+        let mut meta = draft();
+        meta.as_object_mut().unwrap().insert("tsf_version".into(), serde_json::json!(99));
+        write_tsf(&path, "text", &audio, meta, None).expect("write");
+
+        let error = read_tsf(&path).unwrap_err();
+        assert!(error.contains("newer version"), "got: {error}");
+    }
+
+    #[test]
+    fn refuses_a_container_with_no_version() {
+        let dir = temp_dir("noversion");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+        let path = dir.join("out.tsf");
+        let mut meta = draft();
+        meta.as_object_mut().unwrap().remove("tsf_version");
+        write_tsf(&path, "text", &audio, meta, None).expect("write");
+
+        assert!(read_tsf(&path).unwrap_err().contains("no tsf_version"));
+    }
+
+    #[test]
+    fn carries_unknown_metadata_keys_through_to_the_caller() {
+        let dir = temp_dir("unknown");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+        let path = dir.join("out.tsf");
+        let mut meta = draft();
+        meta.as_object_mut()
+            .unwrap()
+            .insert("written_by_a_later_version".into(), serde_json::json!({ "x": 1 }));
+        write_tsf(&path, "text", &audio, meta, None).expect("write");
+
+        let container = read_tsf(&path).expect("read");
+        assert_eq!(container.meta["written_by_a_later_version"]["x"], 1);
+    }
+
+    #[test]
+    fn reports_a_container_whose_audio_member_is_missing() {
+        // write_tsf cannot produce this — it names the member itself — so the
+        // archive is built by hand. This is the shape a hand-edited or
+        // truncated container would have, and the error should say which
+        // member is absent rather than failing vaguely later.
+        let dir = temp_dir("noaudio");
+        let path = dir.join("broken.tsf");
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zip.start_file(TRANSCRIPT_MEMBER, options).unwrap();
+        zip.write_all(b"text").unwrap();
+        zip.start_file(META_MEMBER, options).unwrap();
+        zip.write_all(
+            serde_json::json!({
+                "tsf_version": 1,
+                "audio": { "file": "elsewhere.m4a" }
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        zip.finish().unwrap();
+
+        let error = read_tsf(&path).unwrap_err();
+        assert!(error.contains("has no elsewhere.m4a"), "got: {error}");
+    }
+
+    #[test]
+    fn reports_a_container_with_no_transcript() {
+        let dir = temp_dir("notranscript");
+        let path = dir.join("broken.tsf");
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        zip.start_file(META_MEMBER, SimpleFileOptions::default()).unwrap();
+        zip.write_all(serde_json::json!({ "tsf_version": 1, "audio": { "file": "a.wav" } }).to_string().as_bytes())
+            .unwrap();
+        zip.finish().unwrap();
+
+        let error = read_tsf(&path).unwrap_err();
+        assert!(error.contains("has no transcript.txt"), "got: {error}");
+    }
+
+    #[test]
+    fn signature_check_distinguishes_containers_from_text() {
+        let dir = temp_dir("signature");
+        let zip = written(&dir, "text", None);
+        let text = dir.join("plain.txt");
+        std::fs::write(&text, b"not a zip").unwrap();
+
+        assert!(looks_like_container(&zip));
+        assert!(!looks_like_container(&text));
+        assert!(!looks_like_container(&dir.join("absent")));
     }
 }

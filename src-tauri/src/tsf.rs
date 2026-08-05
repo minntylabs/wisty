@@ -29,6 +29,7 @@ use zip::{CompressionMethod, ZipWriter};
 /// name, and meta.json names only the audio member, which can vary.
 const TRANSCRIPT_MEMBER: &str = "transcript.txt";
 const META_MEMBER: &str = "meta.json";
+const WORDS_MEMBER: &str = "words.json";
 
 #[derive(Debug, Serialize)]
 pub struct CreateTsfResult {
@@ -154,6 +155,7 @@ pub fn write_tsf(
     transcript: &str,
     audio_path: &Path,
     meta_draft: serde_json::Value,
+    words: Option<&str>,
 ) -> Result<CreateTsfResult, String> {
     let facts = probe_audio(audio_path)?;
     let audio_member = audio_member_name(audio_path);
@@ -170,7 +172,7 @@ pub fn write_tsf(
             .unwrap_or("transcript.tsf")
     ));
 
-    let result = write_archive(&temporary, transcript, audio_path, &meta, &audio_member);
+    let result = write_archive(&temporary, transcript, audio_path, &meta, &audio_member, words);
     if let Err(error) = result {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
@@ -199,6 +201,7 @@ fn write_archive(
     audio_path: &Path,
     meta: &[u8],
     audio_member: &str,
+    words: Option<&str>,
 ) -> Result<(), String> {
     let file = File::create(temporary)
         .map_err(|error| format!("Cannot create {}: {error}", temporary.display()))?;
@@ -227,34 +230,23 @@ fn write_archive(
     zip.write_all(meta)
         .map_err(|error| format!("Cannot write {META_MEMBER}: {error}"))?;
 
+    // Every member goes in before the archive is renamed into place. Appending
+    // to a published container would rewrite its central directory, so an
+    // interruption could corrupt a file that was already valid — and a failure
+    // after the rename would leave meta.json naming a member that is not there.
+    if let Some(words) = words {
+        zip.start_file(WORDS_MEMBER, deflated)
+            .map_err(|error| format!("Cannot write {WORDS_MEMBER}: {error}"))?;
+        zip.write_all(words.as_bytes())
+            .map_err(|error| format!("Cannot write {WORDS_MEMBER}: {error}"))?;
+    }
+
     let mut writer = zip
         .finish()
         .map_err(|error| format!("Cannot finalise the container: {error}"))?;
     writer
         .flush()
         .map_err(|error| format!("Cannot flush the container: {error}"))?;
-    Ok(())
-}
-
-/// Adds an optional extra member, used for the word timings that travel with a
-/// transcript when its producer had them.
-pub fn append_member(archive: &Path, name: &str, contents: &[u8]) -> Result<(), String> {
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .open(archive)
-        .map_err(|error| format!("Cannot reopen the container: {error}"))?;
-    let mut zip = ZipWriter::new_append(file)
-        .map_err(|error| format!("Cannot reopen the container for appending: {error}"))?;
-    zip.start_file(
-        name,
-        SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
-    )
-    .map_err(|error| format!("Cannot add {name}: {error}"))?;
-    zip.write_all(contents)
-        .map_err(|error| format!("Cannot write {name}: {error}"))?;
-    zip.finish()
-        .map_err(|error| format!("Cannot finalise the container: {error}"))?;
     Ok(())
 }
 
@@ -276,17 +268,11 @@ pub fn create_tsf(
     let mut meta = meta;
     if words.is_some() {
         if let Some(object) = meta.as_object_mut() {
-            object.insert("words".into(), serde_json::Value::String("words.json".into()));
+            object.insert("words".into(), serde_json::Value::String(WORDS_MEMBER.into()));
         }
     }
 
-    let result = write_tsf(&output, &transcript, &audio, meta)?;
-
-    if let Some(words) = words {
-        append_member(&output, "words.json", words.as_bytes())?;
-    }
-
-    Ok(result)
+    write_tsf(&output, &transcript, &audio, meta, words.as_deref())
 }
 
 #[cfg(test)]
@@ -391,7 +377,7 @@ mod tests {
         let output = dir.join("out.tsf");
         let transcript = "ALICE: \u{27E6}0.00\u{2013}1.00\u{27E7}Hello.";
 
-        let result = write_tsf(&output, transcript, &audio, draft()).expect("write");
+        let result = write_tsf(&output, transcript, &audio, draft(), None).expect("write");
         assert!((result.duration - 2.0).abs() < 0.01);
         assert!(result.bytes > 0);
 
@@ -419,7 +405,7 @@ mod tests {
         std::fs::write(&audio, &original).unwrap();
         let output = dir.join("out.tsf");
 
-        write_tsf(&output, "text", &audio, draft()).expect("write");
+        write_tsf(&output, "text", &audio, draft(), None).expect("write");
 
         let mut zip = zip::ZipArchive::new(File::open(&output).unwrap()).unwrap();
         let mut member = zip.by_name("audio.wav").unwrap();
@@ -435,7 +421,7 @@ mod tests {
         let output = dir.join("out.tsf");
         let missing = dir.join("nope.wav");
 
-        assert!(write_tsf(&output, "text", &missing, draft()).is_err());
+        assert!(write_tsf(&output, "text", &missing, draft(), None).is_err());
         assert!(!output.exists(), "no container should be left behind");
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -453,11 +439,58 @@ mod tests {
         let output = dir.join("out.tsf");
         std::fs::write(&output, b"stale contents").unwrap();
 
-        write_tsf(&output, "fresh", &audio, draft()).expect("write");
+        write_tsf(&output, "fresh", &audio, draft(), None).expect("write");
 
         let mut zip = zip::ZipArchive::new(File::open(&output).unwrap()).unwrap();
         let mut text = String::new();
         zip.by_name("transcript.txt").unwrap().read_to_string(&mut text).unwrap();
         assert_eq!(text, "fresh");
+    }
+
+    #[test]
+    fn includes_the_word_timings_when_given_them() {
+        let dir = temp_dir("words");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+        let output = dir.join("out.tsf");
+
+        let mut meta = draft();
+        meta.as_object_mut()
+            .unwrap()
+            .insert("words".into(), serde_json::json!("words.json"));
+        write_tsf(&output, "text", &audio, meta, Some("[{\"start\":0}]")).expect("write");
+
+        let mut zip = zip::ZipArchive::new(File::open(&output).unwrap()).unwrap();
+        let mut words = String::new();
+        zip.by_name("words.json").unwrap().read_to_string(&mut words).unwrap();
+        assert_eq!(words, "[{\"start\":0}]");
+    }
+
+    #[test]
+    fn omits_the_words_member_when_there_are_none() {
+        let dir = temp_dir("nowords");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+        let output = dir.join("out.tsf");
+
+        write_tsf(&output, "text", &audio, draft(), None).expect("write");
+
+        let zip = zip::ZipArchive::new(File::open(&output).unwrap()).unwrap();
+        let names: Vec<&str> = zip.file_names().collect();
+        assert!(!names.contains(&"words.json"), "got {names:?}");
+    }
+
+    #[test]
+    fn the_reported_size_is_the_whole_container() {
+        // The byte count used to be measured before the word timings were added,
+        // so it under-reported whenever they were present.
+        let dir = temp_dir("size");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+        let output = dir.join("out.tsf");
+
+        let result = write_tsf(&output, "text", &audio, draft(), Some(&"x".repeat(50_000)))
+            .expect("write");
+        assert_eq!(result.bytes, std::fs::metadata(&output).unwrap().len());
     }
 }

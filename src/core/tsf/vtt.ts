@@ -66,13 +66,31 @@ const extractSpeaker = (text: string): { speaker?: string; text: string } => {
   if (!match) {
     return { text };
   }
-  const speaker = match[1].trim();
+  const speaker = decodeEntities(match[1].trim());
   const remainder = text.slice(match[0].length).replace(/<\/v>/g, "").trim();
   return speaker ? { speaker, text: remainder } : { text: remainder };
 };
 
 /** Removes any other VTT inline markup (<b>, <i>, <c.classname>, timestamps). */
 const stripInlineTags = (text: string): string => text.replace(/<[^>]*>/g, "");
+
+/**
+ * The character escapes a cue payload may contain.
+ *
+ * `&amp;` is decoded last, so `&amp;lt;` yields the literal text `&lt;` rather than
+ * a `<`. Decoding it first would let one escape produce another and change the text.
+ */
+const ENTITIES: [RegExp, string][] = [
+  [/&lt;/g, "<"],
+  [/&gt;/g, ">"],
+  [/&nbsp;/g, " "],
+  [/&lrm;/g, "‎"],
+  [/&rlm;/g, "‏"],
+  [/&amp;/g, "&"]
+];
+
+const decodeEntities = (text: string): string =>
+  ENTITIES.reduce((result, [pattern, character]) => result.replace(pattern, character), text);
 
 /**
  * Blocks separated by blank lines. Handles CRLF, a `WEBVTT` header, and the
@@ -126,7 +144,9 @@ export const parseSubtitles = (source: string): Cue[] => {
       continue;
     }
     const { speaker, text } = extractSpeaker(body);
-    const cleaned = stripInlineTags(text).replace(/\s+/g, " ").trim();
+    // Tags are stripped before entities are decoded, so a `&lt;b&gt;` in the
+    // transcript survives as literal text instead of becoming markup to remove.
+    const cleaned = decodeEntities(stripInlineTags(text)).replace(/\s+/g, " ").trim();
     if (!cleaned) {
       continue;
     }

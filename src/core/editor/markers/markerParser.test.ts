@@ -167,6 +167,24 @@ describe("excludeMarkers", () => {
     expect(excludeMarkers(spans, markers)[0]).toMatchObject({ index: 3 });
   });
 
+  it("splits a span around a marker in its middle rather than truncating it", () => {
+    const text = `word${MARKER}more`;
+    const markers = parseMarkers(text);
+    expect(excludeMarkers([{ from: 0, to: text.length }], markers)).toEqual([
+      { from: 0, to: 4 },
+      { from: 4 + MARKER.length, to: text.length }
+    ]);
+  });
+
+  it("removes several markers from one span", () => {
+    const text = `${MARKER}a${MARKER}b`;
+    const markers = parseMarkers(text);
+    expect(excludeMarkers([{ from: 0, to: text.length }], markers)).toEqual([
+      { from: MARKER.length, to: MARKER.length + 1 },
+      { from: MARKER.length * 2 + 1, to: text.length }
+    ]);
+  });
+
   it("returns the spans unchanged when there are no markers", () => {
     const spans = [{ from: 0, to: 5 }];
     expect(excludeMarkers(spans, [])).toEqual(spans);

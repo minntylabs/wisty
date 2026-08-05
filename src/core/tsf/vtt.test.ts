@@ -88,6 +88,42 @@ second part
     expect(cues[0]).toMatchObject({ speaker: "ALICE", text: "Shouting." });
   });
 
+  it("decodes character escapes in the payload", () => {
+    const cues = parseSubtitles(`WEBVTT
+
+00:00:01.000 --> 00:00:02.000
+<v ALICE>Marks &amp; Spencer, 5 &lt; 6 &gt; 4.
+`);
+    expect(cues[0].text).toBe("Marks & Spencer, 5 < 6 > 4.");
+  });
+
+  it("decodes escapes in the speaker name too", () => {
+    const cues = parseSubtitles(`WEBVTT
+
+00:00:01.000 --> 00:00:02.000
+<v A &amp; B>Text.
+`);
+    expect(cues[0].speaker).toBe("A & B");
+  });
+
+  it("decodes the ampersand last, so an escape cannot produce another", () => {
+    const cues = parseSubtitles(`WEBVTT
+
+00:00:01.000 --> 00:00:02.000
+Literally &amp;lt; here.
+`);
+    expect(cues[0].text).toBe("Literally &lt; here.");
+  });
+
+  it("keeps escaped markup as text rather than stripping it", () => {
+    const cues = parseSubtitles(`WEBVTT
+
+00:00:01.000 --> 00:00:02.000
+He wrote &lt;b&gt;bold&lt;/b&gt; in the chat.
+`);
+    expect(cues[0].text).toBe("He wrote <b>bold</b> in the chat.");
+  });
+
   it("strips other inline markup", () => {
     const cues = parseSubtitles(`WEBVTT
 

@@ -124,19 +124,26 @@ export const excludeMarkers = <T extends { from: number; to: number }>(
     return [...spans];
   }
   return spans.flatMap((span) => {
-    let { from, to } = span;
+    // What remains of the span once the markers are cut out of it. Usually one
+    // piece, because a marker sits flush at the start of the word it introduces
+    // — but a marker in the middle of a span splits it, and returning only the
+    // leading piece would silently discard the text after it.
+    let pieces = [{ from: span.from, to: span.to }];
     for (const marker of markers) {
-      if (marker.to <= from || marker.from >= to) {
-        continue;
-      }
-      // Markers sit flush against the word they introduce, so an overlap
-      // trims one end of the span rather than splitting it in two.
-      if (marker.from <= from) {
-        from = Math.max(from, marker.to);
-      } else {
-        to = Math.min(to, marker.from);
-      }
+      pieces = pieces.flatMap((piece) => {
+        if (marker.to <= piece.from || marker.from >= piece.to) {
+          return [piece];
+        }
+        const remaining: { from: number; to: number }[] = [];
+        if (marker.from > piece.from) {
+          remaining.push({ from: piece.from, to: marker.from });
+        }
+        if (marker.to < piece.to) {
+          remaining.push({ from: marker.to, to: piece.to });
+        }
+        return remaining;
+      });
     }
-    return from < to ? [{ ...span, from, to }] : [];
+    return pieces.map((piece) => ({ ...span, ...piece }));
   });
 };

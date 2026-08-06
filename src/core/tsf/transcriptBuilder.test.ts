@@ -88,16 +88,28 @@ describe("output is compatible with the existing transcript parser", () => {
     }
   });
 
-  it("keeps markers inside a word span, so the move rule can carry them", () => {
-    // wordSpans splits on whitespace and knows nothing of markers; a flush
-    // marker therefore belongs to the same span as the word it introduces.
+  it("keeps markers out of every word span", () => {
+    // wordSpans splits on whitespace, which would weld a flush marker onto the
+    // front of the word it introduces; it then cuts the markers back out. A
+    // marker is machinery, not a word, so nothing may select or move it as one.
+    const turn = parseTurnLine(docLine(0));
+    const spans = wordSpans(turn!);
+    for (const marker of parseMarkers(text)) {
+      const overlapping = spans.find(
+        (span) => span.from < marker.to && span.to > marker.from
+      );
+      expect(overlapping).toBeUndefined();
+    }
+  });
+
+  it("leaves the introduced word as a span of its own, starting after the marker", () => {
+    // The other half of flush placement: cutting the marker out must leave the
+    // word behind rather than dropping the span, or the first word of every
+    // sentence would become unreachable to tidy mode.
     const turn = parseTurnLine(docLine(0));
     const spans = wordSpans(turn!);
     const firstMarker = parseMarkers(text)[0];
-    const covering = spans.find(
-      (span) => span.from <= firstMarker.from && span.to >= firstMarker.to
-    );
-    expect(covering).toBeDefined();
+    expect(spans.some((span) => span.from === firstMarker.to)).toBe(true);
   });
 });
 

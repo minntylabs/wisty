@@ -9,6 +9,8 @@
  * (see DocLines), so the whole module is testable without CodeMirror.
  */
 
+import { excludeMarkers, parseMarkers } from "../markers/markerParser";
+
 /** One line of the document. CodeMirror's `Line` satisfies this structurally. */
 export type DocLine = {
   number: number;
@@ -150,6 +152,18 @@ export const nextTurn = (doc: DocLines, turn: Turn): Turn | null => adjacentTurn
  * delimited token: punctuation, brackets and annotations such as "[inaudible]"
  * travel with the token they are attached to, which is what the reader sees
  * and therefore what they expect to move.
+ *
+ * Time markers are then cut back out. A .tsf writes them flush against the
+ * sentence they introduce — "⟦734.12–736.80⟧So we walked" — so splitting on
+ * whitespace alone hands back a first word with the token welded to its front.
+ * Left in, that token would be highlighted on hover, selectable as a word, and
+ * reattributed to the other speaker as though it were one.
+ *
+ * Excluding it is also what leaves a click on an icon unclaimed, so the
+ * marker's own widget receives it rather than tidy mode swallowing it.
+ *
+ * Plain .txt transcripts have no markers, and `excludeMarkers` returns its
+ * input unchanged in that case, so this costs them one scan and nothing else.
  */
 export const wordSpans = (turn: Turn): WordSpan[] => {
   const spans: WordSpan[] = [];
@@ -160,7 +174,10 @@ export const wordSpans = (turn: Turn): WordSpan[] => {
       to: turn.textFrom + match.index + match[0].length
     });
   }
-  return spans;
+  // Markers are parsed from the turn's own text rather than passed in, so every
+  // existing caller stays marker-aware without knowing markers exist. The turn
+  // is one line, and this runs on hover rather than per keystroke.
+  return excludeMarkers(spans, parseMarkers(turn.text, turn.textFrom));
 };
 
 /** Index into `wordSpans(turn)` of the word covering `pos`, or null. */

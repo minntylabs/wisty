@@ -212,3 +212,61 @@ describe("label operations", () => {
     expect(apply(text, buildTurnDelete(doc, turn, "\n"))).toBe("");
   });
 });
+
+/**
+ * Moves in a .tsf, where each sentence is introduced by a flush time marker.
+ *
+ * The failure these guard against is silent: a sentence moved to the other
+ * speaker while its timestamp stays behind still reads correctly, and only
+ * misbehaves later when someone clicks the icon and hears the wrong passage.
+ */
+describe("moves carrying time markers", () => {
+  const MARKED = [
+    "ALICE: ⟦1.00–2.00⟧So we walked. ⟦2.00–3.00⟧And then it rained. ⟦3.00–4.00⟧It was cold.",
+    "BOB: ⟦4.00–5.00⟧It was fine. ⟦5.00–6.00⟧Really fine."
+  ].join("\n");
+
+  it("takes the marker to the next turn with the sentence it introduces", () => {
+    const { outcome, result } = move(MARKED, "It was cold.");
+    expect(outcome).toBe("toNext");
+    expect(result).toBe(
+      [
+        "ALICE: ⟦1.00–2.00⟧So we walked. ⟦2.00–3.00⟧And then it rained.",
+        "BOB: ⟦3.00–4.00⟧It was cold. ⟦4.00–5.00⟧It was fine. ⟦5.00–6.00⟧Really fine."
+      ].join("\n")
+    );
+  });
+
+  it("takes the marker to the previous turn with the sentence it introduces", () => {
+    const { outcome, result } = move(MARKED, "It was fine.");
+    expect(outcome).toBe("toPrevious");
+    expect(result).toBe(
+      [
+        "ALICE: ⟦1.00–2.00⟧So we walked. ⟦2.00–3.00⟧And then it rained. " +
+          "⟦3.00–4.00⟧It was cold. ⟦4.00–5.00⟧It was fine.",
+        "BOB: ⟦5.00–6.00⟧Really fine."
+      ].join("\n")
+    );
+  });
+
+  it("keeps each marker with its own sentence through a three-way split", () => {
+    const { outcome, result } = move(MARKED, "And then it rained.");
+    expect(outcome).toBe("split");
+    expect(result).toBe(
+      [
+        "ALICE: ⟦1.00–2.00⟧So we walked.",
+        "BOB: ⟦2.00–3.00⟧And then it rained.",
+        "ALICE: ⟦3.00–4.00⟧It was cold.",
+        "BOB: ⟦4.00–5.00⟧It was fine. ⟦5.00–6.00⟧Really fine."
+      ].join("\n")
+    );
+  });
+
+  it("leaves a marker behind when the selection starts mid-sentence", () => {
+    // Only a marker flush against the boundary is taken. This one introduces
+    // "So", which is staying put, so it must stay with it.
+    const { result } = move(MARKED, "we walked.");
+    expect(result.split("\n")[0]).toBe("ALICE: ⟦1.00–2.00⟧So");
+    expect(result.split("\n")[1]).toBe("BOB: we walked.");
+  });
+});

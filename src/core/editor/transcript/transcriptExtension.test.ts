@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { history, undo } from "@codemirror/commands";
-import { EditorState } from "@codemirror/state";
+import { EditorState, Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { createMarkers } from "../markers/markerExtension";
 import { createTranscriptExtension } from "./transcriptExtension";
 
 const SAMPLE = "ALICE: so I went there and then he said\nBOB: it was fine";
@@ -11,9 +12,12 @@ const SAMPLE = "ALICE: so I went there and then he said\nBOB: it was fine";
  * pointer position is supplied directly. Everything else — the anchor field,
  * the wheel accumulator, the commit transactions — runs for real.
  */
-const createView = (doc = SAMPLE) => {
+const createView = (doc = SAMPLE, extra: Extension = []) => {
   const view = new EditorView({
-    state: EditorState.create({ doc, extensions: [history(), createTranscriptExtension()] }),
+    state: EditorState.create({
+      doc,
+      extensions: [history(), createTranscriptExtension(), extra]
+    }),
     parent: document.body
   });
 
@@ -339,4 +343,39 @@ describe("decorations", () => {
     expect(outcomeClass(t.view)).toBe("cm-transcript-label");
     t.view.destroy();
   });
+});
+
+/**
+ * Tidy mode and time markers configured together, which is what a .tsf gets.
+ *
+ * Both visibility states are exercised because "works with the icons shown,
+ * breaks with them hidden" is the kind of bug that survives a review. It should
+ * make no difference — visibility is a class on the content element, and the
+ * tokens are in the buffer either way — and this is what says so.
+ */
+describe("alongside time markers", () => {
+  // "ALICE: " is 7 characters, the marker is a further 15, so "So" begins at 22.
+  const MARKED = "ALICE: ⟦734.12–736.80⟧So we walked\nBOB: it was fine";
+  const MARKER_MIDDLE = 14;
+  const SO = 23;
+
+  const withMarkers = (visible: boolean) => createView(MARKED, createMarkers(() => visible).extension);
+
+  for (const visible of [true, false]) {
+    const state = visible ? "shown" : "hidden";
+
+    it(`selects the word a marker introduces, not the marker with it (icons ${state})`, () => {
+      const t = withMarkers(visible);
+      t.hover(SO);
+      expect(t.selected()).toBe("So");
+      t.view.destroy();
+    });
+
+    it(`anchors nothing over a marker, leaving the click for its icon (icons ${state})`, () => {
+      const t = withMarkers(visible);
+      t.hover(MARKER_MIDDLE);
+      expect(t.selected()).toBe("");
+      t.view.destroy();
+    });
+  }
 });

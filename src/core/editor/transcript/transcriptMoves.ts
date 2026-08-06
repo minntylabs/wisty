@@ -8,6 +8,7 @@
  * separator special cases, and it is trivially non-overlapping.
  */
 
+import { parseMarkers } from "../markers/markerParser";
 import {
   type DocLines,
   type Turn,
@@ -43,12 +44,39 @@ const replaceTurnText = (turn: Turn, insert: string): DocChange => ({
   insert
 });
 
-/** Splits a turn's text at the selection, in turn-relative coordinates. */
-const zones = (turn: Turn, from: number, to: number) => ({
-  head: turn.text.slice(0, from - turn.textFrom),
-  body: turn.text.slice(from - turn.textFrom, to - turn.textFrom),
-  tail: turn.text.slice(to - turn.textFrom)
-});
+/**
+ * The selection's leading boundary, moved back over a time marker sitting flush
+ * against it.
+ *
+ * `wordSpans` excludes markers, so a selection that starts at the first word of
+ * a sentence starts *after* that sentence's marker. Moving it as-is would leave
+ * the timestamp behind, attached to whatever text followed it into the donor
+ * turn — silently pointing at audio it no longer introduces. Extending the
+ * boundary carries it along instead.
+ *
+ * Only a marker touching the boundary counts. §3.3 writes markers flush against
+ * their sentence, so "no whitespace between" means "introduces this sentence"
+ * and there is nothing to disambiguate. A marker further back belongs to the
+ * preceding sentence and must stay with it.
+ */
+const withLeadingMarker = (turn: Turn, from: number): number =>
+  parseMarkers(turn.text, turn.textFrom).find((marker) => marker.to === from)?.from ?? from;
+
+/**
+ * Splits a turn's text at the selection, in turn-relative coordinates.
+ *
+ * The one place turn text is cut, which is why the marker adjustment lives here
+ * rather than in each caller: every move is built from these three pieces, so
+ * getting it right once covers all of them.
+ */
+const zones = (turn: Turn, from: number, to: number) => {
+  const start = withLeadingMarker(turn, from);
+  return {
+    head: turn.text.slice(0, start - turn.textFrom),
+    body: turn.text.slice(start - turn.textFrom, to - turn.textFrom),
+    tail: turn.text.slice(to - turn.textFrom)
+  };
+};
 
 /**
  * Which of the four cases a word selection falls into. Reaching both ends is

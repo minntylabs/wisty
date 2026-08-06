@@ -78,6 +78,65 @@ describe("word segmentation", () => {
     expect(wordIndexAt(turn, 39)).toBe(7);
     expect(wordIndexAt(turn, 100)).toBeNull();
   });
+
+  it("returns the plain text spans untouched when there are no markers", () => {
+    // The regression that matters: plain .txt transcripts are already in use,
+    // and tidy mode must behave for them exactly as it did before markers
+    // existed. excludeMarkers returns its input when the marker list is empty,
+    // so this is a property of the code rather than a hope.
+    const { turn } = turnOnLine(SAMPLE, 1);
+    expect(wordSpans(turn)).toEqual([
+      { from: 7, to: 9 },
+      { from: 10, to: 11 },
+      { from: 12, to: 16 },
+      { from: 17, to: 22 },
+      { from: 23, to: 26 },
+      { from: 27, to: 31 },
+      { from: 32, to: 34 },
+      { from: 35, to: 39 }
+    ]);
+  });
+});
+
+describe("word segmentation with time markers", () => {
+  const wordsOf = (turn: { text: string; textFrom: number }, spans: { from: number; to: number }[]) =>
+    spans.map((span) => turn.text.slice(span.from - turn.textFrom, span.to - turn.textFrom));
+
+  it("drops the marker and keeps the word it is welded to", () => {
+    // Markers are written flush against their sentence, so splitting on
+    // whitespace alone would produce "⟦734.12–736.80⟧So" as a single word.
+    const { turn } = turnOnLine("ALICE: ⟦734.12–736.80⟧So we walked", 1);
+    expect(wordsOf(turn, wordSpans(turn))).toEqual(["So", "we", "walked"]);
+  });
+
+  it("handles several markers in one turn", () => {
+    const { turn } = turnOnLine(
+      "ALICE: ⟦734.12–736.80⟧So we walked. ⟦736.80–740.15⟧And then it rained.",
+      1
+    );
+    expect(wordsOf(turn, wordSpans(turn)))
+      .toEqual(["So", "we", "walked.", "And", "then", "it", "rained."]);
+  });
+
+  it("splits a word that a marker sits inside rather than dropping its tail", () => {
+    // Not something the writer produces, but an edit can leave a marker mid-word
+    // and losing the text after it would be silent.
+    const { turn } = turnOnLine("ALICE: wal⟦734.12–736.80⟧ked on", 1);
+    expect(wordsOf(turn, wordSpans(turn))).toEqual(["wal", "ked", "on"]);
+  });
+
+  it("leaves no word at all where a marker stands alone", () => {
+    const { turn } = turnOnLine("ALICE: hello ⟦734.12–736.80⟧ there", 1);
+    expect(wordsOf(turn, wordSpans(turn))).toEqual(["hello", "there"]);
+  });
+
+  it("reports no word under a marker, so a click on its icon goes unclaimed", () => {
+    // This is what lets the marker's own widget receive the click instead of
+    // tidy mode selecting a word and swallowing it.
+    const { turn } = turnOnLine("ALICE: ⟦734.12–736.80⟧So we walked", 1);
+    const markerMiddle = turn.textFrom + 5;
+    expect(wordIndexAt(turn, markerMiddle)).toBeNull();
+  });
 });
 
 describe("turn navigation", () => {

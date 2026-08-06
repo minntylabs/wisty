@@ -20,44 +20,59 @@ import {
   StateField,
   Transaction
 } from "@codemirror/state";
-import { Decoration, DecorationSet, EditorView } from "@codemirror/view";
+import { Decoration, DecorationSet, EditorView, WidgetType } from "@codemirror/view";
 import { changeSplits, Marker, parseMarkers } from "./markerParser";
 
 /** Shows or hides the marker icons. Dispatched by the menu/keyboard toggle. */
 export const setMarkersVisibleEffect = StateEffect.define<boolean>();
 
 /**
- * The decoration applied to a marker token.
- *
- * A `mark`, not a `replace`. Replacing was the obvious choice — the token is
- * machinery the reader should not see — but CodeMirror wraps every replaced
- * range in `<img class="cm-widgetBuffer">` elements, and an image inside the
- * editable is half of what crashes WebKitGTK 2.52.3's accessibility layer; the
- * en dash inside the token is the other half. A mark leaves the text in the
- * document and hides it in CSS, so no image is emitted.
- *
- * See dev_notes/webkit-replace-freeze-progress.md. The AT_SPI_BUS_ADDRESS
- * workaround in src-tauri/src/lib.rs now covers this bug wherever it appears,
- * including formatExtension's replace decorations, so the choice here could be
- * revisited — but a mark costs nothing and needs no environment variable.
- *
- * The times ride along as data attributes so that a click on the icon can be
- * answered without re-reading the document, and so the tracked set carries
- * everything a caller needs.
+ * A speaker icon standing in for the token. Inline SVG rather than a text
+ * glyph so it stays crisp at any zoom and takes its colour from the theme.
  */
-const markerDecoration = (marker: Marker): Decoration =>
-  Decoration.mark({
-    class: "cm-marker",
-    attributes: {
-      title: `${marker.start.toFixed(2)}–${marker.end.toFixed(2)}s`,
-      // The token is machinery, so it is hidden from assistive technology as
-      // well as from the eye. It stays in the document either way: removing it
-      // from the rendering is what replacing did, and what crashed the browser.
-      "aria-hidden": "true",
-      "data-marker-start": String(marker.start),
-      "data-marker-end": String(marker.end)
-    }
-  });
+class MarkerIconWidget extends WidgetType {
+  readonly start: number;
+  readonly end: number;
+
+  constructor(marker: Marker) {
+    super();
+    this.start = marker.start;
+    this.end = marker.end;
+  }
+
+  /**
+   * Widgets are recreated on every decoration rebuild; telling CodeMirror when
+   * two are equivalent lets it keep the existing DOM node instead of replacing
+   * it, which matters because a replaced node loses any in-flight interaction.
+   */
+  eq(other: MarkerIconWidget): boolean {
+    return other.start === this.start && other.end === this.end;
+  }
+
+  toDOM(): HTMLElement {
+    const wrapper = document.createElement("span");
+    wrapper.className = "cm-marker-icon";
+    // Both times, for a tooltip: the icon deliberately shows nothing itself.
+    wrapper.title = `${this.start.toFixed(2)}–${this.end.toFixed(2)}s`;
+    wrapper.setAttribute("aria-hidden", "true");
+    wrapper.innerHTML =
+      '<svg viewBox="0 0 16 16" width="11" height="11" fill="currentColor" focusable="false">' +
+      '<path d="M8 2.2 4.6 5H2.4A1.4 1.4 0 0 0 1 6.4v3.2A1.4 1.4 0 0 0 2.4 11h2.2L8 13.8Z"/>' +
+      '<path d="M10.9 4.6a.7.7 0 0 0-.9 1 3.3 3.3 0 0 1 0 4.8.7.7 0 0 0 .9 1 4.7 4.7 0 0 0 0-6.8Z"/>' +
+      "</svg>";
+    return wrapper;
+  }
+
+  /**
+   * True so events inside the widget are left to the widget rather than being
+   * treated as editor interaction. Playback hangs a click handler here later;
+   * without this the click would place the caret instead.
+   */
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
 
 /**
  * The lines an edit touched, in the new document, as whole-line ranges.
@@ -89,7 +104,7 @@ const touchedLineRanges = (tr: Transaction): { from: number; to: number }[] => {
 
 const decorationsFor = (text: string, offset: number): Range<Decoration>[] =>
   parseMarkers(text, offset).map((marker) =>
-    markerDecoration(marker).range(marker.from, marker.to)
+    Decoration.replace({ widget: new MarkerIconWidget(marker) }).range(marker.from, marker.to)
   );
 
 /**
@@ -206,78 +221,37 @@ export const markersIn = (state: EditorState): Marker[] => {
   }
   const cursor = set.iter();
   while (cursor.value) {
-    const attributes = (cursor.value.spec as { attributes?: Record<string, string> }).attributes;
-    if (attributes) {
-      markers.push({
-        from: cursor.from,
-        to: cursor.to,
-        start: Number(attributes["data-marker-start"]),
-        end: Number(attributes["data-marker-end"])
-      });
+    const widget = (cursor.value.spec as { widget?: MarkerIconWidget }).widget;
+    if (widget) {
+      markers.push({ from: cursor.from, to: cursor.to, start: widget.start, end: widget.end });
     }
     cursor.next();
   }
   return markers;
 };
 
-/** The speaker glyph, as a mask so it takes its colour from the theme. */
-const ICON_MASK =
-  'url(\'data:image/svg+xml;utf8,' +
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">' +
-  '<path d="M8 2.2 4.6 5H2.4A1.4 1.4 0 0 0 1 6.4v3.2A1.4 1.4 0 0 0 2.4 11h2.2L8 13.8Z"/>' +
-  '<path d="M10.9 4.6a.7.7 0 0 0-.9 1 3.3 3.3 0 0 1 0 4.8.7.7 0 0 0 .9 1 4.7 4.7 0 0 0 0-6.8Z"/>' +
-  "</svg>')";
-
 const markerTheme = EditorView.baseTheme({
-  /**
-   * The token's own characters are still here; they are clipped away by a fixed
-   * width and made transparent, and the icon is painted over the box as a mask
-   * so it takes its colour from the theme.
-   */
-  ".cm-marker": {
+  ".cm-marker-icon": {
     display: "inline-block",
-    width: "0.75em",
-    height: "0.75em",
-    overflow: "hidden",
-    color: "transparent",
     verticalAlign: "baseline",
     lineHeight: "1",
-    backgroundColor: "currentColor",
-    maskImage: ICON_MASK,
-    WebkitMaskImage: ICON_MASK,
-    maskSize: "contain",
-    WebkitMaskSize: "contain",
-    maskRepeat: "no-repeat",
-    WebkitMaskRepeat: "no-repeat",
-    maskPosition: "center",
-    WebkitMaskPosition: "center",
     // Flush against the following word in the document, so the icon supplies
     // its own breathing room rather than the file carrying whitespace.
     marginRight: "0.25em",
     cursor: "pointer",
     opacity: "0.75"
   },
-  ".cm-marker:hover": {
+  ".cm-marker-icon:hover": {
     opacity: "1"
   },
-  /** Hidden means no icon and no text: the token takes up nothing at all. */
-  ".cm-markers-hidden .cm-marker": {
-    width: "0",
-    marginRight: "0",
-    maskImage: "none",
-    WebkitMaskImage: "none",
-    backgroundColor: "transparent"
+  ".cm-markers-hidden .cm-marker-icon": {
+    display: "none"
   },
-  "&light .cm-marker": {
-    color: "transparent",
-    backgroundColor: "#2563eb"
+  "&light .cm-marker-icon": {
+    color: "#2563eb"
   },
-  "&dark .cm-marker": {
-    color: "transparent",
-    backgroundColor: "#93c5fd"
-  },
-  "&light .cm-markers-hidden .cm-marker, &dark .cm-markers-hidden .cm-marker": {
-    backgroundColor: "transparent"
+  "&dark .cm-marker-icon": {
+    color: "#93c5fd"
   }
 });
 

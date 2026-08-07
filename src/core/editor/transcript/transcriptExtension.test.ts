@@ -359,7 +359,7 @@ describe("alongside time markers", () => {
   const MARKER_MIDDLE = 14;
   const SO = 23;
 
-  const withMarkers = (visible: boolean) => createView(MARKED, createMarkers(() => visible).extension);
+  const withMarkers = (visible: boolean) => createView(MARKED, createMarkers(() => visible, () => {}).extension);
 
   for (const visible of [true, false]) {
     const state = visible ? "shown" : "hidden";

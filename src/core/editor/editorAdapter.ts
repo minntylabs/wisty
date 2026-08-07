@@ -41,6 +41,14 @@ type EditorAdapterOptions = {
   /** Fired when the viewport or caret moves, so a remembered position can be re-captured. */
   onViewPositionChanged?: () => void;
   getSettings: () => AppSettings;
+  /**
+   * Called when a time marker's icon is clicked, with the marker's own times.
+   *
+   * Injected rather than imported so the editor layer never depends on audio:
+   * App.tsx wires this to core/audio, and the editor stays constructible in a
+   * test with no playback at all.
+   */
+  onMarkerClick?: (start: number, end: number) => void;
 };
 
 type SetTextOptions = {
@@ -77,7 +85,10 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   // them costs work proportional to how many there are, and an ordinary text
   // file has none to find. Measured at ~6ms per keystroke on a 10MB document,
   // which is the difference between typing feeling fine and feeling broken.
-  const markers = createMarkers(() => options.getSettings().markersVisible);
+  const markers = createMarkers(
+    () => options.getSettings().markersVisible,
+    (start, end) => options.onMarkerClick?.(start, end)
+  );
   let transcriptEnabled = false;
   let markersEnabled = false;
 

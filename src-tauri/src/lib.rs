@@ -948,6 +948,7 @@ pub fn run() {
         .manage(LaunchArgState::new(launch_file))
         .manage(spellcheck::SpellState::default())
         .manage(tsf::TsfState::default())
+        .manage(playback::PlaybackState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -976,11 +977,15 @@ pub fn run() {
             spellcheck::spell_remove_word,
             tsf::create_tsf,
             tsf::open_tsf,
-            tsf::close_tsf
+            tsf::close_tsf,
+            playback::play_span,
+            playback::stop_playback,
+            playback::release_playback
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+mod playback;
 mod spellcheck;
 mod tsf;
 mod window_title;

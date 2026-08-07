@@ -31,6 +31,9 @@ const createHarness = (overrides: { containerText?: string } = {}) => {
   const markersEnabled = vi.fn((enabled: boolean) => {
     events.push(enabled ? "markers-on" : "markers-off");
   });
+  const releasePlayback = vi.fn(() => {
+    events.push("playback-released");
+  });
   const streamReadTextFile = vi.fn(async function* () {
     yield { text: "plain text", bytesReadTotal: 10, fileSizeBytes: 10 };
   });
@@ -100,6 +103,7 @@ const createHarness = (overrides: { containerText?: string } = {}) => {
       migrate: async () => {}
     },
     errors: { showError },
+    playback: { release: releasePlayback },
     confirmOpenLargeFile: async () => true,
     showFileTooLarge: async () => {}
   } as unknown as Parameters<typeof useFileLifecycle>[0];
@@ -114,6 +118,7 @@ const createHarness = (overrides: { containerText?: string } = {}) => {
     startSaveFileStream,
     streamReadTextFile,
     markersEnabled,
+    releasePlayback,
     events
   };
 };
@@ -166,7 +171,13 @@ describe("marker handling follows the document", () => {
     // tracked from the moment the document loads.
     const h = createHarness();
     await h.lifecycle.openFileAtPath(CONTAINER);
-    expect(h.events).toEqual(["markers-off", "markers-on", "reset", "append-text"]);
+    expect(h.events).toEqual([
+      "markers-off",
+      "playback-released",
+      "markers-on",
+      "reset",
+      "append-text"
+    ]);
   });
 
   it("is switched off for an ordinary text file", async () => {
@@ -222,6 +233,33 @@ describe("releasing the recording", () => {
     h.closeContainer.mockRejectedValueOnce(new Error("lock poisoned"));
     await h.lifecycle.openFileAtPath(CONTAINER);
     expect(h.editorText.value).toBe(TRANSCRIPT);
+  });
+
+  it("stops playback when the document closes", async () => {
+    // Audio outliving the transcript it came from is both confusing and a way
+    // to keep the recording resident after the user has moved on. Asserted
+    // rather than assumed, because nothing about it is visible until it is
+    // wrong and then it is a voice talking over the next document.
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    h.releasePlayback.mockClear();
+
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    expect(h.releasePlayback).toHaveBeenCalled();
+  });
+
+  it("stops playback before the container is released, not after", async () => {
+    // The recording lives in the same Rust state playback reads from, so the
+    // order is not cosmetic: releasing the container first would leave the
+    // player pointed at bytes that are on their way out.
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    const released = h.events.indexOf("playback-released");
+    expect(released).toBeGreaterThanOrEqual(0);
+    expect(h.releasePlayback.mock.invocationCallOrder[0]).toBeLessThan(
+      h.closeContainer.mock.invocationCallOrder[0]
+    );
   });
 });
 

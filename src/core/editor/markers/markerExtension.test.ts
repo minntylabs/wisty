@@ -12,7 +12,7 @@
 import { describe, expect, it } from "vitest";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { createMarkers, markersIn as trackedMarkers, setMarkersVisibleEffect } from "./markerExtension";
+import { createMarkers, setMarkersVisibleEffect } from "./markerExtension";
 import { parseMarkers } from "../../tsf/markers";
 
 const M1 = "⟦734.12–736.80⟧";
@@ -25,10 +25,14 @@ const DOC =
   `BOB: ${M3}Did you?`;
 
 const createView = (doc: string = DOC, visible = true) => {
-  const markers = createMarkers(() => visible);
+  const clicks: [number, number][] = [];
+  const markers = createMarkers(
+    () => visible,
+    (start, end) => clicks.push([start, end])
+  );
   const state = EditorState.create({ doc, extensions: [markers.extension] });
   const view = new EditorView({ state, parent: document.body });
-  return { view, markers };
+  return { view, markers, clicks };
 };
 
 /** Every marker still parseable in the document, as "start-end" strings. */
@@ -268,13 +272,12 @@ describe("undo restores markers exactly", () => {
  * standard the incremental path has to meet.
  */
 describe("incremental marker tracking", () => {
-  const markersFrom = (view: EditorView) => trackedMarkers(view.state);
   const truth = (view: EditorView) => parseMarkers(view.state.doc.toString());
 
   const check = (spec: Parameters<EditorView["dispatch"]>[0], doc = DOC) => {
-    const { view } = createView(doc);
+    const { view, markers } = createView(doc);
     view.dispatch(spec);
-    expect(markersFrom(view)).toEqual(truth(view));
+    expect(markers.markersIn(view.state)).toEqual(truth(view));
     view.destroy();
   };
 
@@ -317,12 +320,70 @@ describe("incremental marker tracking", () => {
     check({ changes: { from: 10, to: DOC.length - 5, insert: `x ${M2} y` } }));
 
   it("stays correct across a run of consecutive edits", () => {
-    const { view } = createView();
+    const { view, markers } = createView();
     view.dispatch({ changes: { from: 0, insert: "A" } });
     view.dispatch({ changes: { from: DOC.indexOf("rained") + 1, insert: "!" } });
     view.dispatch({ changes: { from: 5, to: 12, insert: "" } });
     view.dispatch({ changes: { from: 0, insert: `${M3}` } });
-    expect(markersFrom(view)).toEqual(truth(view));
+    expect(markers.markersIn(view.state)).toEqual(truth(view));
+    view.destroy();
+  });
+});
+
+/**
+ * The icon is the feature's only control, and the click reaching it depends on
+ * three things agreeing: tidy mode not claiming the event (wordSpans excludes
+ * markers), CodeMirror not treating it as editor interaction (ignoreEvent),
+ * and the widget's own listener. Only the last is testable here; the first is
+ * covered in transcriptExtension.test.ts.
+ */
+describe("clicking an icon", () => {
+  const clickFirstIcon = (view: EditorView, init: MouseEventInit = {}) => {
+    const icon = view.dom.querySelector(".cm-marker-icon");
+    expect(icon).not.toBeNull();
+    const event = new MouseEvent("mousedown", { button: 0, bubbles: true, cancelable: true, ...init });
+    icon!.dispatchEvent(event);
+    return event;
+  };
+
+  it("reports the marker's own times", () => {
+    const { view, clicks } = createView();
+    clickFirstIcon(view);
+    expect(clicks).toEqual([[734.12, 736.8]]);
+    view.destroy();
+  });
+
+  it("reports each icon's own times, not the first marker's", () => {
+    const { view, clicks } = createView();
+    const icons = view.dom.querySelectorAll(".cm-marker-icon");
+    expect(icons).toHaveLength(3);
+    icons[2].dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true, cancelable: true }));
+    expect(clicks).toEqual([[742.9, 745.3]]);
+    view.destroy();
+  });
+
+  it("prevents the default, so no caret is placed and no drag begins", () => {
+    const { view } = createView();
+    expect(clickFirstIcon(view).defaultPrevented).toBe(true);
+    view.destroy();
+  });
+
+  it("ignores anything but a left button", () => {
+    // Right-click belongs to the context menu, middle to paste-on-X11.
+    const { view, clicks } = createView();
+    clickFirstIcon(view, { button: 2 });
+    clickFirstIcon(view, { button: 1 });
+    expect(clicks).toEqual([]);
+    view.destroy();
+  });
+
+  it("still works when the icons are hidden", () => {
+    // Hiding is a class on the content element; the widgets stay in the DOM.
+    // Whether a hidden icon should be clickable is a UI question, but it must
+    // not silently report the wrong marker.
+    const { view, clicks } = createView(DOC, false);
+    clickFirstIcon(view);
+    expect(clicks).toEqual([[734.12, 736.8]]);
     view.destroy();
   });
 });

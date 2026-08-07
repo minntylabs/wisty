@@ -36,6 +36,12 @@ type UseFileLifecycleDeps = {
     migrate: (fromPath: string, toPath: string) => Promise<void>;
   };
   errors: ErrorReporter;
+  /**
+   * Playback belongs to the document that owns the recording, so closing one
+   * has to silence the other. Only the release is needed here — starting and
+   * stopping a span is the editor's business, not the file lifecycle's.
+   */
+  playback: { release: () => void };
   confirmOpenLargeFile: (filePath: string, sizeBytes: number) => Promise<boolean>;
   showFileTooLarge: (filePath: string, sizeBytes: number) => Promise<void>;
 };
@@ -478,6 +484,10 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // a container passes through here, so this is the one place the extension
     // is turned off, and a container turns it back on straight after.
     deps.editor.setMarkersEnabled(false);
+    // Before the container goes, not after: audio still playing from a
+    // transcript the user has closed is confusing, and the device and the
+    // recording should not outlive the document either.
+    deps.playback.release();
     try {
       await deps.fileIo.closeContainer();
     } catch {

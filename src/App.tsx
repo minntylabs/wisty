@@ -20,6 +20,8 @@ import { useWindowTitleSync } from "./core/app/useWindowTitleSync";
 import { useErrorModalQueue } from "./core/app/useErrorModalQueue";
 import { createDocumentStore } from "./core/document/documentStore";
 import { createEditorAdapter, type CursorPositionPayload } from "./core/editor/editorAdapter";
+import { createPlaybackService } from "./core/audio/playbackService";
+import { tauriPlaybackPort } from "./core/audio/playbackPort";
 import {
   closeContainer,
   fileExists,
@@ -93,8 +95,31 @@ function App() {
 
   let editorHostRef: HTMLDivElement | undefined;
 
+  const errors: ErrorReporter = {
+    showError: async (context, error) => {
+      const appError = toAppError(error, "UNKNOWN", context, { context });
+      errorModalQueue.enqueue({
+        title: context,
+        message: appError.message,
+        code: appError.code,
+        details: appError.details
+      });
+    }
+  };
+
+
+  /**
+   * Errors are reported rather than swallowed: a click that makes no sound is
+   * indistinguishable from a broken feature, and the likely causes — no output
+   * device, a damaged recording — are things the user can act on.
+   */
+  const playback = createPlaybackService(tauriPlaybackPort, (error) => {
+    void errors.showError("Unable to play audio", error);
+  });
+
   const editorAdapter = createEditorAdapter({
     getSettings: () => settingsStore.state,
+    onMarkerClick: playback.playMarker,
     onDocChanged: ({ revision }) => {
       documentStore.setRevision(revision);
     },
@@ -112,18 +137,6 @@ function App() {
     document: documentStore,
     settings: settingsStore
   });
-
-  const errors: ErrorReporter = {
-    showError: async (context, error) => {
-      const appError = toAppError(error, "UNKNOWN", context, { context });
-      errorModalQueue.enqueue({
-        title: context,
-        message: appError.message,
-        code: appError.code,
-        details: appError.details
-      });
-    }
-  };
 
   const closeLargeFileDialog = () => {
     setLargeFileDialog(null);
@@ -171,6 +184,7 @@ function App() {
       openContainer,
       closeContainer
     },
+    playback: { release: playback.release },
     launchFileStream: {
       startLaunchFileStream,
       readLaunchFileChunk,

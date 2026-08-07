@@ -26,6 +26,9 @@ import { changeSplits, Marker, parseMarkers } from "../../tsf/markers";
 /** Shows or hides the marker icons. Dispatched by the menu/keyboard toggle. */
 export const setMarkersVisibleEffect = StateEffect.define<boolean>();
 
+/** Told the times of the marker that was clicked. See createMarkers. */
+export type MarkerClickHandler = (start: number, end: number) => void;
+
 /**
  * A speaker icon standing in for the token. Inline SVG rather than a text
  * glyph so it stays crisp at any zoom and takes its colour from the theme.
@@ -33,11 +36,13 @@ export const setMarkersVisibleEffect = StateEffect.define<boolean>();
 class MarkerIconWidget extends WidgetType {
   readonly start: number;
   readonly end: number;
+  private readonly onClick: MarkerClickHandler;
 
-  constructor(marker: Marker) {
+  constructor(marker: Marker, onClick: MarkerClickHandler) {
     super();
     this.start = marker.start;
     this.end = marker.end;
+    this.onClick = onClick;
   }
 
   /**
@@ -60,6 +65,17 @@ class MarkerIconWidget extends WidgetType {
       '<path d="M8 2.2 4.6 5H2.4A1.4 1.4 0 0 0 1 6.4v3.2A1.4 1.4 0 0 0 2.4 11h2.2L8 13.8Z"/>' +
       '<path d="M10.9 4.6a.7.7 0 0 0-.9 1 3.3 3.3 0 0 1 0 4.8.7.7 0 0 0 .9 1 4.7 4.7 0 0 0 0-6.8Z"/>' +
       "</svg>";
+    // On the element rather than delegated from the editor, because
+    // ignoreEvent below stops these reaching the editor at all. mousedown
+    // rather than click: mousedown is what would otherwise start a selection,
+    // so claiming it there means the caret never moves and no text is dragged.
+    wrapper.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      this.onClick(this.start, this.end);
+    });
     return wrapper;
   }
 
@@ -102,9 +118,16 @@ const touchedLineRanges = (tr: Transaction): { from: number; to: number }[] => {
   return ranges;
 };
 
-const decorationsFor = (text: string, offset: number): Range<Decoration>[] =>
+const decorationsFor = (
+  text: string,
+  offset: number,
+  onClick: MarkerClickHandler
+): Range<Decoration>[] =>
   parseMarkers(text, offset).map((marker) =>
-    Decoration.replace({ widget: new MarkerIconWidget(marker) }).range(marker.from, marker.to)
+    Decoration.replace({ widget: new MarkerIconWidget(marker, onClick) }).range(
+      marker.from,
+      marker.to
+    )
   );
 
 /**
@@ -126,10 +149,11 @@ const decorationsFor = (text: string, offset: number): Range<Decoration>[] =>
  *     already knows about, but only a rescan finds a marker that has just been
  *     pasted, or completed by typing its last character.
  */
-const markerField = StateField.define<DecorationSet>({
-  create: (state) => Decoration.set(decorationsFor(state.doc.toString(), 0), true),
+const createMarkerField = (onClick: MarkerClickHandler) =>
+  StateField.define<DecorationSet>({
+    create: (state) => Decoration.set(decorationsFor(state.doc.toString(), 0, onClick), true),
 
-  update(markers, tr) {
+    update(markers, tr) {
     if (!tr.docChanged) {
       return markers;
     }
@@ -139,7 +163,11 @@ const markerField = StateField.define<DecorationSet>({
         filterFrom: range.from,
         filterTo: range.to,
         filter: () => false,
-        add: decorationsFor(tr.state.doc.sliceString(range.from, range.to), range.from),
+        add: decorationsFor(
+          tr.state.doc.sliceString(range.from, range.to),
+          range.from,
+          onClick
+        ),
         sort: true
       });
     }
@@ -187,7 +215,7 @@ const createVisibilityField = (getInitialVisible: () => boolean) =>
  * Only the markers overlapping each change are examined — `between` walks that
  * span, not the document.
  */
-const createChangeFilter = () =>
+const createChangeFilter = (markerField: StateField<DecorationSet>) =>
   EditorState.changeFilter.of((tr) => {
     if (!tr.docChanged) {
       return true;
@@ -213,7 +241,7 @@ const createChangeFilter = () =>
   });
 
 /** Every marker in the document. Walks them all, so not for the hot path. */
-export const markersIn = (state: EditorState): Marker[] => {
+const markersInField = (state: EditorState, markerField: StateField<DecorationSet>): Marker[] => {
   const markers: Marker[] = [];
   const set = state.field(markerField, false);
   if (!set) {
@@ -257,16 +285,26 @@ const markerTheme = EditorView.baseTheme({
 
 export type MarkersExtension = {
   markerField: StateField<DecorationSet>;
+  /** Every marker in the document. Walks them all, so not for the hot path. */
+  markersIn: (state: EditorState) => Marker[];
   visibilityField: StateField<boolean>;
   extension: Extension;
 };
 
-export const createMarkers = (getInitialVisible: () => boolean): MarkersExtension => {
+export const createMarkers = (
+  getInitialVisible: () => boolean,
+  onMarkerClick: MarkerClickHandler
+): MarkersExtension => {
   const visibilityField = createVisibilityField(getInitialVisible);
+  // The field is built per instance rather than shared at module scope so the
+  // click handler can be closed over. Injecting it is what keeps this module
+  // free of any dependency on audio: it never learns what a click does.
+  const markerField = createMarkerField(onMarkerClick);
 
   return {
     markerField,
     visibilityField,
-    extension: [markerField, visibilityField, createChangeFilter(), markerTheme]
+    markersIn: (state) => markersInField(state, markerField),
+    extension: [markerField, visibilityField, createChangeFilter(markerField), markerTheme]
   };
 };

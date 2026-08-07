@@ -86,26 +86,29 @@ sudo pacman -S --needed webkit2gtk-4.1 gtk3 libappindicator-gtk3
 
 If you are building wisty from source, you will also need development packages.
 
-Spell check binds to hunspell through bindgen, which needs libclang at build time.
-It is easy to miss because the failure is a bindgen error rather than a missing
-package, so it is listed alongside the rest below.
+Two of these are easy to miss, because neither failure names a package. Spell
+check binds to hunspell through bindgen, which needs libclang at build time and
+fails as a bindgen error. Transcript playback binds to ALSA through rodio, which
+needs the ALSA development headers and fails as a linker error from alsa-sys.
+The runtime ALSA library is on every desktop already; only the headers are
+missing by default. Both are included below.
 
 ### Ubuntu / Debian
 
 ```bash
-sudo apt install -y build-essential pkg-config libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libclang-dev
+sudo apt install -y build-essential pkg-config libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libclang-dev libasound2-dev
 ```
 
 ### Fedora
 
 ```bash
-sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config openssl-devel gtk3-devel webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel clang-devel
+sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config openssl-devel gtk3-devel webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel clang-devel alsa-lib-devel
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S --needed base-devel pkgconf openssl gtk3 webkit2gtk-4.1 libappindicator-gtk3 librsvg clang
+sudo pacman -S --needed base-devel pkgconf openssl gtk3 webkit2gtk-4.1 libappindicator-gtk3 librsvg clang alsa-lib
 ```
 
 ## Build and run

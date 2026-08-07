@@ -33,3 +33,7 @@ serde_json = "1"
 hunspell-rs = "0.4.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 symphonia = { version = "0.6.0", features = ["aac", "isomp4"] }
+# Playback only: spans are decoded by symphonia and handed over as a finished
+# buffer, so rodio drives the device and nothing else. Its default features
+# pull in a stack of decoders that would duplicate symphonia's job.
+rodio = { version = "0.22", default-features = false, features = ["playback"] }

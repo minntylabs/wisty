@@ -18,6 +18,12 @@ legacy-reference/
 # random working files
 dev_notes/
 
+# Transcript containers. These hold the original recording alongside the text,
+# so one is private interview audio in a 10 MB file that a stray `git add -A`
+# would publish. Test containers are built by dev_notes/make-test-tsf.mjs and
+# are never worth committing.
+*.tsf
+
 # Rust/Tauri build artifacts
 src-tauri/target/
 

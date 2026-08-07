@@ -125,6 +125,14 @@ Build Linux release artifacts:
 npm run tauri -- build
 ```
 
+## Documentation
+
+- [The `.tsf` transcript container](docs/tsf-format.md) — the interview
+  transcript format, its time markers, and where `.tsf` files come from.
+- [A WebKitGTK crash when an editor contains an image](docs/webkitgtk-accessibility-crash.md)
+  — a browser bug this ran into, written up for anyone building a rich-text
+  editor on WebKitGTK.
+
 ## Open source libraries used
 
 Many thanks to the developers of these libraries which are used in this project.

@@ -11,6 +11,13 @@
  *
  * Everything here is pure and works on plain strings, so the whole module is
  * testable without CodeMirror.
+ *
+ * It lives beside the rest of the format — vtt.ts, transcriptBuilder.ts,
+ * metaJson.ts — rather than under core/editor, because the token is part of
+ * what a .tsf *is*, not part of how one is displayed. Rendering markers is
+ * core/editor/markers/markerExtension.ts, and that depends on this; the
+ * dependency must not run the other way. It did once, when this file sat under
+ * the editor and transcriptBuilder had to reach up into it for formatMarker.
  */
 
 export type Marker = {

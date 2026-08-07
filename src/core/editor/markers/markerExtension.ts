@@ -21,7 +21,7 @@ import {
   Transaction
 } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, WidgetType } from "@codemirror/view";
-import { changeSplits, Marker, parseMarkers } from "./markerParser";
+import { changeSplits, Marker, parseMarkers } from "../../tsf/markers";
 
 /** Shows or hides the marker icons. Dispatched by the menu/keyboard toggle. */
 export const setMarkersVisibleEffect = StateEffect.define<boolean>();

@@ -6,7 +6,7 @@ import {
   parseMarkers,
   splitsMarker,
   stripMarkers
-} from "./markerParser";
+} from "./markers";
 
 const MARKER = "⟦734.12–736.80⟧";
 

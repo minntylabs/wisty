@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildTranscript, speakerLabel } from "./transcriptBuilder";
 import { parseSubtitles } from "./vtt";
-import { parseMarkers } from "../editor/markers/markerParser";
+import { parseMarkers } from "./markers";
 import { parseTurnLine, wordSpans } from "../editor/transcript/transcriptParser";
 
 const VTT = `WEBVTT

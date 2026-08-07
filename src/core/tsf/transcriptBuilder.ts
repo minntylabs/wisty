@@ -22,7 +22,7 @@
  * diarized transcripts are already written and what transcriptParser expects.
  */
 
-import { formatMarker } from "../editor/markers/markerParser";
+import { formatMarker } from "./markers";
 import type { Cue } from "./vtt";
 
 /** Blocks are separated by a blank line, as diarized transcripts already are. */

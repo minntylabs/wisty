@@ -9,7 +9,7 @@
  * (see DocLines), so the whole module is testable without CodeMirror.
  */
 
-import { excludeMarkers, parseMarkers } from "../markers/markerParser";
+import { excludeMarkers, parseMarkers } from "../../tsf/markers";
 
 /** One line of the document. CodeMirror's `Line` satisfies this structurally. */
 export type DocLine = {

@@ -8,7 +8,7 @@
  * separator special cases, and it is trivially non-overlapping.
  */
 
-import { parseMarkers } from "../markers/markerParser";
+import { parseMarkers } from "../../tsf/markers";
 import {
   type DocLines,
   type Turn,

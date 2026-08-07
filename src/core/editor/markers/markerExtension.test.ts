@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { createMarkers, markersIn as trackedMarkers, setMarkersVisibleEffect } from "./markerExtension";
-import { parseMarkers } from "./markerParser";
+import { parseMarkers } from "../../tsf/markers";
 
 const M1 = "⟦734.12–736.80⟧";
 const M2 = "⟦736.80–740.15⟧";

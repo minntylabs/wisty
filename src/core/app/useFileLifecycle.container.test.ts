@@ -15,7 +15,15 @@ import { createDocumentStore } from "../document/documentStore";
 const CONTAINER = "/archive/mum_11.tsf";
 const TRANSCRIPT = "ALICE: ⟦734.12–736.80⟧So we walked down.";
 
-const createHarness = (overrides: { containerText?: string } = {}) => {
+type HarnessOverrides = {
+  containerText?: string;
+  /** What the open dialog returns. Defaults to the container. */
+  dialogPath?: string;
+  fileSize?: number;
+  confirmOpenLargeFile?: () => Promise<boolean>;
+};
+
+const createHarness = (overrides: HarnessOverrides = {}) => {
   const document = createDocumentStore();
   const editorText = { value: "" };
   /** Ordered log of the calls whose relative order matters. */
@@ -70,11 +78,14 @@ const createHarness = (overrides: { containerText?: string } = {}) => {
       }
     },
     fileDialogs: {
-      openTextFilePath: async () => ({ kind: "opened" as const, filePath: CONTAINER }),
+      openTextFilePath: async () => ({
+        kind: "opened" as const,
+        filePath: overrides.dialogPath ?? CONTAINER
+      }),
       saveTextFilePathAs: async () => ({ kind: "saved" as const, filePath: "/tmp/other.txt" })
     },
     fileIo: {
-      getFileSize: async () => 10,
+      getFileSize: async () => overrides.fileSize ?? 10,
       fileExists: async () => true,
       readTextFile: async () => "plain text",
       streamReadTextFile,
@@ -104,7 +115,7 @@ const createHarness = (overrides: { containerText?: string } = {}) => {
     },
     errors: { showError },
     playback: { release: releasePlayback },
-    confirmOpenLargeFile: async () => true,
+    confirmOpenLargeFile: overrides.confirmOpenLargeFile ?? (async () => true),
     showFileTooLarge: async () => {}
   } as unknown as Parameters<typeof useFileLifecycle>[0];
 
@@ -155,6 +166,59 @@ describe("opening a container", () => {
   it("takes the same path through the open dialog", async () => {
     const h = createHarness();
     await h.lifecycle.openFile();
+    expect(h.document.state.kind).toBe("container");
+  });
+
+  /**
+   * The dialog path opening a PLAIN FILE while a container is open.
+   *
+   * This went unnoticed because every test of openFile handed it a .tsf, so the
+   * branch that skipped releasing was never taken. The consequences are all
+   * silent: the recording stays resident, the marker extension stays installed
+   * over a text file so a stray ⟦…⟧ renders a speaker icon, and playback stays
+   * armed against the recording of the transcript the user just closed.
+   */
+  describe("opening a plain file through the dialog", () => {
+    const openTextViaDialog = async () => {
+      const h = createHarness({ dialogPath: "/tmp/notes.txt" });
+      await h.lifecycle.openFileAtPath(CONTAINER);
+      h.closeContainer.mockClear();
+      h.markersEnabled.mockClear();
+      h.releasePlayback.mockClear();
+      await h.lifecycle.openFile();
+      return h;
+    };
+
+    it("releases the container", async () => {
+      const h = await openTextViaDialog();
+      expect(h.closeContainer).toHaveBeenCalled();
+      expect(h.document.state.kind).toBe("text");
+    });
+
+    it("turns the markers off", async () => {
+      const h = await openTextViaDialog();
+      expect(h.markersEnabled).toHaveBeenLastCalledWith(false);
+    });
+
+    it("stops playback", async () => {
+      const h = await openTextViaDialog();
+      expect(h.releasePlayback).toHaveBeenCalled();
+    });
+  });
+
+  it("leaves the open container alone when a large-file prompt is declined", async () => {
+    // The release belongs with the load, not with the branch: backing out here
+    // must not strip the markers from the transcript still on screen.
+    const h = createHarness({
+      dialogPath: "/tmp/huge.txt",
+      fileSize: 60 * 1024 * 1024, // over the 50MB soft limit, so it prompts
+      confirmOpenLargeFile: async () => false
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    h.closeContainer.mockClear();
+
+    await h.lifecycle.openFile();
+    expect(h.closeContainer).not.toHaveBeenCalled();
     expect(h.document.state.kind).toBe("container");
   });
 });

@@ -478,10 +478,11 @@ pub fn open_tsf(
         .lock()
         .map_err(|error| format!("Cannot take the open-container lock: {error}"))?;
     *open = Some(container);
-    // Opening a container is what re-arms playback after a release. Playback
-    // owns that state rather than the frontend, because the frontend forgets it
+    // Opening a container is what re-arms playback after a release, and what
+    // discards any player still holding the previous recording. Playback owns
+    // that state rather than the frontend, because the frontend forgets it
     // across a reload and this side does not.
-    playback.arm();
+    playback.arm()?;
 
     Ok(result)
 }
@@ -491,7 +492,15 @@ pub fn open_tsf(
 /// Called when the document is closed or replaced. Without it the bytes would
 /// stay resident after the user moved on to an ordinary text file.
 #[tauri::command]
-pub fn close_tsf(state: tauri::State<'_, TsfState>) -> Result<(), String> {
+pub fn close_tsf(
+    state: tauri::State<'_, TsfState>,
+    playback: tauri::State<'_, crate::playback::PlaybackState>,
+) -> Result<(), String> {
+    // Symmetric with open_tsf's arm. The frontend releases playback before
+    // calling this, but that call is fire-and-forget and its failure is
+    // swallowed — so without this, a release that did not land would leave
+    // playback live against a document that no longer exists.
+    playback.disarm();
     let mut open = state
         .0
         .lock()

@@ -252,9 +252,30 @@ pub struct PlaybackState {
 }
 
 impl PlaybackState {
-    /// Accept plays again. Called when a container is opened.
-    pub fn arm(&self) {
+    /// Accept plays again, for a newly opened container.
+    ///
+    /// Drops any existing player, which is the part that is easy to leave out:
+    /// `Playing` captures the recording once, and `play_span` only re-reads the
+    /// container when there is no player. A player surviving a container swap
+    /// would keep decoding the previous recording — clicking a marker in the
+    /// new transcript and hearing the old one, with nothing to indicate why.
+    /// The device is rebuilt on the next play, which costs one slow first
+    /// click per document and is worth it.
+    pub fn arm(&self) -> Result<(), String> {
+        let mut guard = self
+            .playing
+            .lock()
+            .map_err(|error| format!("Cannot take the playback lock: {error}"))?;
+        if let Some(playing) = guard.take() {
+            playing.player.stop();
+        }
         self.armed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Refuse plays. Called when a container is closed.
+    pub fn disarm(&self) {
+        self.armed.store(false, Ordering::SeqCst);
     }
 
     /// Whether a play arriving now belongs to the open document.
@@ -367,7 +388,7 @@ pub fn stop_playback(playback: tauri::State<'_, PlaybackState>) -> Result<(), St
 pub fn release_playback(playback: tauri::State<'_, PlaybackState>) -> Result<(), String> {
     // Disarm before taking the lock, so a play waiting on it sees the new state
     // rather than starting anyway.
-    playback.armed.store(false, Ordering::SeqCst);
+    playback.disarm();
     playback.with_player(|slot| {
         if let Some(playing) = slot.take() {
             playing.player.stop();

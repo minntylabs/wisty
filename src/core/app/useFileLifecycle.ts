@@ -551,6 +551,9 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         }
       }
 
+      // The container goes here rather than at the branch above, so backing
+      // out of a large-file prompt leaves the open transcript untouched.
+      await releaseContainer();
       await loadEditorFileAsCleanFromFsStream(selected.filePath, fileSize);
       deps.document.setFilePath(selected.filePath);
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(selected.filePath));
@@ -611,6 +614,10 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   const openMissingFileAtPath = async (filePath: string) => {
+    // Only reachable from the launch argument today, where nothing can be open
+    // yet — but this is a public method, and every other entry point releases.
+    // Being the one exception is how the openFile bug survived.
+    await releaseContainer();
     applySafeMode(false);
     loadEditorTextAsClean("");
     deps.document.setFilePath(filePath);

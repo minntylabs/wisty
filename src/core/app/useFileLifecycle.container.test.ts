@@ -1098,3 +1098,53 @@ describe("reloading after the discard prompt", () => {
     expect(h.document.state.filePath).toBe("/tmp/other.txt");
   });
 });
+
+/**
+ * The banner's actions are not in the command pipeline, so the invariant the
+ * pipeline enforces for every menu item — one file operation at a time — has
+ * to be enforced where the actions are, not only by disabling their buttons.
+ */
+describe("banner actions while a file operation runs", () => {
+  const original = { size: 10, modifiedMs: 1_000, device: 1, inode: 2 };
+
+  it("does not start a second overwrite while the first is streaming", async () => {
+    // The banner stays up for the whole of the save it started — the conflict
+    // is only cleared once the write lands — so a second click is one button
+    // press away, and it would cancel the save already running.
+    let secondOverwrite: Promise<void> | null = null;
+    let version = original;
+    const h: ReturnType<typeof createHarness> = createHarness({
+      getTextFileVersion: async () => version,
+      onWriteChunk: () => {
+        secondOverwrite ??= h.lifecycle.overwriteExternalChange();
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    h.editorText.value = "edited";
+    version = { ...original, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+
+    await h.lifecycle.overwriteExternalChange();
+    await secondOverwrite;
+
+    expect(h.startSaveFileStream).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reload the editor out from under a save", async () => {
+    let reloadDuringSave: Promise<void> | null = null;
+    const h: ReturnType<typeof createHarness> = createHarness({
+      getTextFileVersion: async () => original,
+      onWriteChunk: () => {
+        reloadDuringSave ??= h.lifecycle.reloadExternalChange("/tmp/notes.txt");
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    h.editorText.value = "edited";
+    const readsAfterOpen = h.streamReadTextFile.mock.calls.length;
+
+    await h.lifecycle.saveFile();
+    await reloadDuringSave;
+
+    expect(h.streamReadTextFile.mock.calls.length).toBe(readsAfterOpen);
+  });
+});

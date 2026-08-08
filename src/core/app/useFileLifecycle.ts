@@ -288,6 +288,18 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   /**
+   * Whether a read or a write of the document is already under way.
+   *
+   * The menus and shortcuts are held back by the command pipeline while one
+   * runs; the conflict banner's actions are not in it, and their buttons being
+   * disabled is the view's business, not an invariant about files. This is
+   * where that invariant belongs — starting a second operation from the banner
+   * would overwrite a file from a half-loaded editor, or reload the editor out
+   * from under a save that is still streaming.
+   */
+  const fileOperationInProgress = () => isLoading() || isSaving();
+
+  /**
    * Whether the document a save started from is still the open one. Opening a
    * file does not cancel a save already streaming, so what a save learned about
    * its own document — its saved revision, its baseline — must not be written
@@ -1206,7 +1218,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     const standing = externalChange();
     // Without a path given, a deletion has nothing to reload from.
     const target = filePath ?? (standing?.kind === "deleted" ? undefined : standing?.filePath);
-    if (!target || !documentStillOpenAt(target)) {
+    if (!target || !documentStillOpenAt(target) || fileOperationInProgress()) {
       return;
     }
     await runWithErrorMessage(async () => {
@@ -1228,7 +1240,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
   const overwriteExternalChange = async () => {
     const change = externalChange();
-    if (!change) {
+    if (!change || fileOperationInProgress()) {
       return;
     }
     await runWithErrorMessage(async () => {

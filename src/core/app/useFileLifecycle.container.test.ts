@@ -530,4 +530,23 @@ describe("saving a text document while it is being edited", () => {
     expect(h.document.state.baselineRevision).toBe(1);
   });
 
+  it("reports a successful save when directory history fails", async () => {
+    let directoryUpdates = 0;
+    const h = createHarness({
+      // The open path records a directory too; only the one after the save
+      // should be able to fail without the save being reported as failed.
+      setLastDirectory: async () => {
+        directoryUpdates += 1;
+        if (directoryUpdates > 1) {
+          throw new Error("settings unavailable");
+        }
+      }
+    });
+    await h.lifecycle.openFileFromTextAtPath("/tmp/notes.txt", "hello");
+
+    await h.lifecycle.saveFile();
+
+    expect(h.savedChunks.join("")).toBe("hello");
+    expect(h.showError).not.toHaveBeenCalled();
+  });
 });

@@ -714,6 +714,30 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     }
   };
 
+  /**
+   * History updates that follow a completed write.
+   *
+   * By the time these run the bytes are on disk, so a settings failure must not
+   * surface as "Unable to save file" — the file did save. Directory and recent
+   * file history are conveniences, and losing one is not worth telling the user
+   * their save failed.
+   */
+  const rememberLastDirectory = async (filePath: string) => {
+    try {
+      await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
+    } catch {
+      // Best effort: see above.
+    }
+  };
+
+  const rememberRecentFile = async (filePath: string) => {
+    try {
+      await deps.settings.actions.addRecentFile(filePath);
+    } catch {
+      // Best effort: see rememberLastDirectory.
+    }
+  };
+
   const saveContainerAtPath = async (filePath: string) => {
     if (isSaving()) {
       return;
@@ -726,11 +750,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       setSavingCharsWritten(transcript.length);
       deps.document.markSavedAt(revision);
       deps.document.setFilePath(filePath, "container");
-      try {
-        await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
-      } catch {
-        // The archive is already saved; directory history must not report it as failed.
-      }
+      await rememberLastDirectory(filePath);
       deps.editor.focus();
     } finally {
       endSavingState(saveId);
@@ -748,7 +768,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         const previousPath = deps.document.state.filePath;
         await saveContainerAtPath(result.filePath);
         await deps.rememberedPosition.migrate(previousPath, result.filePath);
-        await deps.settings.actions.addRecentFile(result.filePath);
+        await rememberRecentFile(result.filePath);
       }, "Unable to save file");
       return;
     }
@@ -764,8 +784,8 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await deps.rememberedPosition.migrate(previousPath, result.filePath);
       deps.document.setFilePath(result.filePath);
       deps.document.markSavedAt(savedRevision);
-      await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(result.filePath));
-      await deps.settings.actions.addRecentFile(result.filePath);
+      await rememberLastDirectory(result.filePath);
+      await rememberRecentFile(result.filePath);
       deps.editor.focus();
     }, "Unable to save file");
   };
@@ -783,7 +803,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     await runWithErrorMessage(async () => {
       const savedRevision = await saveDocumentToPathViaStream(deps.document.state.filePath);
       deps.document.markSavedAt(savedRevision);
-      await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(deps.document.state.filePath));
+      await rememberLastDirectory(deps.document.state.filePath);
       deps.editor.focus();
     }, "Unable to save file");
   };
@@ -799,7 +819,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         return;
       }
       await saveDocumentToPathViaStream(result.filePath, stripMarkers(deps.editor.getText()));
-      await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(result.filePath));
+      await rememberLastDirectory(result.filePath);
       deps.editor.focus();
     }, "Unable to export text");
   };

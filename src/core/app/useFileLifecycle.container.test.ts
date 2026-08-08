@@ -1372,3 +1372,54 @@ describe("a container changed outside Wisty", () => {
     expect(h.document.state.isDirty).toBe(true);
   });
 });
+
+describe("a container save that outlives its document", () => {
+  it("does not land on the document that replaced it", async () => {
+    let finishSave: (() => void) | undefined;
+    const h: ReturnType<typeof createHarness> = createHarness({
+      saveContainer: async () => new Promise<void>((resolve) => {
+        finishSave = resolve;
+      })
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    const saving = h.lifecycle.saveFile();
+    await untilSaving(h);
+    // A save does not cancel an open, and this one lands after it.
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    finishSave?.();
+    await saving;
+
+    expect(h.document.state.filePath).toBe("/tmp/notes.txt");
+    expect(h.document.state.kind).toBe("text");
+  });
+});
+
+describe("a container that goes missing as it opens", () => {
+  const version = { size: 4096, modifiedMs: 1_000, device: 1, inode: 2 };
+
+  /**
+   * Rust reads and validates the archive before the frontend measures it, so a
+   * path with no file at it by then has been deleted in between — not a file
+   * that was never there, which is what a text open records while its own read
+   * has yet to happen.
+   */
+  it("reports it as deleted rather than as a document being created", async () => {
+    let onDisk: typeof version | null = null;
+    const h = createHarness({ getTextFileVersion: async () => onDisk });
+
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    expect(h.lifecycle.externalChangeState.change()).toEqual({
+      filePath: CONTAINER,
+      kind: "deleted"
+    });
+
+    // What was recorded is what could be seen, which was nothing. So a file
+    // arriving at that path later is a new file rather than a changed version
+    // of the one this document came from — which nothing here can vouch for.
+    onDisk = version;
+    await expect(h.lifecycle.checkForExternalChange()).resolves.toBe(true);
+    expect(h.lifecycle.externalChangeState.change()?.kind).toBe("appeared");
+  });
+});

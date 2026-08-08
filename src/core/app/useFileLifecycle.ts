@@ -565,8 +565,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     deps.document.setFilePath(filePath, "container");
     // After the open rather than before it, unlike a text file: the container
     // is validated in Rust before it replaces the open one, so a baseline
-    // taken first would belong to a document that never opened.
-    await externalChanges.capture(filePath, { missingIsExpected: true });
+    // taken first would belong to a document that never opened. And missing is
+    // not expected here — the archive was read a moment ago, so a path with no
+    // file at it now is a deletion, which a text open cannot say because its
+    // own read has yet to happen.
+    await externalChanges.capture(filePath);
     await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
     await deps.settings.actions.addRecentFile(filePath);
     deps.rememberedPosition.restore(filePath);
@@ -858,10 +861,16 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     }
     const transcript = deps.editor.getText();
     const revision = deps.editor.getRevision();
+    // The document this save is for, which Save As is about to move: what the
+    // save learned belongs to it and to no document that arrives meanwhile.
+    const startedAt = deps.document.state.filePath;
     const saveId = beginSavingState(filePath, transcript.length);
     try {
       await deps.fileIo.saveContainer(filePath, transcript);
       setSavingCharsWritten(transcript.length);
+      if (!documentStillOpenAt(startedAt)) {
+        return;
+      }
       deps.document.markSavedAt(revision);
       deps.document.setFilePath(filePath, "container");
       await externalChanges.capture(filePath);

@@ -36,6 +36,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     audioBytes: 10_780_099
   })));
   const closeContainer = vi.fn(async () => {});
+  const saveContainer = vi.fn(async () => {});
   const startSaveFileStream = vi.fn(async (filePath: string) => ({ streamId: "s", filePath }));
   const markersEnabled = vi.fn((enabled: boolean) => {
     events.push(enabled ? "markers-on" : "markers-off");
@@ -83,7 +84,9 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
         kind: "opened" as const,
         filePath: overrides.dialogPath ?? CONTAINER
       }),
-      saveTextFilePathAs: async () => ({ kind: "saved" as const, filePath: "/tmp/other.txt" })
+      saveTextFilePathAs: async () => ({ kind: "saved" as const, filePath: "/tmp/other.txt" }),
+      saveContainerPathAs: async () => ({ kind: "saved" as const, filePath: "/tmp/other.tsf" }),
+      saveTextExportPathAs: async () => ({ kind: "saved" as const, filePath: "/tmp/export.txt" })
     },
     fileIo: {
       getFileSize: async () => overrides.fileSize ?? 10,
@@ -94,7 +97,8 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
       getDirectoryFromFilePath: () => "/archive",
       isContainerPath: (filePath: string) => filePath.toLowerCase().endsWith(".tsf"),
       openContainer,
-      closeContainer
+      closeContainer,
+      saveContainer
     },
     launchFileStream: {
       startLaunchFileStream: async (filePath: string) => ({ streamId: "l", filePath, fileSizeBytes: 10 }),
@@ -127,6 +131,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     showError,
     openContainer,
     closeContainer,
+    saveContainer,
     startSaveFileStream,
     streamReadTextFile,
     markersEnabled,
@@ -357,43 +362,39 @@ describe("releasing the recording", () => {
   });
 });
 
-describe("saving a container is refused, not attempted", () => {
-  it("does not write the document text over the archive", async () => {
+describe("saving a container", () => {
+  it("repacks its transcript without using the text stream", async () => {
     const h = createHarness();
     await h.lifecycle.openFileAtPath(CONTAINER);
+    h.editorText.value = "ALICE: edited";
 
     await h.lifecycle.saveFile();
 
     expect(h.startSaveFileStream).not.toHaveBeenCalled();
-    expect(h.showError).toHaveBeenCalled();
+    expect(h.saveContainer).toHaveBeenCalledWith(CONTAINER, "ALICE: edited");
+    expect(h.showError).not.toHaveBeenCalled();
   });
 
-  it("refuses Save As too", async () => {
+  it("saves a container copy as another .tsf", async () => {
     const h = createHarness();
     await h.lifecycle.openFileAtPath(CONTAINER);
 
     await h.lifecycle.saveFileAs();
 
     expect(h.startSaveFileStream).not.toHaveBeenCalled();
-    expect(h.showError).toHaveBeenCalled();
+    expect(h.saveContainer).toHaveBeenCalledWith("/tmp/other.tsf", TRANSCRIPT);
+    expect(h.document.state).toMatchObject({ kind: "container", filePath: "/tmp/other.tsf" });
   });
 
-  it("says why, naming the file", async () => {
-    const h = createHarness();
-    await h.lifecycle.openFileAtPath(CONTAINER);
-    await h.lifecycle.saveFile();
-
-    const call = h.showError.mock.calls[0] as unknown as [string, unknown];
-    expect(JSON.stringify(call[1])).toContain("mum_11.tsf");
-  });
-
-  it("leaves the document dirty rather than pretending it saved", async () => {
+  it("exports plain text without changing the open container", async () => {
     const h = createHarness();
     await h.lifecycle.openFileAtPath(CONTAINER);
     h.document.setRevision(9);
-    expect(h.document.state.isDirty).toBe(true);
+    await h.lifecycle.exportText();
 
-    await h.lifecycle.saveFile();
+    expect(h.saveContainer).not.toHaveBeenCalled();
+    expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/export.txt");
+    expect(h.document.state).toMatchObject({ kind: "container", filePath: CONTAINER });
     expect(h.document.state.isDirty).toBe(true);
   });
 

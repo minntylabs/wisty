@@ -11,7 +11,7 @@
 //! string. Nothing in this file knows what a marker looks like, which is what keeps the
 //! marker format defined in exactly one place.
 
-use std::fs::File;
+use std::fs::{File, Metadata};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
@@ -299,7 +299,7 @@ const SUPPORTED_TSF_VERSION: u64 = 1;
 // `path` and `audio_member` are recorded on open and consumed by the save and
 // repack path, which does not exist yet. They are kept here rather than
 // re-derived later because that is when they are known for certain.
-#[allow(dead_code)]
+#[derive(Clone)]
 pub struct OpenTsf {
     /// Where it came from, for saving back to when repacking exists.
     pub path: PathBuf,
@@ -317,6 +317,11 @@ pub struct OpenTsf {
     /// "../../etc/passwd" is a legal string here.
     pub audio_member: String,
     pub meta: serde_json::Value,
+    /// Optional word timings are not used by the editor, but saving must not
+    /// discard them from a container created by the importer.
+    pub words: Option<Vec<u8>>,
+    source_metadata: Metadata,
+    unsupported_members: Vec<String>,
 }
 
 /// Deliberately hand-written rather than derived: a derived Debug would put the
@@ -329,6 +334,8 @@ impl std::fmt::Debug for OpenTsf {
             .field("audio_member", &self.audio_member)
             .field("audio_bytes", &self.audio.len())
             .field("transcript_chars", &self.transcript.len())
+            .field("has_words", &self.words.is_some())
+            .field("unsupported_members", &self.unsupported_members)
             .finish()
     }
 }
@@ -387,6 +394,19 @@ fn read_member_from<R: std::io::Read + std::io::Seek>(
     Ok(contents)
 }
 
+fn validate_member_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name == "."
+        || name == ".."
+        || Path::new(name).is_absolute()
+    {
+        return Err(format!("The container has an unsafe audio member name: {name}"));
+    }
+    Ok(())
+}
+
 /// True when `path` begins with the zip signature.
 ///
 /// Checked by content rather than by extension, so a file named .tsf that is
@@ -443,10 +463,31 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "The container's meta.json does not name its audio file".to_string())?
         .to_string();
+    validate_member_name(&audio_member)?;
+
+    let unsupported_members = (0..zip.len())
+        .filter_map(|index| zip.by_index(index).ok().map(|member| member.name().to_string()))
+        .filter(|name| name != TRANSCRIPT_MEMBER && name != META_MEMBER && name != &audio_member && name != WORDS_MEMBER)
+        .collect();
 
     let transcript = String::from_utf8(read_member_from(&mut zip, TRANSCRIPT_MEMBER)?)
         .map_err(|_| format!("{TRANSCRIPT_MEMBER} is not valid UTF-8"))?;
     let audio: Arc<[u8]> = Arc::from(read_member_from(&mut zip, &audio_member)?.as_slice());
+    let words = match zip.by_name(WORDS_MEMBER) {
+        Ok(mut member) => {
+            if member.size() > MAX_MEMBER_BYTES {
+                return Err(format!("{WORDS_MEMBER} is too large"));
+            }
+            let mut contents = Vec::with_capacity(reserve_for(member.size()));
+            member
+                .read_to_end(&mut contents)
+                .map_err(|error| format!("Cannot read {WORDS_MEMBER}: {error}"))?;
+            Some(contents)
+        }
+        Err(_) => None
+    };
+    let source_metadata = std::fs::metadata(archive)
+        .map_err(|error| format!("Cannot stat {}: {error}", archive.display()))?;
 
     Ok(OpenTsf {
         // Absolute, so saving back later cannot be affected by the working
@@ -456,6 +497,9 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
         audio,
         audio_member,
         meta,
+        words,
+        source_metadata,
+        unsupported_members,
     })
 }
 
@@ -512,6 +556,85 @@ pub fn close_tsf(
         .lock()
         .map_err(|error| format!("Cannot take the open-container lock: {error}"))?;
     *open = None;
+    Ok(())
+}
+
+fn source_is_unchanged(open: &OpenTsf) -> Result<(), String> {
+    let current = std::fs::metadata(&open.path)
+        .map_err(|error| format!("Cannot check {} before saving: {error}", open.path.display()))?;
+    if current.len() != open.source_metadata.len() || current.modified().ok() != open.source_metadata.modified().ok() {
+        return Err("The transcript container changed on disk after it was opened. Reopen it before saving so no changes are lost.".to_string());
+    }
+    Ok(())
+}
+
+fn write_open_archive(temporary: &Path, transcript: &str, open: &OpenTsf) -> Result<(), String> {
+    validate_member_name(&open.audio_member)?;
+    let file = File::create(temporary)
+        .map_err(|error| format!("Cannot create {}: {error}", temporary.display()))?;
+    let mut zip = ZipWriter::new(BufWriter::new(file));
+    let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+
+    zip.start_file(TRANSCRIPT_MEMBER, deflated)
+        .map_err(|error| format!("Cannot write {TRANSCRIPT_MEMBER}: {error}"))?;
+    zip.write_all(transcript.as_bytes())
+        .map_err(|error| format!("Cannot write {TRANSCRIPT_MEMBER}: {error}"))?;
+    zip.start_file(&open.audio_member, stored)
+        .map_err(|error| format!("Cannot write {}: {error}", open.audio_member))?;
+    zip.write_all(&open.audio)
+        .map_err(|error| format!("Cannot write {}: {error}", open.audio_member))?;
+    zip.start_file(META_MEMBER, deflated)
+        .map_err(|error| format!("Cannot write {META_MEMBER}: {error}"))?;
+    zip.write_all(&serde_json::to_vec_pretty(&open.meta).map_err(|error| format!("Cannot serialise metadata: {error}"))?)
+        .map_err(|error| format!("Cannot write {META_MEMBER}: {error}"))?;
+    if let Some(words) = &open.words {
+        zip.start_file(WORDS_MEMBER, deflated)
+            .map_err(|error| format!("Cannot write {WORDS_MEMBER}: {error}"))?;
+        zip.write_all(words)
+            .map_err(|error| format!("Cannot write {WORDS_MEMBER}: {error}"))?;
+    }
+    let writer = zip.finish().map_err(|error| format!("Cannot finalise the container: {error}"))?;
+    writer.into_inner().map_err(|error| format!("Cannot flush the container: {error}"))?.sync_all()
+        .map_err(|error| format!("Cannot sync the container: {error}"))
+}
+
+/// Rebuilds the open container with the edited transcript without routing audio
+/// through the webview. The source snapshot must still match disk, and unknown
+/// archive members are refused rather than silently discarded.
+#[tauri::command]
+pub fn save_tsf(state: tauri::State<'_, TsfState>, path: String, transcript: String) -> Result<(), String> {
+    let open = state.0.lock()
+        .map_err(|error| format!("Cannot take the open-container lock: {error}"))?
+        .clone()
+        .ok_or_else(|| "No transcript container is open".to_string())?;
+    if !open.unsupported_members.is_empty() {
+        return Err(format!(
+            "This container has unsupported archive members that Wisty cannot preserve: {}",
+            open.unsupported_members.join(", ")
+        ));
+    }
+    source_is_unchanged(&open)?;
+    let output = PathBuf::from(path);
+    let parent = output.parent().ok_or_else(|| "Output path has no parent directory".to_string())?;
+    let temporary = parent.join(format!(".{}.partial", output.file_name().and_then(|name| name.to_str()).unwrap_or("transcript.tsf")));
+    if let Err(error) = write_open_archive(&temporary, &transcript, &open) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    std::fs::rename(&temporary, &output).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        format!("Cannot write {}: {error}", output.display())
+    })?;
+    let mut guard = state.0.lock()
+        .map_err(|error| format!("Cannot take the open-container lock: {error}"))?;
+    let current = guard.as_mut().ok_or_else(|| "The transcript container was closed while saving".to_string())?;
+    if current.path != open.path {
+        return Err("A different transcript container was opened while saving".to_string());
+    }
+    current.path = output.canonicalize().unwrap_or(output);
+    current.source_metadata = std::fs::metadata(&current.path)
+        .map_err(|error| format!("Cannot stat saved container: {error}"))?;
     Ok(())
 }
 
@@ -801,6 +924,37 @@ mod tests {
         let path = written(&dir, "text", Some("[{\"start\":0}]"));
         let container = read_tsf(&path).expect("read");
         assert_eq!(container.meta["words"], WORDS_MEMBER);
+        assert_eq!(container.words.as_deref(), Some(b"[{\"start\":0}]".as_slice()));
+    }
+
+    #[test]
+    fn repack_keeps_audio_metadata_and_words() {
+        let dir = temp_dir("repack");
+        let source = written(&dir, "before", Some("[{\"start\":0}]"));
+        let open = read_tsf(&source).expect("open");
+        let output = dir.join("saved.tsf");
+        write_open_archive(&output, "after", &open).expect("repack");
+
+        let mut zip = ZipArchive::new(File::open(&output).unwrap()).unwrap();
+        let mut transcript = String::new();
+        zip.by_name(TRANSCRIPT_MEMBER).unwrap().read_to_string(&mut transcript).unwrap();
+        assert_eq!(transcript, "after");
+        let mut audio = Vec::new();
+        let member = zip.by_name("audio.wav").unwrap();
+        assert_eq!(member.compression(), CompressionMethod::Stored);
+        drop(member);
+        zip.by_name("audio.wav").unwrap().read_to_end(&mut audio).unwrap();
+        assert_eq!(audio, wav_bytes(2));
+        let mut words = String::new();
+        zip.by_name(WORDS_MEMBER).unwrap().read_to_string(&mut words).unwrap();
+        assert_eq!(words, "[{\"start\":0}]");
+    }
+
+    #[test]
+    fn rejects_unsafe_audio_member_names() {
+        for name in ["", "../audio.m4a", "audio/part.m4a", "audio\\part.m4a", "/audio.m4a"] {
+            assert!(validate_member_name(name).is_err(), "{name}");
+        }
     }
 
     #[test]

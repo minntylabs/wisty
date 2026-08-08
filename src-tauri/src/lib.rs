@@ -977,6 +977,7 @@ pub fn run() {
             spellcheck::spell_remove_word,
             tsf::create_tsf,
             tsf::open_tsf,
+            tsf::save_tsf,
             tsf::close_tsf,
             playback::play_span,
             playback::stop_playback,

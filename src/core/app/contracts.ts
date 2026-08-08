@@ -65,6 +65,8 @@ export type FileDialogsPort = {
   openTextFile: (defaultPath?: string) => Promise<OpenTextFileResult>;
   openTextFilePath: (defaultPath?: string) => Promise<OpenTextFilePathResult>;
   saveTextFilePathAs: (defaultPath?: string) => Promise<SaveTextFileAsResult>;
+  saveContainerPathAs: (defaultPath?: string) => Promise<SaveTextFileAsResult>;
+  saveTextExportPathAs: (defaultPath?: string) => Promise<SaveTextFileAsResult>;
 };
 
 export type FileIoPort = {
@@ -80,6 +82,7 @@ export type FileIoPort = {
   isContainerPath: (filePath: string) => boolean;
   openContainer: (filePath: string) => Promise<OpenContainerResult>;
   closeContainer: () => Promise<void>;
+  saveContainer: (filePath: string, transcript: string) => Promise<void>;
 };
 
 export type AppendTextOptions = {

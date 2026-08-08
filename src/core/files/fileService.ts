@@ -100,6 +100,22 @@ export const saveTextFilePathAs = async (defaultPath?: string): Promise<SaveAsRe
   };
 };
 
+const savePathWithExtension = async (defaultPath: string | undefined, name: string, extension: string): Promise<SaveAsResult> => {
+  const selected = await save({
+    defaultPath: defaultPath || undefined,
+    filters: [{ name, extensions: [extension] }]
+  });
+  if (!selected) return { kind: "cancelled" };
+  const suffix = `.${extension}`;
+  const lastDot = selected.lastIndexOf(".");
+  if (lastDot < selected.lastIndexOf("/")) return { kind: "saved", filePath: `${selected}${suffix}` };
+  if (!selected.toLowerCase().endsWith(suffix)) throw new Error(`Choose a ${suffix} file`);
+  return { kind: "saved", filePath: selected };
+};
+
+export const saveContainerPathAs = (defaultPath?: string) => savePathWithExtension(defaultPath, "Transcript container", "tsf");
+export const saveTextExportPathAs = (defaultPath?: string) => savePathWithExtension(defaultPath, "Plain text", "txt");
+
 export const saveTextFile = async (filePath: string, text: string): Promise<void> => {
   await writeTextFile(filePath, text);
 };
@@ -222,4 +238,8 @@ export const openContainer = async (filePath: string): Promise<OpenContainerResu
 /** Releases the open container, freeing the audio Rust was holding. */
 export const closeContainer = async (): Promise<void> => {
   await invoke("close_tsf");
+};
+
+export const saveContainer = async (filePath: string, transcript: string): Promise<void> => {
+  await invoke("save_tsf", { path: filePath, transcript });
 };

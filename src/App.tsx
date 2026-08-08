@@ -32,7 +32,10 @@ import {
   openTextFile,
   openTextFilePath,
   readTextFileAtPath,
+  saveContainer,
+  saveContainerPathAs,
   saveTextFile,
+  saveTextExportPathAs,
   saveTextFilePathAs,
   streamReadTextFileAtPath
 } from "./core/files/fileService";
@@ -172,7 +175,9 @@ function App() {
     fileDialogs: {
       openTextFile,
       openTextFilePath,
-      saveTextFilePathAs
+      saveTextFilePathAs,
+      saveContainerPathAs,
+      saveTextExportPathAs
     },
     fileIo: {
       getFileSize,
@@ -183,7 +188,8 @@ function App() {
       getDirectoryFromFilePath,
       isContainerPath,
       openContainer,
-      closeContainer
+      closeContainer,
+      saveContainer
     },
     playback: { release: playback.release },
     launchFileStream: {

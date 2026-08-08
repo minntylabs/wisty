@@ -10,6 +10,7 @@ import type {
 import { createSignal } from "solid-js";
 import type { LaunchFileStreamChunkResult } from "../window/launchArgService";
 import { toAppError, type AppErrorCode } from "../errors/appError";
+import { stripMarkers } from "../tsf/markers";
 
 type UseFileLifecycleDeps = {
   editor: Pick<EditorPort, "focus" | "getText" | "getDocLength" | "getTextSlice" | "setText" | "append" | "reset" | "setLargeLineSafeMode" | "getRevision" | "setMarkersEnabled">;
@@ -628,8 +629,8 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     deps.editor.focus();
   };
 
-  const saveDocumentToPathViaStream = async (filePath: string) => {
-    const totalChars = deps.editor.getDocLength();
+  const saveDocumentToPathViaStream = async (filePath: string, text?: string) => {
+    const totalChars = text?.length ?? deps.editor.getDocLength();
     const saveId = beginSavingState(filePath, totalChars);
     let streamId: string | undefined;
     let finished = false;
@@ -647,7 +648,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
         let to = Math.min(totalChars, from + SAVE_STREAM_CHUNK_CHARS);
         if (to < totalChars) {
-          const charBefore = deps.editor.getTextSlice(to - 1, to);
+          const charBefore = text ? text.slice(to - 1, to) : deps.editor.getTextSlice(to - 1, to);
           const charCode = charBefore.charCodeAt(0);
           if (charCode >= 0xd800 && charCode <= 0xdbff) {
             to -= 1;
@@ -657,7 +658,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
           to = Math.min(totalChars, from + 1);
         }
 
-        const chunk = deps.editor.getTextSlice(from, to);
+        const chunk = text ? text.slice(from, to) : deps.editor.getTextSlice(from, to);
         if (!chunk) {
           from = to;
           continue;
@@ -696,38 +697,27 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     }
   };
 
-  /**
-   * Saving a container is not implemented yet, and must not fall through to the
-   * text path.
-   *
-   * That path streams the editor's text to the document's path, which for a
-   * container would replace the archive — transcript, recording and metadata —
-   * with plain text. The recording would be gone. Until saving repacks the
-   * container properly, refusing is the only safe answer, and it has to be
-   * refused rather than merely hidden from the menu: Ctrl+S does not consult
-   * the menu.
-   */
-  const refuseContainerSave = async (): Promise<boolean> => {
-    if (deps.document.state.kind !== "container") {
-      return false;
-    }
-    await deps.errors.showError(
-      "Unable to save file",
-      toAppError(
-        new Error(
-          `${deps.document.state.fileName} holds its recording alongside the text, and saving it is not supported yet. Saving as plain text would discard the audio, so it has been refused.`
-        ),
-        "SAVE_FAILED",
-        "Unable to save file",
-        { context: "Unable to save file" }
-      )
-    );
+  const saveContainerAtPath = async (filePath: string) => {
+    await deps.fileIo.saveContainer(filePath, deps.editor.getText());
+    deps.document.markCleanAt(deps.editor.getRevision());
+    await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
     deps.editor.focus();
-    return true;
   };
 
   const saveFileAs = async () => {
-    if (await refuseContainerSave()) {
+    if (deps.document.state.kind === "container") {
+      await runWithErrorMessage(async () => {
+        const result = await deps.fileDialogs.saveContainerPathAs(deps.document.state.filePath);
+        if (result.kind === "cancelled") {
+          deps.editor.focus();
+          return;
+        }
+        const previousPath = deps.document.state.filePath;
+        await saveContainerAtPath(result.filePath);
+        await deps.rememberedPosition.migrate(previousPath, result.filePath);
+        deps.document.setFilePath(result.filePath, "container");
+        await deps.settings.actions.addRecentFile(result.filePath);
+      }, "Unable to save file");
       return;
     }
     await runWithErrorMessage(async () => {
@@ -749,7 +739,8 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   const saveFile = async () => {
-    if (await refuseContainerSave()) {
+    if (deps.document.state.kind === "container") {
+      await runWithErrorMessage(() => saveContainerAtPath(deps.document.state.filePath), "Unable to save file");
       return;
     }
     if (!deps.document.state.filePath) {
@@ -763,6 +754,22 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(deps.document.state.filePath));
       deps.editor.focus();
     }, "Unable to save file");
+  };
+
+  const exportText = async () => {
+    if (deps.document.state.kind !== "container") {
+      return;
+    }
+    await runWithErrorMessage(async () => {
+      const result = await deps.fileDialogs.saveTextExportPathAs(deps.settings.state.lastDirectory);
+      if (result.kind === "cancelled") {
+        deps.editor.focus();
+        return;
+      }
+      await saveDocumentToPathViaStream(result.filePath, stripMarkers(deps.editor.getText()));
+      await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(result.filePath));
+      deps.editor.focus();
+    }, "Unable to export text");
   };
 
   const chooseEditorFont = async () => {
@@ -796,6 +803,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     openMissingFileAtPath,
     saveFile,
     saveFileAs,
+    exportText,
     chooseEditorFont,
     requestCancelLoading,
     requestCancelSaving,

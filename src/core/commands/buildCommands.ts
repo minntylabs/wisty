@@ -26,6 +26,7 @@ type BuildCommandsDeps = {
     openFileAtPath: (filePath: string) => Promise<void>;
     saveFile: () => Promise<void>;
     saveFileAs: () => Promise<void>;
+    exportText: () => Promise<void>;
     chooseEditorFont: () => Promise<void>;
     safeModeActive: Accessor<boolean>;
   };
@@ -113,6 +114,12 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
       label: "Save As",
       shortcut: commandShortcut(deps.platform.isMac, "S", true),
       run: deps.fileLifecycle.saveFileAs
+    },
+    {
+      id: "file.exportText",
+      label: "Export to Text...",
+      enabled: deps.isContainerDocument,
+      run: deps.fileLifecycle.exportText
     },
     {
       id: "file.quit",
@@ -387,6 +394,7 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
         { type: "separator" },
         { type: "command", commandId: "file.save" },
         { type: "command", commandId: "file.saveAs" },
+        { type: "command", commandId: "file.exportText", visible: deps.isContainerDocument },
         { type: "separator", visible: () => deps.settings.state.recentFiles.length > 0 },
         { type: "command", commandId: "file.recent.1", visible: () => deps.settings.state.recentFiles.length >= 1 },
         { type: "command", commandId: "file.recent.2", visible: () => deps.settings.state.recentFiles.length >= 2 },

@@ -20,12 +20,12 @@ type HarnessOverrides = {
   openContainer?: (filePath: string) => Promise<{ transcript: string; meta: Record<string, unknown>; audioBytes: number }>;
   saveContainer?: (filePath: string, transcript: string) => Promise<void>;
   setLastDirectory?: () => Promise<void>;
-  getTextFileVersion?: () => Promise<{ size: number; modifiedMs: number | null; device: number | null; inode: number | null } | null>;
+  getTextFileVersion?: (filePath: string) => Promise<{ size: number; modifiedMs: number | null; device: number | null; inode: number | null } | null>;
   finishSaveFileStream?: () => Promise<{ bytesWrittenTotal: number }>;
   /** Runs after each streamed chunk is written, so a test can edit mid-save. */
   onWriteChunk?: (chunkNumber: number) => void | Promise<void>;
-  /** Runs as each chunk is read, so a test can change the file mid-read. */
-  onReadChunk?: () => void;
+  /** Runs as each chunk is read, so a test can act while a read is in flight. */
+  onReadChunk?: () => void | Promise<void>;
   /** What the open dialog returns. Defaults to the container. */
   dialogPath?: string;
   fileSize?: number;
@@ -56,7 +56,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     events.push("playback-released");
   });
   const streamReadTextFile = vi.fn(async function* () {
-    overrides.onReadChunk?.();
+    await overrides.onReadChunk?.();
     yield { text: "plain text", bytesReadTotal: 10, fileSizeBytes: 10 };
   });
   const showFileTooLarge = vi.fn(async () => {});
@@ -948,5 +948,112 @@ describe("a file deleted while it is being saved", () => {
       kind: "deleted"
     });
     expect(h.document.state.isDirty).toBe(true);
+  });
+});
+
+/**
+ * Opening a document does not cancel the read, save or metadata lookup already
+ * running for the last one. What those learned about their own document has to
+ * stay with it — the danger being a new document left holding an old one's
+ * baseline, or none at all, either of which lets its next save assert the
+ * wrong thing about the file it is about to overwrite.
+ */
+describe("a document replaced while the last one was still being measured", () => {
+  const original = { size: 10, modifiedMs: 1_000, device: 1, inode: 2 };
+  const other = { size: 20, modifiedMs: 9_000, device: 1, inode: 7 };
+  const versionForPath = async (filePath: string) =>
+    filePath === "/tmp/other.txt" ? other : original;
+
+  it("keeps the baseline of the document that replaced it mid-read", async () => {
+    let opened = false;
+    const h: ReturnType<typeof createHarness> = createHarness({
+      getTextFileVersion: versionForPath,
+      onReadChunk: async () => {
+        if (opened) {
+          return;
+        }
+        opened = true;
+        // The read of the first file is cancelled by this open, and the
+        // failure that cancellation raises must not take the new document's
+        // baseline down with it.
+        await h.lifecycle.openFileAtPath("/tmp/other.txt");
+      }
+    });
+
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    await h.lifecycle.saveFile();
+
+    expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/other.txt", {
+      kind: "present",
+      version: other
+    });
+  });
+
+  it("does not hand it the baseline the last document was taking", async () => {
+    let releaseBaseline: (() => void) | null = null;
+    const inFlight = new Promise<void>((resolve) => {
+      releaseBaseline = resolve;
+    });
+    let baselineStarted: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => {
+      baselineStarted = resolve;
+    });
+    let written = false;
+    let held = false;
+    const h = createHarness({
+      getTextFileVersion: async (filePath) => {
+        // The baseline retaken after the write is still in flight when the
+        // next document arrives.
+        if (written && !held) {
+          held = true;
+          baselineStarted!();
+          await inFlight;
+        }
+        return versionForPath(filePath);
+      },
+      finishSaveFileStream: async () => {
+        written = true;
+        return { bytesWrittenTotal: 1 };
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    const saving = h.lifecycle.saveFile();
+    // Not before: the save has to have passed its own "is this still my
+    // document" guard, or it never reaches the baseline this test is about.
+    await started;
+    await h.lifecycle.openFileAtPath("/tmp/other.txt");
+    releaseBaseline!();
+    await saving;
+
+    await h.lifecycle.saveFile();
+
+    expect(h.startSaveFileStream).toHaveBeenLastCalledWith("/tmp/other.txt", {
+      kind: "present",
+      version: other
+    });
+  });
+
+  it("does not raise the last document's save conflict over it", async () => {
+    let opened = false;
+    const h: ReturnType<typeof createHarness> = createHarness({
+      getTextFileVersion: versionForPath,
+      onWriteChunk: async () => {
+        if (opened) {
+          return;
+        }
+        opened = true;
+        await h.lifecycle.openFileAtPath("/tmp/other.txt");
+      },
+      finishSaveFileStream: async () => {
+        throw { code: "SAVE_EXTERNAL_CHANGE", message: "The file changed on disk." };
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    h.editorText.value = "edited";
+
+    await h.lifecycle.saveFile();
+
+    expect(h.lifecycle.externalChangeState.change()).toBeNull();
   });
 });

@@ -245,16 +245,16 @@ function App() {
     // project has already been bitten by — and the window event is Tauri's, so
     // it says nothing about focus moving within the page.
     window.addEventListener("focus", checkForExternalChange);
+    // Handled here rather than at cleanup: a registration that fails before
+    // then would otherwise go unhandled, and the DOM listener still stands.
     const unlistenFocus = appWindow.onFocusChanged(({ payload: focused }) => {
       if (focused) {
         checkForExternalChange();
       }
-    });
+    }).catch(() => null);
     onCleanup(() => {
       window.removeEventListener("focus", checkForExternalChange);
-      void unlistenFocus.then((stopListening) => stopListening()).catch(() => {
-        // Nothing to do if the listener never registered.
-      });
+      void unlistenFocus.then((stopListening) => stopListening?.());
     });
   });
 

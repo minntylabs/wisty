@@ -168,7 +168,25 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   let observedExternalVersion: TextFileVersion | null = null;
   let textFileBaselineError: Error | null = null;
 
-  const clearTextFileBaseline = () => {
+  /**
+   * Whether a baseline taken at `generation` is still the one in force.
+   *
+   * Every await between taking a baseline and acting on it is a window for
+   * another document to be opened, and what was learned about the old one must
+   * not land on the new one.
+   */
+  const baselineIsCurrent = (generation: number) => generation === textFileBaselineGeneration;
+
+  /**
+   * Forgets the baseline. `generation` scopes it to the baseline the caller
+   * took: a load that fails after another document has replaced it has nothing
+   * left to clear, and clearing anyway would leave the new document with no
+   * baseline and its saves asserting nothing.
+   */
+  const clearTextFileBaseline = (generation?: number) => {
+    if (generation !== undefined && !baselineIsCurrent(generation)) {
+      return;
+    }
     textFileBaselineGeneration += 1;
     textFileBaseline = null;
     observedExternalVersion = null;
@@ -221,28 +239,42 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    * document being created there, and a file that has gone since Wisty last
    * looked. The second is a deletion the user has to be told about, and saying
    * nothing would let a save recreate it silently.
+   *
+   * Returns the generation it claimed, so a caller can tell whether what it
+   * took is still in force by the time its own work is done. Reading metadata
+   * is a wait like any other: a document opened during it supersedes this one,
+   * and recording what this one found would give the new document the old
+   * one's baseline and could raise the old one's conflict over it.
    */
   const captureTextFileBaseline = async (
     filePath: string,
     options?: { missingIsExpected?: boolean }
-  ) => {
+  ): Promise<number> => {
     textFileBaselineGeneration += 1;
+    const generation = textFileBaselineGeneration;
     observedExternalVersion = null;
     setExternalChange(null);
     setExternalChangeDismissed(false);
     try {
       const version = await deps.fileIo.getTextFileVersion(filePath);
+      if (!baselineIsCurrent(generation)) {
+        return generation;
+      }
       textFileBaselineError = null;
       textFileBaseline = version ? { kind: "present", version } : { kind: "absent" };
       if (!version && !options?.missingIsExpected) {
         raiseExternalChange(filePath, "deleted");
       }
     } catch (error) {
+      if (!baselineIsCurrent(generation)) {
+        return generation;
+      }
       textFileBaseline = null;
       textFileBaselineError = new Error(
         `Wisty cannot check this file on disk: ${error instanceof Error ? error.message : String(error)}`
       );
     }
+    return generation;
   };
 
   /** What a save asserts about the target, or nothing when no baseline is held. */
@@ -323,6 +355,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         // Best effort: without it the next check raises the conflict again,
         // which is the safe direction to fail in.
       }
+    }
+    // A save does not cancel an open. The conflict belongs to the document the
+    // save was for, and is not to be raised over the one that replaced it.
+    if (!documentStillOpenAt(filePath)) {
+      return;
     }
     raiseExternalChange(filePath, kind, observed);
   };
@@ -604,12 +641,19 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         applySafeMode(false);
       }
     } catch (error) {
-      deps.document.setUntitled();
-      deps.document.setRevision(deps.editor.getRevision());
-      if (safeModeEnabledForLoad) {
-        applySafeMode(true);
-      } else {
-        applySafeMode(false);
+      // Only for the document this load was for. A load is cancelled by the
+      // one that replaced it, and the replacement is already loaded or loading
+      // by the time this runs: untitling it here would take its path — and so
+      // its baseline, and every assertion its next save makes about the file
+      // it overwrites — away from a document that opened perfectly well.
+      if (activeLoadId === loadId) {
+        deps.document.setUntitled();
+        deps.document.setRevision(deps.editor.getRevision());
+        if (safeModeEnabledForLoad) {
+          applySafeMode(true);
+        } else {
+          applySafeMode(false);
+        }
       }
       if (isFileLoadCancelledError(error)) {
         throw error;
@@ -786,12 +830,17 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   const loadTextDocumentWithBaseline = async (filePath: string, load: () => Promise<void>) => {
     // A file that is not there is this open's own failure to report, not a
     // deletion to raise a banner over: the read is about to say so.
-    await captureTextFileBaseline(filePath, { missingIsExpected: true });
+    const generation = await captureTextFileBaseline(filePath, { missingIsExpected: true });
     try {
       await load();
     } catch (error) {
-      clearTextFileBaseline();
+      // Scoped to this load's own baseline: an open that replaced this one
+      // mid-read is what cancelled it, and its baseline is not ours to drop.
+      clearTextFileBaseline(generation);
       throw error;
+    }
+    if (!baselineIsCurrent(generation)) {
+      return;
     }
     deps.document.setFilePath(filePath);
     try {

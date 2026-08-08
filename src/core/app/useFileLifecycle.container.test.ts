@@ -1423,3 +1423,51 @@ describe("a container that goes missing as it opens", () => {
     expect(h.lifecycle.externalChangeState.change()?.kind).toBe("appeared");
   });
 });
+
+describe("while a container is being opened", () => {
+  const version = { size: 4096, modifiedMs: 1_000, device: 1, inode: 2 };
+
+  /**
+   * The read happens in Rust and sets none of the loading state a streamed
+   * text read does, so nothing else marks the app busy for it. The banner's
+   * actions must still be held back: they refer to the container that is at
+   * that moment being replaced.
+   */
+  it("the banner's actions are held back", async () => {
+    let finishOpen: (() => void) | undefined;
+    let opens = 0;
+    let onDisk = version;
+    const h: ReturnType<typeof createHarness> = createHarness({
+      getTextFileVersion: async () => onDisk,
+      openContainer: async () => {
+        opens += 1;
+        if (opens > 1) {
+          await new Promise<void>((resolve) => {
+            finishOpen = resolve;
+          });
+        }
+        return {
+          transcript: TRANSCRIPT,
+          meta: { tsf_version: 1 },
+          audioBytes: 1
+        };
+      }
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    onDisk = { ...version, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+    expect(h.lifecycle.externalChangeState.change()).not.toBeNull();
+
+    const reopening = h.lifecycle.openFileAtPath(CONTAINER);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.lifecycle.savingState.isSaving()).toBe(false);
+
+    // The container is mid-open, so this must not start a write into it.
+    await h.lifecycle.overwriteExternalChange();
+    expect(h.saveContainer).not.toHaveBeenCalled();
+
+    finishOpen?.();
+    await reopening;
+  });
+});

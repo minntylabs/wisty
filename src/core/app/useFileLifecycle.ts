@@ -106,6 +106,13 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   const [savingCharsWritten, setSavingCharsWritten] = createSignal(0);
   const [savingTotalChars, setSavingTotalChars] = createSignal<number | undefined>(undefined);
   const [saveCancelRequested, setSaveCancelRequested] = createSignal(false);
+  /**
+   * A container open is a read of the document like any other, but it happens
+   * in Rust and sets none of the loading state a streamed text read does. It
+   * still has to count as busy, or the conflict banner's actions stay live
+   * while the container they refer to is being replaced under them.
+   */
+  const [isOpeningContainer, setIsOpeningContainer] = createSignal(false);
 
   let activeLoadId = 0;
   let loadingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
@@ -126,7 +133,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    * would overwrite a file from a half-loaded editor, or reload the editor out
    * from under a save that is still streaming.
    */
-  const fileOperationInProgress = () => isLoading() || isSaving();
+  const fileOperationInProgress = () => isLoading() || isSaving() || isOpeningContainer();
 
   /**
    * Whether the document an operation started from is still the open one.
@@ -555,7 +562,13 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // container. Do that before changing the frontend, so a bad replacement
     // leaves the open transcript usable instead of showing it without audio or
     // marker support.
-    const container = await deps.fileIo.openContainer(filePath);
+    setIsOpeningContainer(true);
+    let container: Awaited<ReturnType<typeof deps.fileIo.openContainer>>;
+    try {
+      container = await deps.fileIo.openContainer(filePath);
+    } finally {
+      setIsOpeningContainer(false);
+    }
     externalChanges.clear();
     applySafeMode(false);
     // Before the text, so the markers are tracked from the moment it lands
@@ -924,6 +937,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await runWithErrorMessage(async () => {
         if (await externalChanges.check() || externalChanges.change()) {
           externalChanges.undismiss();
+          return;
+        }
+        // The check waits on the disk, and a document opened during that wait
+        // is not the one this save was asked for.
+        if (!documentStillOpenAt(containerPath)) {
           return;
         }
         await saveContainerAtPath(containerPath);

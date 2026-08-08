@@ -50,11 +50,7 @@ describe("playing a marker", () => {
   it("sends the padded span, not the stored one", () => {
     const h = createHarness();
     h.service.playMarker(734.12, 736.8);
-    expect(h.port.playSpan).toHaveBeenCalledWith(
-      734.12 - HEAD_PAD_SECONDS,
-      736.8 + TAIL_PAD_SECONDS,
-      0
-    );
+    expect(h.port.playSpan).toHaveBeenCalledWith(734.12 - HEAD_PAD_SECONDS, 736.8 + TAIL_PAD_SECONDS);
   });
 
   it("ignores a marker whose times cannot be played", () => {
@@ -107,47 +103,3 @@ describe("stopping and releasing", () => {
   });
 });
 
-/**
- * play_span is an async Tauri command and release_playback is not, so they do
- * not run in the order they were sent. Clicking a sentence and immediately
- * closing the document could start audio from a document already gone. The
- * stamp is what lets Rust drop such a play however the two are ordered.
- */
-describe("session stamping", () => {
-  const spanArgs = (port: PlaybackPort) =>
-    (port.playSpan as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[2]);
-
-  it("stamps plays with the current session", () => {
-    const h = createHarness();
-    h.service.playMarker(1, 2);
-    h.service.playMarker(3, 4);
-    expect(spanArgs(h.port)).toEqual([0, 0]);
-  });
-
-  it("moves the session on when releasing, and tells Rust the new one", () => {
-    const h = createHarness();
-    h.service.release();
-    expect(h.port.releasePlayback).toHaveBeenCalledWith(1);
-  });
-
-  it("stamps later plays with the later session", () => {
-    // A play issued after the release belongs to whatever is open next and
-    // must not be dropped along with the old document's.
-    const h = createHarness();
-    h.service.playMarker(1, 2);
-    h.service.release();
-    h.service.playMarker(3, 4);
-    expect(spanArgs(h.port)).toEqual([0, 1]);
-  });
-
-  it("bumps the session before releasing, not after", () => {
-    // The order matters: a play already queued behind the release has to be
-    // superseded by the time it runs, which means the number Rust is told must
-    // already be ahead of the stamp that play carries.
-    const h = createHarness();
-    h.service.playMarker(1, 2);
-    h.service.release();
-    const released = (h.port.releasePlayback as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(released).toBeGreaterThan(spanArgs(h.port)[0]);
-  });
-});

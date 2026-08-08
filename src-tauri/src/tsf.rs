@@ -461,7 +461,11 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
 
 /// Opens a .tsf: the transcript and metadata are returned, the audio is kept.
 #[tauri::command]
-pub fn open_tsf(state: tauri::State<'_, TsfState>, path: String) -> Result<OpenTsfResult, String> {
+pub fn open_tsf(
+    state: tauri::State<'_, TsfState>,
+    playback: tauri::State<'_, crate::playback::PlaybackState>,
+    path: String,
+) -> Result<OpenTsfResult, String> {
     let container = read_tsf(Path::new(&path))?;
     let result = OpenTsfResult {
         transcript: container.transcript.clone(),
@@ -474,6 +478,10 @@ pub fn open_tsf(state: tauri::State<'_, TsfState>, path: String) -> Result<OpenT
         .lock()
         .map_err(|error| format!("Cannot take the open-container lock: {error}"))?;
     *open = Some(container);
+    // Opening a container is what re-arms playback after a release. Playback
+    // owns that state rather than the frontend, because the frontend forgets it
+    // across a reload and this side does not.
+    playback.arm();
 
     Ok(result)
 }

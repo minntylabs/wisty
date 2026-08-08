@@ -12,10 +12,9 @@
  */
 
 export type PlaybackPort = {
-  /** `session` identifies the document; see createPlaybackService. */
-  playSpan: (start: number, end: number, session: number) => Promise<void>;
+  playSpan: (start: number, end: number) => Promise<void>;
   stopPlayback: () => Promise<void>;
-  releasePlayback: (session: number) => Promise<void>;
+  releasePlayback: () => Promise<void>;
 };
 
 /**
@@ -66,19 +65,19 @@ export type PlaybackService = {
  * nothing awaits these, so a rejected promise would otherwise be an unhandled
  * rejection in the console and silence for the user.
  *
- * The session counter exists because `play_span` is an async Tauri command and
- * `release_playback` is not, so they do not run in the order they were sent.
- * Clicking a sentence and immediately closing the document could otherwise
- * start audio from a document that is already gone. Each play carries the
- * session it belongs to, releasing moves the session on, and Rust drops a play
- * whose stamp has been superseded — which works however the two are ordered.
+ * Note what is NOT here: any notion of which document a play belongs to.
+ * `play_span` is async and `release_playback` is not, so they do not run in the
+ * order they were sent, and a play can arrive after the document it came from
+ * was closed. That is guarded on the Rust side, which arms on open and disarms
+ * on release. It was briefly guarded here instead, by a counter this module
+ * incremented — and that was worse than the bug it fixed, because this module
+ * is rebuilt on a webview reload and its counter restarted while Rust's did
+ * not, silently killing playback for the life of the process.
  */
 export const createPlaybackService = (
   port: PlaybackPort,
   onError: (error: unknown) => void
 ): PlaybackService => {
-  let session = 0;
-
   const run = (action: () => Promise<void>) => {
     void action().catch(onError);
   };
@@ -92,17 +91,15 @@ export const createPlaybackService = (
         return;
       }
       const span = paddedSpan(start, end);
-      const stamp = session;
-      run(() => port.playSpan(span.start, span.end, stamp));
+      run(() => port.playSpan(span.start, span.end));
     },
     stop: () => run(() => port.stopPlayback()),
     release: () => {
-      session += 1;
       // Deliberately not routed to onError. This runs while a document is
       // closing, which the user did not ask for audio during: a missing output
       // device must not raise a dialog blaming playback for a close. Nothing
       // downstream can act on it either, since the document is going anyway.
-      void port.releasePlayback(session).catch(() => {});
+      void port.releasePlayback().catch(() => {});
     }
   };
 };

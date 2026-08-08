@@ -18,7 +18,7 @@
 //! failure would be inaudible until it was wrong by a word.
 
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rodio::buffer::SamplesBuffer;
@@ -229,22 +229,39 @@ struct Playing {
 #[derive(Default)]
 pub struct PlaybackState {
     playing: Mutex<Option<Playing>>,
-    /// The oldest session whose plays are still wanted.
+    /// Whether plays are currently wanted at all.
     ///
     /// `play_span` is async, so Tauri runs it on a worker and it does NOT
     /// execute in IPC order with the synchronous `release_playback`. Clicking a
     /// sentence and immediately closing the document can therefore run the play
     /// *after* the release — which would re-open the device and start talking
     /// over a document the user has just closed, or fail with "no container
-    /// open" and raise a dialog about a click they made before closing.
+    /// open" and raise a dialog about a click made before the close.
     ///
-    /// Ordering cannot be relied on, so the frontend stamps each play with the
-    /// session it belongs to and bumps the session when it releases. A play
-    /// carrying a superseded stamp is dropped, whenever it happens to arrive.
-    session: AtomicU64,
+    /// So releasing disarms, and opening a container arms. A play that arrives
+    /// while disarmed is dropped, whenever it happens to arrive.
+    ///
+    /// Deliberately owned here rather than counted by the frontend. An earlier
+    /// attempt had each play carry a session number the frontend incremented,
+    /// which was worse than the bug it fixed: this state outlives the webview,
+    /// so a reload restarted the frontend's counter at zero while this side
+    /// still held the old value, and every subsequent play was silently
+    /// discarded for the life of the process. Anything the frontend can forget
+    /// across a reload cannot be the thing guarding this.
+    armed: AtomicBool,
 }
 
 impl PlaybackState {
+    /// Accept plays again. Called when a container is opened.
+    pub fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a play arriving now belongs to the open document.
+    fn armed(&self) -> bool {
+        self.armed.load(Ordering::SeqCst)
+    }
+
     fn with_player<T>(
         &self,
         run: impl FnOnce(&mut Option<Playing>) -> Result<T, String>,
@@ -275,15 +292,7 @@ pub fn play_span(
     container: tauri::State<'_, crate::tsf::TsfState>,
     start: f64,
     end: f64,
-    session: u64,
 ) -> Result<(), String> {
-    // Superseded by a release that happened after this play was requested but
-    // before it ran. Silently, because the user did nothing wrong: they clicked
-    // a sentence and then closed the document, and the only correct outcome is
-    // no sound and no dialog.
-    if session < playback.session.load(Ordering::SeqCst) {
-        return Ok(());
-    }
     if !start.is_finite() || !end.is_finite() {
         return Err(format!("A span needs finite times, got {start} and {end}"));
     }
@@ -292,15 +301,25 @@ pub fn play_span(
     }
 
     playback.with_player(|slot| {
+        // Checked under the lock rather than on the way in: release_playback
+        // takes the same lock, so testing it earlier would only narrow the
+        // window rather than close it.
+        if !playback.armed() {
+            return Ok(());
+        }
         if slot.is_none() {
             let audio = {
                 let open = container
                     .0
                     .lock()
                     .map_err(|error| format!("Cannot take the open-container lock: {error}"))?;
-                let open = open
-                    .as_ref()
-                    .ok_or_else(|| "No transcript container is open".to_string())?;
+                // No container, having just passed the armed check, means the
+                // document was closed between the two. A race rather than
+                // something the user can act on, so it makes no sound and no
+                // dialog.
+                let Some(open) = open.as_ref() else {
+                    return Ok(());
+                };
                 SharedAudio(Arc::clone(&open.audio))
             };
             let device = rodio::stream::DeviceSinkBuilder::open_default_sink()
@@ -345,13 +364,10 @@ pub fn stop_playback(playback: tauri::State<'_, PlaybackState>) -> Result<(), St
 /// the user has closed is both confusing and a way to keep ten megabytes
 /// resident after they have moved on.
 #[tauri::command]
-pub fn release_playback(
-    playback: tauri::State<'_, PlaybackState>,
-    session: u64,
-) -> Result<(), String> {
-    // Take the session forward first, so a play still queued behind this is
-    // already superseded by the time it runs.
-    playback.session.store(session, Ordering::SeqCst);
+pub fn release_playback(playback: tauri::State<'_, PlaybackState>) -> Result<(), String> {
+    // Disarm before taking the lock, so a play waiting on it sees the new state
+    // rather than starting anyway.
+    playback.armed.store(false, Ordering::SeqCst);
     playback.with_player(|slot| {
         if let Some(playing) = slot.take() {
             playing.player.stop();
@@ -446,26 +462,28 @@ mod tests {
         }
     }
 
-    /// The session guard, which is the whole of the defence against a play
-    /// arriving after the document it belongs to was closed.
+    /// The arming guard, which is the whole of the defence against a play
+    /// outliving the document it came from.
     ///
-    /// Only the comparison is testable here — actually racing the commands
-    /// would need a Tauri runtime — but the comparison is the part that would
-    /// be got backwards, and getting it backwards means audio from a closed
-    /// document with nothing to show why.
+    /// Racing the actual commands would need a Tauri runtime, so this exercises
+    /// the predicate they consult. That is the part that would be got backwards,
+    /// and backwards means audio from a closed document with nothing to show why.
     #[test]
-    fn supersedes_plays_from_a_released_session() {
+    fn refuses_plays_once_released() {
         let state = PlaybackState::default();
-        // Nothing released yet: a play stamped with the current session stands.
-        assert_eq!(state.session.load(Ordering::SeqCst), 0);
+        // Disarmed until a container is opened, which is the safe direction:
+        // there is nothing to play before then, and a play arriving anyway is
+        // a bug rather than something to honour. open_tsf does the arming.
+        assert!(!state.armed(), "nothing to play before a container is opened");
 
-        // release_playback stores the session the frontend has moved on to.
-        state.session.store(1, Ordering::SeqCst);
-        assert!(0 < state.session.load(Ordering::SeqCst), "stale play must be dropped");
-        assert!(
-            !(1 < state.session.load(Ordering::SeqCst)),
-            "a play from the new session must still be allowed"
-        );
+        state.arm();
+        assert!(state.armed(), "opening a container must accept plays");
+
+        state.armed.store(false, Ordering::SeqCst);
+        assert!(!state.armed(), "a play after a release must be dropped");
+
+        state.arm();
+        assert!(state.armed(), "opening the next container must accept plays again");
     }
 
     /// Ten seconds of AAC in which second N is a sine at (N+1)*400 Hz.

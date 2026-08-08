@@ -134,6 +134,7 @@ export type DocumentPort = {
   };
   setRevision: (revision: number) => void;
   markCleanAt: (revision: number) => void;
+  markSavedAt: (revision: number) => void;
   setFilePath: (filePath: string, kind?: DocumentKind) => void;
   setUntitled: () => void;
 };

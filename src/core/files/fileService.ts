@@ -108,7 +108,8 @@ const savePathWithExtension = async (defaultPath: string | undefined, name: stri
   if (!selected) return { kind: "cancelled" };
   const suffix = `.${extension}`;
   const lastDot = selected.lastIndexOf(".");
-  if (lastDot < selected.lastIndexOf("/")) return { kind: "saved", filePath: `${selected}${suffix}` };
+  const lastSeparator = Math.max(selected.lastIndexOf("/"), selected.lastIndexOf("\\"));
+  if (lastDot < lastSeparator) return { kind: "saved", filePath: `${selected}${suffix}` };
   if (!selected.toLowerCase().endsWith(suffix)) throw new Error(`Choose a ${suffix} file`);
   return { kind: "saved", filePath: selected };
 };

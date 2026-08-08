@@ -19,6 +19,7 @@ type HarnessOverrides = {
   containerText?: string;
   openContainer?: (filePath: string) => Promise<{ transcript: string; meta: Record<string, unknown>; audioBytes: number }>;
   saveContainer?: (filePath: string, transcript: string) => Promise<void>;
+  setLastDirectory?: () => Promise<void>;
   /** What the open dialog returns. Defaults to the container. */
   dialogPath?: string;
   fileSize?: number;
@@ -28,6 +29,7 @@ type HarnessOverrides = {
 const createHarness = (overrides: HarnessOverrides = {}) => {
   const document = createDocumentStore();
   const editorText = { value: "" };
+  const revision = { value: 1 };
   /** Ordered log of the calls whose relative order matters. */
   const events: string[] = [];
   const showError = vi.fn(async () => {});
@@ -70,13 +72,13 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
       },
       setLargeLineSafeMode: () => {},
       setMarkersEnabled: markersEnabled,
-      getRevision: () => 1
+      getRevision: () => revision.value
     },
     document,
     settings: {
       state: { lastDirectory: "", recentFiles: [] },
       actions: {
-        setLastDirectory: async () => {},
+        setLastDirectory: overrides.setLastDirectory ?? (async () => {}),
         addRecentFile: async () => {},
         removeRecentFile: async () => {}
       }
@@ -133,6 +135,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     lifecycle: useFileLifecycle(deps),
     document,
     editorText,
+    revision,
     showError,
     openContainer,
     closeContainer,
@@ -399,6 +402,45 @@ describe("saving a container", () => {
     finishSave?.();
     await first;
     expect(h.lifecycle.savingState.isSaving()).toBe(false);
+  });
+
+  it("keeps an edit made during a container save dirty", async () => {
+    let finishSave: (() => void) | undefined;
+    const h = createHarness({
+      saveContainer: async () => new Promise<void>((resolve) => {
+        finishSave = resolve;
+      })
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    const saving = h.lifecycle.saveFile();
+    await Promise.resolve();
+    h.editorText.value = `${TRANSCRIPT} Later edit.`;
+    h.revision.value = 2;
+    h.document.setRevision(2);
+    finishSave?.();
+    await saving;
+
+    expect(h.document.state.isDirty).toBe(true);
+    expect(h.document.state.baselineRevision).toBe(1);
+  });
+
+  it("keeps the saved-as container active when directory history fails", async () => {
+    let directoryUpdates = 0;
+    const h = createHarness({
+      setLastDirectory: async () => {
+        directoryUpdates += 1;
+        if (directoryUpdates > 1) {
+          throw new Error("settings unavailable");
+        }
+      }
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    await h.lifecycle.saveFileAs();
+
+    expect(h.document.state).toMatchObject({ kind: "container", filePath: "/tmp/other.tsf" });
+    expect(h.showError).not.toHaveBeenCalled();
   });
 
   it("saves a container copy as another .tsf", async () => {

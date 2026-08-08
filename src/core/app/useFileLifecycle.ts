@@ -14,7 +14,7 @@ import { stripMarkers } from "../tsf/markers";
 
 type UseFileLifecycleDeps = {
   editor: Pick<EditorPort, "focus" | "getText" | "getDocLength" | "getTextSlice" | "setText" | "append" | "reset" | "setLargeLineSafeMode" | "getRevision" | "setMarkersEnabled">;
-  document: Pick<DocumentPort, "state" | "setRevision" | "markCleanAt" | "setFilePath" | "setUntitled">;
+  document: Pick<DocumentPort, "state" | "setRevision" | "markCleanAt" | "markSavedAt" | "setFilePath" | "setUntitled">;
   settings: Pick<SettingsPort, "state" | "actions">;
   fileDialogs: FileDialogsPort;
   fileIo: FileIoPort;
@@ -702,12 +702,18 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       return;
     }
     const transcript = deps.editor.getText();
+    const revision = deps.editor.getRevision();
     const saveId = beginSavingState(filePath, transcript.length);
     try {
       await deps.fileIo.saveContainer(filePath, transcript);
       setSavingCharsWritten(transcript.length);
-      deps.document.markCleanAt(deps.editor.getRevision());
-      await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
+      deps.document.markSavedAt(revision);
+      deps.document.setFilePath(filePath, "container");
+      try {
+        await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
+      } catch {
+        // The archive is already saved; directory history must not report it as failed.
+      }
       deps.editor.focus();
     } finally {
       endSavingState(saveId);
@@ -725,7 +731,6 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         const previousPath = deps.document.state.filePath;
         await saveContainerAtPath(result.filePath);
         await deps.rememberedPosition.migrate(previousPath, result.filePath);
-        deps.document.setFilePath(result.filePath, "container");
         await deps.settings.actions.addRecentFile(result.filePath);
       }, "Unable to save file");
       return;

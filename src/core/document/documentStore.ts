@@ -56,6 +56,14 @@ export const createDocumentStore = () => {
     });
   };
 
+  /** Records a saved editor revision without hiding edits made during the save. */
+  const markSavedAt = (revision: number) => {
+    setState({
+      baselineRevision: revision,
+      isDirty: state.currentRevision !== revision
+    });
+  };
+
   /**
    * `kind` defaults to "text", so every existing caller keeps marking the
    * document a plain text file — which is what saving to a path through the
@@ -78,6 +86,7 @@ export const createDocumentStore = () => {
     state,
     setRevision,
     markCleanAt,
+    markSavedAt,
     setFilePath,
     setUntitled
   };

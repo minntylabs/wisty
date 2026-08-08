@@ -1,5 +1,13 @@
-import { describe, expect, it } from "vitest";
-import { isContainerPath } from "./fileService";
+import { describe, expect, it, vi } from "vitest";
+
+const dialogSave = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
+  save: dialogSave
+}));
+
+import { isContainerPath, saveContainerPathAs, saveTextExportPathAs } from "./fileService";
 
 describe("isContainerPath", () => {
   it("recognises a container", () => {
@@ -20,5 +28,15 @@ describe("isContainerPath", () => {
     // Not something this can detect from the string alone; the Rust side
     // checks the zip signature, which is what actually settles it.
     expect(isContainerPath("/archive/backup.tsf")).toBe(true);
+  });
+});
+
+describe("Save As extensions", () => {
+  it("appends the requested extension to Windows paths without one", async () => {
+    dialogSave.mockResolvedValueOnce("C:\\exports\\transcript");
+    await expect(saveContainerPathAs()).resolves.toEqual({ kind: "saved", filePath: "C:\\exports\\transcript.tsf" });
+
+    dialogSave.mockResolvedValueOnce("C:\\exports\\export");
+    await expect(saveTextExportPathAs()).resolves.toEqual({ kind: "saved", filePath: "C:\\exports\\export.txt" });
   });
 });

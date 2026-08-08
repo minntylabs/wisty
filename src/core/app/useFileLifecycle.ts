@@ -698,10 +698,20 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   const saveContainerAtPath = async (filePath: string) => {
-    await deps.fileIo.saveContainer(filePath, deps.editor.getText());
-    deps.document.markCleanAt(deps.editor.getRevision());
-    await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
-    deps.editor.focus();
+    if (isSaving()) {
+      return;
+    }
+    const transcript = deps.editor.getText();
+    const saveId = beginSavingState(filePath, transcript.length);
+    try {
+      await deps.fileIo.saveContainer(filePath, transcript);
+      setSavingCharsWritten(transcript.length);
+      deps.document.markCleanAt(deps.editor.getRevision());
+      await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
+      deps.editor.focus();
+    } finally {
+      endSavingState(saveId);
+    }
   };
 
   const saveFileAs = async () => {

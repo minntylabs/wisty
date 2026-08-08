@@ -18,6 +18,7 @@ const TRANSCRIPT = "ALICE: ⟦734.12–736.80⟧So we walked down.";
 type HarnessOverrides = {
   containerText?: string;
   openContainer?: (filePath: string) => Promise<{ transcript: string; meta: Record<string, unknown>; audioBytes: number }>;
+  saveContainer?: (filePath: string, transcript: string) => Promise<void>;
   /** What the open dialog returns. Defaults to the container. */
   dialogPath?: string;
   fileSize?: number;
@@ -36,7 +37,8 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     audioBytes: 10_780_099
   })));
   const closeContainer = vi.fn(async () => {});
-  const saveContainer = vi.fn(async () => {});
+  const saveContainer = vi.fn(overrides.saveContainer ?? (async () => {}));
+  const savedChunks: string[] = [];
   const startSaveFileStream = vi.fn(async (filePath: string) => ({ streamId: "s", filePath }));
   const markersEnabled = vi.fn((enabled: boolean) => {
     events.push(enabled ? "markers-on" : "markers-off");
@@ -108,7 +110,10 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     },
     saveFileStream: {
       startSaveFileStream,
-      writeSaveFileChunk: async () => ({ bytesWrittenTotal: 1 }),
+      writeSaveFileChunk: async (_streamId: string, chunk: string) => {
+        savedChunks.push(chunk);
+        return { bytesWrittenTotal: savedChunks.join("").length };
+      },
       finishSaveFileStream: async () => ({ bytesWrittenTotal: 1 }),
       cancelSaveFileStream: async () => {}
     },
@@ -132,6 +137,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     openContainer,
     closeContainer,
     saveContainer,
+    savedChunks,
     startSaveFileStream,
     streamReadTextFile,
     markersEnabled,
@@ -375,6 +381,26 @@ describe("saving a container", () => {
     expect(h.showError).not.toHaveBeenCalled();
   });
 
+  it("blocks a second container save until the first completes", async () => {
+    let finishSave: (() => void) | undefined;
+    const h = createHarness({
+      saveContainer: async () => new Promise<void>((resolve) => {
+        finishSave = resolve;
+      })
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    const first = h.lifecycle.saveFile();
+    await Promise.resolve();
+    expect(h.lifecycle.savingState.isSaving()).toBe(true);
+    await h.lifecycle.saveFile();
+    expect(h.saveContainer).toHaveBeenCalledTimes(1);
+
+    finishSave?.();
+    await first;
+    expect(h.lifecycle.savingState.isSaving()).toBe(false);
+  });
+
   it("saves a container copy as another .tsf", async () => {
     const h = createHarness();
     await h.lifecycle.openFileAtPath(CONTAINER);
@@ -394,6 +420,7 @@ describe("saving a container", () => {
 
     expect(h.saveContainer).not.toHaveBeenCalled();
     expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/export.txt");
+    expect(h.savedChunks.join("")).toBe("ALICE: So we walked down.");
     expect(h.document.state).toMatchObject({ kind: "container", filePath: CONTAINER });
     expect(h.document.state.isDirty).toBe(true);
   });

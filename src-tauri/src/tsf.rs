@@ -11,8 +11,10 @@
 //! string. Nothing in this file knows what a marker looks like, which is what keeps the
 //! marker format defined in exactly one place.
 
-use std::fs::{File, Metadata};
+use std::fs::{File, Metadata, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
 
@@ -31,6 +33,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 const TRANSCRIPT_MEMBER: &str = "transcript.txt";
 const META_MEMBER: &str = "meta.json";
 const WORDS_MEMBER: &str = "words.json";
+static SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Serialize)]
 pub struct CreateTsfResult {
@@ -321,6 +324,7 @@ pub struct OpenTsf {
     /// discard them from a container created by the importer.
     pub words: Option<Vec<u8>>,
     source_metadata: Metadata,
+    source_fingerprint: u64,
     unsupported_members: Vec<String>,
 }
 
@@ -341,7 +345,7 @@ impl std::fmt::Debug for OpenTsf {
 }
 
 #[derive(Default)]
-pub struct TsfState(pub Mutex<Option<OpenTsf>>);
+pub struct TsfState(pub Mutex<Option<OpenTsf>>, pub Mutex<()>);
 
 #[derive(Debug, Serialize)]
 pub struct OpenTsfResult {
@@ -405,6 +409,19 @@ fn validate_member_name(name: &str) -> Result<(), String> {
         return Err(format!("The container has an unsafe audio member name: {name}"));
     }
     Ok(())
+}
+
+fn fingerprint_file(path: &Path) -> Result<u64, String> {
+    let mut file = File::open(path).map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+        if read == 0 {
+            return Ok(hasher.finish());
+        }
+        buffer[..read].hash(&mut hasher);
+    }
 }
 
 /// True when `path` begins with the zip signature.
@@ -488,6 +505,7 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
     };
     let source_metadata = std::fs::metadata(archive)
         .map_err(|error| format!("Cannot stat {}: {error}", archive.display()))?;
+    let source_fingerprint = fingerprint_file(archive)?;
 
     Ok(OpenTsf {
         // Absolute, so saving back later cannot be affected by the working
@@ -499,6 +517,7 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
         meta,
         words,
         source_metadata,
+        source_fingerprint,
         unsupported_members,
     })
 }
@@ -565,12 +584,24 @@ fn source_is_unchanged(open: &OpenTsf) -> Result<(), String> {
     if current.len() != open.source_metadata.len() || current.modified().ok() != open.source_metadata.modified().ok() {
         return Err("The transcript container changed on disk after it was opened. Reopen it before saving so no changes are lost.".to_string());
     }
+    if fingerprint_file(&open.path)? != open.source_fingerprint {
+        return Err("The transcript container changed on disk after it was opened. Reopen it before saving so no changes are lost.".to_string());
+    }
     Ok(())
+}
+
+fn temporary_save_path(parent: &Path, output: &Path) -> PathBuf {
+    parent.join(format!(
+        ".{}.{}.{}.partial",
+        output.file_name().and_then(|name| name.to_str()).unwrap_or("transcript.tsf"),
+        std::process::id(),
+        SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 fn write_open_archive(temporary: &Path, transcript: &str, open: &OpenTsf) -> Result<(), String> {
     validate_member_name(&open.audio_member)?;
-    let file = File::create(temporary)
+    let file = OpenOptions::new().write(true).create_new(true).open(temporary)
         .map_err(|error| format!("Cannot create {}: {error}", temporary.display()))?;
     let mut zip = ZipWriter::new(BufWriter::new(file));
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
@@ -604,6 +635,10 @@ fn write_open_archive(temporary: &Path, transcript: &str, open: &OpenTsf) -> Res
 /// archive members are refused rather than silently discarded.
 #[tauri::command]
 pub fn save_tsf(state: tauri::State<'_, TsfState>, path: String, transcript: String) -> Result<(), String> {
+    // The frontend also blocks duplicate saves, but commands are independently
+    // invokable. Keep the archive operation single-flight at the authority.
+    let _save = state.1.lock()
+        .map_err(|error| format!("Cannot take the container-save lock: {error}"))?;
     let open = state.0.lock()
         .map_err(|error| format!("Cannot take the open-container lock: {error}"))?
         .clone()
@@ -617,8 +652,14 @@ pub fn save_tsf(state: tauri::State<'_, TsfState>, path: String, transcript: Str
     source_is_unchanged(&open)?;
     let output = PathBuf::from(path);
     let parent = output.parent().ok_or_else(|| "Output path has no parent directory".to_string())?;
-    let temporary = parent.join(format!(".{}.partial", output.file_name().and_then(|name| name.to_str()).unwrap_or("transcript.tsf")));
+    let temporary = temporary_save_path(parent, &output);
     if let Err(error) = write_open_archive(&temporary, &transcript, &open) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    // Check again immediately before replacement. A timestamp/length check
+    // alone misses same-sized edits, so source_is_unchanged also fingerprints.
+    if let Err(error) = source_is_unchanged(&open) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
@@ -635,6 +676,7 @@ pub fn save_tsf(state: tauri::State<'_, TsfState>, path: String, transcript: Str
     current.path = output.canonicalize().unwrap_or(output);
     current.source_metadata = std::fs::metadata(&current.path)
         .map_err(|error| format!("Cannot stat saved container: {error}"))?;
+    current.source_fingerprint = fingerprint_file(&current.path)?;
     Ok(())
 }
 
@@ -955,6 +997,22 @@ mod tests {
         for name in ["", "../audio.m4a", "audio/part.m4a", "audio\\part.m4a", "/audio.m4a"] {
             assert!(validate_member_name(name).is_err(), "{name}");
         }
+    }
+
+    #[test]
+    fn detects_a_changed_source_before_repacking() {
+        let dir = temp_dir("changed-save");
+        let path = written(&dir, "before", None);
+        let open = read_tsf(&path).expect("open");
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(source_is_unchanged(&open).is_err());
+    }
+
+    #[test]
+    fn save_temporary_paths_are_unique() {
+        let dir = temp_dir("unique-temp");
+        let output = dir.join("out.tsf");
+        assert_ne!(temporary_save_path(&dir, &output), temporary_save_path(&dir, &output));
     }
 
     #[test]

@@ -1,11 +1,12 @@
 import { Show } from "solid-js";
+import type { ExternalChangeKind } from "../core/app/externalChangeMonitor";
 
 /**
- * How the file on disk disagrees with the document. Kept in step with the
- * lifecycle's own kind: `deleted` and `appeared` are the two ends of a document
- * whose path did not hold what it expected.
+ * The conflict this banner describes, taken from the monitor that raises it
+ * rather than restated here: `HEADINGS` below is exhaustive over it, so a new
+ * kind fails the build until this has something to say about it.
  */
-export type ExternalChangeBannerKind = "changed" | "deleted" | "appeared" | "not-a-file";
+export type ExternalChangeBannerKind = ExternalChangeKind;
 
 type ExternalChangeBannerProps = {
   visible: boolean;

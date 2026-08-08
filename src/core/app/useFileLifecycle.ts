@@ -7,12 +7,12 @@ import type {
   FileIoPort,
   FontPickerPort,
   SettingsPort,
-  TextSnapshot,
-  TextFileVersion
+  TextSnapshot
 } from "./contracts";
 import { createSignal } from "solid-js";
 import type { LaunchFileStreamChunkResult } from "../window/launchArgService";
 import { toAppError, type AppErrorCode } from "../errors/appError";
+import { createExternalChangeMonitor, externalChangeKindFromSaveError } from "./externalChangeMonitor";
 import { stripMarkers } from "../tsf/markers";
 
 type UseFileLifecycleDeps = {
@@ -63,61 +63,6 @@ const LAUNCH_STREAM_READ_BYTES = 256 * 1024;
 const SAVE_STREAM_CHUNK_CHARS = 256 * 1024;
 const SAVING_OVERLAY_DELAY_MS = 500;
 
-/**
- * How the file on disk disagrees with the document.
- *
- * `appeared` is the counterpart of `deleted` for a document being created: it
- * expected no file at its path, and something else put one there. `not-a-file`
- * is a directory, or anything else that is not a regular file, standing where
- * the document's file should be — which neither a reload nor an overwrite can
- * do anything with.
- */
-type ExternalChangeKind = "changed" | "deleted" | "appeared" | "not-a-file";
-
-type ExternalChange = {
-  filePath: string;
-  kind: ExternalChangeKind;
-};
-
-/**
- * What the document is measured against.
- *
- * `absent` is a baseline in its own right, not the lack of one: a document
- * created at an empty path asserts that the path is still empty when it saves.
- * Only `null` means nothing is known, and then a save asserts nothing.
- */
-type TextFileBaseline =
-  | { kind: "present"; version: TextFileVersion }
-  | { kind: "absent" };
-
-const sameTextFileVersion = (left: TextFileVersion, right: TextFileVersion) =>
-  left.size === right.size
-  && left.modifiedMs === right.modifiedMs
-  && left.device === right.device
-  && left.inode === right.inode;
-
-/**
- * Which conflict, if any, the backend refused a save over.
- *
- * By code rather than by message: the wording lives in Rust, and matching it
- * from here would silently degrade every conflict into a generic save failure
- * the next time someone reworded it.
- */
-const externalChangeKindFromSaveError = (error: unknown): ExternalChangeKind | null => {
-  switch (toAppError(error, "SAVE_FAILED", "Unable to save file").code) {
-    case "SAVE_EXTERNAL_CHANGE":
-      return "changed";
-    case "SAVE_EXTERNAL_DELETE":
-      return "deleted";
-    case "SAVE_EXTERNAL_APPEARED":
-      return "appeared";
-    case "SAVE_EXTERNAL_NOT_A_FILE":
-      return "not-a-file";
-    default:
-      return null;
-  }
-};
-
 class FileLoadCancelledError extends Error {
   constructor() {
     super("File load cancelled");
@@ -161,142 +106,15 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   const [savingCharsWritten, setSavingCharsWritten] = createSignal(0);
   const [savingTotalChars, setSavingTotalChars] = createSignal<number | undefined>(undefined);
   const [saveCancelRequested, setSaveCancelRequested] = createSignal(false);
-  const [externalChange, setExternalChange] = createSignal<ExternalChange | null>(null);
-  const [externalChangeDismissed, setExternalChangeDismissed] = createSignal(false);
 
   let activeLoadId = 0;
   let loadingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
   let activeSaveId = 0;
   let savingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
-  let textFileBaseline: TextFileBaseline | null = null;
-  let textFileBaselineGeneration = 0;
-  let observedExternalVersion: TextFileVersion | null = null;
-  let textFileBaselineError: Error | null = null;
-
-  /**
-   * Whether a baseline taken at `generation` is still the one in force.
-   *
-   * Every await between taking a baseline and acting on it is a window for
-   * another document to be opened, and what was learned about the old one must
-   * not land on the new one.
-   */
-  const baselineIsCurrent = (generation: number) => generation === textFileBaselineGeneration;
-
-  /**
-   * Forgets the baseline. `generation` scopes it to the baseline the caller
-   * took: a load that fails after another document has replaced it has nothing
-   * left to clear, and clearing anyway would leave the new document with no
-   * baseline and its saves asserting nothing.
-   */
-  const clearTextFileBaseline = (generation?: number) => {
-    if (generation !== undefined && !baselineIsCurrent(generation)) {
-      return;
-    }
-    textFileBaselineGeneration += 1;
-    textFileBaseline = null;
-    observedExternalVersion = null;
-    textFileBaselineError = null;
-    setExternalChange(null);
-    setExternalChangeDismissed(false);
-  };
-
-  /**
-   * Raises a conflict, recording the on-disk version it was raised for.
-   *
-   * That version is what a dismissal is a dismissal *of*: without it the next
-   * check has nothing to recognise and raises the same conflict again.
-   */
-  const raiseExternalChange = (
-    filePath: string,
-    kind: ExternalChangeKind,
-    observed: TextFileVersion | null = null
-  ) => {
-    observedExternalVersion = observed;
-    if (kind === "deleted" || kind === "not-a-file") {
-      // The editor now holds the only copy of this text — there is nothing at
-      // the path to go back to. Saying so keeps the close prompt in the way of
-      // losing it, whether or not it was edited.
-      deps.document.markDirty();
-    }
-    setExternalChange({ filePath, kind });
-    setExternalChangeDismissed(false);
-  };
-
-  /** Drops a conflict whose difference no longer exists. */
-  const retractExternalChange = () => {
-    if (!externalChange()) {
-      return;
-    }
-    observedExternalVersion = null;
-    setExternalChange(null);
-    setExternalChangeDismissed(false);
-  };
-
-  /**
-   * Records what is on disk at `filePath` as what this document is measured
-   * against.
-   *
-   * Never throws. A baseline is taken around operations that have already
-   * succeeded, so a failure here says nothing about whether they did and must
-   * not be reported as though it did. It is recorded instead, and Save is what
-   * acts on it — the one operation the missing baseline would endanger.
-   *
-   * `missingIsExpected` separates the two reasons a path can hold no file: a
-   * document being created there, and a file that has gone since Wisty last
-   * looked. The second is a deletion the user has to be told about, and saying
-   * nothing would let a save recreate it silently.
-   *
-   * Returns the generation it claimed, so a caller can tell whether what it
-   * took is still in force by the time its own work is done. Reading metadata
-   * is a wait like any other: a document opened during it supersedes this one,
-   * and recording what this one found would give the new document the old
-   * one's baseline and could raise the old one's conflict over it.
-   */
-  const captureTextFileBaseline = async (
-    filePath: string,
-    options?: { missingIsExpected?: boolean }
-  ): Promise<number> => {
-    textFileBaselineGeneration += 1;
-    const generation = textFileBaselineGeneration;
-    observedExternalVersion = null;
-    setExternalChange(null);
-    setExternalChangeDismissed(false);
-    try {
-      const presence = await deps.fileIo.getTextFilePresence(filePath);
-      if (!baselineIsCurrent(generation)) {
-        return generation;
-      }
-      textFileBaselineError = null;
-      textFileBaseline =
-        presence.kind === "present" ? { kind: "present", version: presence.version } : { kind: "absent" };
-      if (presence.kind === "not-a-file") {
-        // Whatever this document was going to do with the path, it cannot:
-        // this is worth saying even when an empty path was expected.
-        raiseExternalChange(filePath, "not-a-file");
-      } else if (presence.kind === "missing" && !options?.missingIsExpected) {
-        raiseExternalChange(filePath, "deleted");
-      }
-    } catch (error) {
-      if (!baselineIsCurrent(generation)) {
-        return generation;
-      }
-      textFileBaseline = null;
-      textFileBaselineError = new Error(
-        `Wisty cannot check this file on disk: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-    return generation;
-  };
-
-  /** What a save asserts about the target, or nothing when no baseline is held. */
-  const expectedSaveSource = (): ExpectedSaveSource | undefined => {
-    if (!textFileBaseline) {
-      return undefined;
-    }
-    return textFileBaseline.kind === "present"
-      ? { kind: "present", version: textFileBaseline.version }
-      : { kind: "absent" };
-  };
+  const externalChanges = createExternalChangeMonitor({
+    fileIo: deps.fileIo,
+    document: deps.document
+  });
 
   /**
    * Whether a read or a write of the document is already under way.
@@ -318,83 +136,6 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    */
   const documentStillOpenAt = (filePath: string) =>
     deps.document.state.kind === "text" && deps.document.state.filePath === filePath;
-
-  const checkForExternalChange = async (): Promise<boolean> => {
-    if (deps.document.state.kind !== "text" || !deps.document.state.filePath || !textFileBaseline) {
-      return false;
-    }
-    const filePath = deps.document.state.filePath;
-    const baseline = textFileBaseline;
-    const generation = textFileBaselineGeneration;
-    const current = await deps.fileIo.getTextFilePresence(filePath);
-    if (
-      generation !== textFileBaselineGeneration
-      || deps.document.state.kind !== "text"
-      || deps.document.state.filePath !== filePath
-      || textFileBaseline !== baseline
-    ) {
-      return false;
-    }
-
-    if (current.kind === "not-a-file") {
-      if (externalChange()?.kind !== "not-a-file") {
-        raiseExternalChange(filePath, "not-a-file");
-      }
-      return true;
-    }
-
-    if (current.kind === "missing") {
-      if (baseline.kind === "absent") {
-        // Still empty, which is what a document being created here expects.
-        retractExternalChange();
-        return false;
-      }
-      if (externalChange()?.kind !== "deleted") {
-        // Raised with no observed version: what comes back after a deletion is
-        // judged on its own, and a dismissal of what was there before the file
-        // went away is not consent to what replaces it.
-        raiseExternalChange(filePath, "deleted");
-      }
-      return true;
-    }
-
-    const version = current.version;
-    const differs = baseline.kind === "absent" || !sameTextFileVersion(baseline.version, version);
-    if (differs) {
-      if (!observedExternalVersion || !sameTextFileVersion(observedExternalVersion, version)) {
-        raiseExternalChange(filePath, baseline.kind === "absent" ? "appeared" : "changed", version);
-      }
-      return true;
-    }
-    // Back to the version this document was opened at — the conflict the banner
-    // reported no longer exists, so retract it rather than leave it standing.
-    retractExternalChange();
-    return false;
-  };
-
-  /**
-   * Raises a conflict the backend caught in the moment between the last check
-   * and the rename, reading the version that beat it so the banner behaves like
-   * any other — dismissible, and retracted if the file comes back.
-   */
-  const raiseExternalChangeFromSaveRace = async (filePath: string, kind: ExternalChangeKind) => {
-    let observed: TextFileVersion | null = null;
-    if (kind === "changed" || kind === "appeared") {
-      try {
-        const presence = await deps.fileIo.getTextFilePresence(filePath);
-        observed = presence.kind === "present" ? presence.version : null;
-      } catch {
-        // Best effort: without it the next check raises the conflict again,
-        // which is the safe direction to fail in.
-      }
-    }
-    // A save does not cancel an open. The conflict belongs to the document the
-    // save was for, and is not to be raised over the one that replaced it.
-    if (!documentStillOpenAt(filePath)) {
-      return;
-    }
-    raiseExternalChange(filePath, kind, observed);
-  };
 
   const beginLoadingState = (filePath: string) => {
     activeLoadId += 1;
@@ -764,7 +505,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
   const newFile = async () => {
     await releaseContainer();
-    clearTextFileBaseline();
+    externalChanges.clear();
     applySafeMode(false);
     loadEditorTextAsClean("");
     deps.document.setUntitled();
@@ -813,7 +554,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // leaves the open transcript usable instead of showing it without audio or
     // marker support.
     const container = await deps.fileIo.openContainer(filePath);
-    clearTextFileBaseline();
+    externalChanges.clear();
     applySafeMode(false);
     // Before the text, so the markers are tracked from the moment it lands
     // rather than being discovered by a later edit.
@@ -862,21 +603,21 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   const loadTextDocumentWithBaseline = async (filePath: string, load: () => Promise<void>) => {
     // A file that is not there is this open's own failure to report, not a
     // deletion to raise a banner over: the read is about to say so.
-    const generation = await captureTextFileBaseline(filePath, { missingIsExpected: true });
+    const generation = await externalChanges.capture(filePath, { missingIsExpected: true });
     try {
       await load();
     } catch (error) {
       // Scoped to this load's own baseline: an open that replaced this one
       // mid-read is what cancelled it, and its baseline is not ours to drop.
-      clearTextFileBaseline(generation);
+      externalChanges.clear(generation);
       throw error;
     }
-    if (!baselineIsCurrent(generation)) {
+    if (!externalChanges.isCurrent(generation)) {
       return;
     }
     deps.document.setFilePath(filePath);
     try {
-      await checkForExternalChange();
+      await externalChanges.check();
     } catch {
       // Reading metadata can fail; Save is where that matters and says so.
     }
@@ -960,7 +701,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
   const openFileFromTextAtPath = async (filePath: string, text: string) => {
     await releaseContainer();
-    clearTextFileBaseline();
+    externalChanges.clear();
     const useLargeLineSafeMode = text.length >= SAFE_MODE_PROBE_BYTES && !text.includes("\n");
     applySafeMode(useLargeLineSafeMode);
     loadEditorTextAsClean(text);
@@ -968,7 +709,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // The text did not come from disk, so whether the path holds a file is not
     // known here and its absence is no deletion. A baseline is taken all the
     // same: it is what stops a later save writing over whatever is there.
-    await captureTextFileBaseline(filePath, { missingIsExpected: true });
+    await externalChanges.capture(filePath, { missingIsExpected: true });
     await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
     deps.rememberedPosition.restore(filePath);
     deps.editor.focus();
@@ -979,14 +720,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // yet — but this is a public method, and every other entry point releases.
     // Being the one exception is how the openFile bug survived.
     await releaseContainer();
-    clearTextFileBaseline();
+    externalChanges.clear();
     applySafeMode(false);
     loadEditorTextAsClean("");
     deps.document.setFilePath(filePath);
     // An empty path is this document's baseline, not the lack of one: the file
     // it is about to create is not there yet, and a save has to say so rather
     // than write over whatever arrives at that path in the meantime.
-    await captureTextFileBaseline(filePath, { missingIsExpected: true });
+    await externalChanges.capture(filePath, { missingIsExpected: true });
     await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
     deps.editor.focus();
   };
@@ -1154,7 +895,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await deps.rememberedPosition.migrate(previousPath, result.filePath);
       deps.document.setFilePath(result.filePath);
       deps.document.markSavedAt(savedRevision);
-      await captureTextFileBaseline(result.filePath);
+      await externalChanges.capture(result.filePath);
       await rememberLastDirectory(result.filePath);
       await rememberRecentFile(result.filePath);
       deps.editor.focus();
@@ -1173,28 +914,29 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
     const filePath = deps.document.state.filePath;
     await runWithErrorMessage(async () => {
-      if (textFileBaselineError) {
+      if (externalChanges.error()) {
         // Try once more before refusing: a baseline that could not be taken
         // leaves nothing to validate this save against, but one unlucky moment
         // should not lock the document until it is closed and reopened.
-        await captureTextFileBaseline(filePath);
-        if (textFileBaselineError) {
-          throw textFileBaselineError;
+        await externalChanges.capture(filePath);
+        const retakenError = externalChanges.error();
+        if (retakenError) {
+          throw retakenError;
         }
       }
       // The retake raises a conflict of its own when the file has gone in the
       // meantime, and that is not something to save straight over.
-      if (await checkForExternalChange() || externalChange()) {
-        setExternalChangeDismissed(false);
+      if (await externalChanges.check() || externalChanges.change()) {
+        externalChanges.undismiss();
         return;
       }
       let savedRevision: number;
       try {
-        savedRevision = await saveDocumentToPathViaStream(filePath, undefined, expectedSaveSource());
+        savedRevision = await saveDocumentToPathViaStream(filePath, undefined, externalChanges.expectedSaveSource());
       } catch (error) {
         const kind = externalChangeKindFromSaveError(error);
         if (kind) {
-          await raiseExternalChangeFromSaveRace(filePath, kind);
+          await externalChanges.raiseFromSaveRace(filePath, kind);
           return;
         }
         throw error;
@@ -1203,7 +945,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         return;
       }
       deps.document.markSavedAt(savedRevision);
-      await captureTextFileBaseline(filePath);
+      await externalChanges.capture(filePath);
       await rememberLastDirectory(filePath);
       deps.editor.focus();
     }, "Unable to save file");
@@ -1235,7 +977,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    * What still has to hold is that it is this document's own file.
    */
   const reloadExternalChange = async (filePath?: string) => {
-    const standing = externalChange();
+    const standing = externalChanges.change();
     // A conflict whose whole point is that there is no file at the path has
     // nothing to reload from, whichever way this was asked for.
     if (standing?.kind === "deleted" || standing?.kind === "not-a-file") {
@@ -1263,7 +1005,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   const overwriteExternalChange = async () => {
-    const change = externalChange();
+    const change = externalChanges.change();
     if (!change || fileOperationInProgress()) {
       return;
     }
@@ -1275,14 +1017,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         return;
       }
       deps.document.markSavedAt(savedRevision);
-      await captureTextFileBaseline(change.filePath);
+      await externalChanges.capture(change.filePath);
       await rememberLastDirectory(change.filePath);
       deps.editor.focus();
     }, "Unable to save file");
   };
 
   const dismissExternalChange = () => {
-    setExternalChangeDismissed(true);
+    externalChanges.dismiss();
     deps.editor.focus();
   };
 
@@ -1321,13 +1063,13 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     chooseEditorFont,
     requestCancelLoading,
     requestCancelSaving,
-    checkForExternalChange,
+    checkForExternalChange: externalChanges.check,
     reloadExternalChange,
     overwriteExternalChange,
     dismissExternalChange,
     externalChangeState: {
-      change: externalChange,
-      isVisible: () => externalChange() !== null && !externalChangeDismissed()
+      change: externalChanges.change,
+      isVisible: externalChanges.isVisible
     },
     loadingState: {
       isLoading,

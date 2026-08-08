@@ -199,7 +199,8 @@ fn decode_span(audio: SharedAudio, start: f64, end: f64) -> Result<DecodedSpan, 
 
     Ok(DecodedSpan {
         samples: samples[from..to].to_vec(),
-        rate: SampleRate::new(rate).ok_or_else(|| "The recording decoded at no sample rate".to_string())?,
+        rate: SampleRate::new(rate)
+            .ok_or_else(|| "The recording decoded at no sample rate".to_string())?,
         channels: ChannelCount::new(channels)
             .ok_or_else(|| "The recording decoded to no channels".to_string())?,
     })
@@ -318,7 +319,9 @@ pub fn play_span(
         return Err(format!("A span needs finite times, got {start} and {end}"));
     }
     if end <= start {
-        return Err(format!("A span must end after it starts, got {start} to {end}"));
+        return Err(format!(
+            "A span must end after it starts, got {start} to {end}"
+        ));
     }
 
     playback.with_player(|slot| {
@@ -355,6 +358,11 @@ pub fn play_span(
 
         let player = slot.as_mut().expect("just constructed");
         let span = decode_span(player.audio.clone(), start, end)?;
+        // release_playback can disarm while decoding without waiting for this
+        // lock. Do not queue a span for a document that was closed meanwhile.
+        if !playback.armed() {
+            return Ok(());
+        }
         // Replaces whatever was playing. stop() returns effectively at once —
         // the queue clears within about a frame — so this is not audible as a
         // gap when clicking from one sentence to the next.
@@ -495,16 +503,26 @@ mod tests {
         // Disarmed until a container is opened, which is the safe direction:
         // there is nothing to play before then, and a play arriving anyway is
         // a bug rather than something to honour. open_tsf does the arming.
-        assert!(!state.armed(), "nothing to play before a container is opened");
+        assert!(
+            !state.armed(),
+            "nothing to play before a container is opened"
+        );
 
-        state.arm().expect("a fresh playback state must not have a poisoned lock");
+        state
+            .arm()
+            .expect("a fresh playback state must not have a poisoned lock");
         assert!(state.armed(), "opening a container must accept plays");
 
         state.armed.store(false, Ordering::SeqCst);
         assert!(!state.armed(), "a play after a release must be dropped");
 
-        state.arm().expect("a fresh playback state must not have a poisoned lock");
-        assert!(state.armed(), "opening the next container must accept plays again");
+        state
+            .arm()
+            .expect("a fresh playback state must not have a poisoned lock");
+        assert!(
+            state.armed(),
+            "opening the next container must accept plays again"
+        );
     }
 
     /// Ten seconds of AAC in which second N is a sine at (N+1)*400 Hz.
@@ -618,7 +636,6 @@ mod tests {
         assert!(span.samples.len() <= (RATE as usize) / 2);
         assert!(span.samples.iter().all(|&s| second_of(s) == 9));
     }
-
 
     /// The seek landed exactly where it was asked to.
     #[test]

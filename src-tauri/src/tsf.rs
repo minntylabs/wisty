@@ -13,10 +13,10 @@
 
 use std::fs::{File, Metadata, OpenOptions};
 use std::hash::{Hash, Hasher};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use symphonia::core::codecs::CodecParameters;
@@ -33,6 +33,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 const TRANSCRIPT_MEMBER: &str = "transcript.txt";
 const META_MEMBER: &str = "meta.json";
 const WORDS_MEMBER: &str = "words.json";
+const TEMPORARY_CREATE_ATTEMPTS: usize = 16;
 static SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Serialize)]
@@ -65,7 +66,12 @@ fn probe_audio(path: &Path) -> Result<AudioFacts, String> {
     }
 
     let reader = symphonia::default::get_probe()
-        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
         .map_err(|error| format!("Unrecognised audio format: {error}"))?;
 
     let track = reader
@@ -127,8 +133,14 @@ fn complete_meta(
         .as_object_mut()
         .ok_or_else(|| "Metadata `audio` must be an object".to_string())?;
 
-    audio.insert("file".into(), serde_json::Value::String(audio_member.to_string()));
-    audio.insert("codec".into(), serde_json::Value::String(facts.codec.clone()));
+    audio.insert(
+        "file".into(),
+        serde_json::Value::String(audio_member.to_string()),
+    );
+    audio.insert(
+        "codec".into(),
+        serde_json::Value::String(facts.codec.clone()),
+    );
     audio.insert(
         "duration".into(),
         serde_json::Number::from_f64(facts.duration)
@@ -198,15 +210,9 @@ pub fn write_tsf(
     let parent = output_path
         .parent()
         .ok_or_else(|| "Output path has no parent directory".to_string())?;
-    let temporary = parent.join(format!(
-        ".{}.partial",
-        output_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("transcript.tsf")
-    ));
+    let (temporary, file) = create_temporary_file(parent, output_path)?;
 
-    let result = write_archive(&temporary, transcript, audio_path, &meta, &audio_member, words);
+    let result = write_archive(file, transcript, audio_path, &meta, &audio_member, words);
     if let Err(error) = result {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
@@ -230,15 +236,13 @@ pub fn write_tsf(
 }
 
 fn write_archive(
-    temporary: &Path,
+    file: File,
     transcript: &str,
     audio_path: &Path,
     meta: &[u8],
     audio_member: &str,
     words: Option<&str>,
 ) -> Result<(), String> {
-    let file = File::create(temporary)
-        .map_err(|error| format!("Cannot create {}: {error}", temporary.display()))?;
     let mut zip = ZipWriter::new(BufWriter::new(file));
 
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
@@ -406,17 +410,22 @@ fn validate_member_name(name: &str) -> Result<(), String> {
         || name == ".."
         || Path::new(name).is_absolute()
     {
-        return Err(format!("The container has an unsafe audio member name: {name}"));
+        return Err(format!(
+            "The container has an unsafe audio member name: {name}"
+        ));
     }
     Ok(())
 }
 
 fn fingerprint_file(path: &Path) -> Result<u64, String> {
-    let mut file = File::open(path).map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+    let mut file =
+        File::open(path).map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
-        let read = file.read(&mut buffer).map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
         if read == 0 {
             return Ok(hasher.finish());
         }
@@ -460,9 +469,8 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
     let mut zip = ZipArchive::new(BufReader::new(file))
         .map_err(|error| format!("Not a readable .tsf container: {error}"))?;
 
-    let meta: serde_json::Value =
-        serde_json::from_slice(&read_member_from(&mut zip, META_MEMBER)?)
-            .map_err(|error| format!("The container's meta.json is not valid JSON: {error}"))?;
+    let meta: serde_json::Value = serde_json::from_slice(&read_member_from(&mut zip, META_MEMBER)?)
+        .map_err(|error| format!("The container's meta.json is not valid JSON: {error}"))?;
 
     match meta.get("tsf_version").and_then(serde_json::Value::as_u64) {
         Some(version) if version > SUPPORTED_TSF_VERSION => {
@@ -483,8 +491,17 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
     validate_member_name(&audio_member)?;
 
     let unsupported_members = (0..zip.len())
-        .filter_map(|index| zip.by_index(index).ok().map(|member| member.name().to_string()))
-        .filter(|name| name != TRANSCRIPT_MEMBER && name != META_MEMBER && name != &audio_member && name != WORDS_MEMBER)
+        .filter_map(|index| {
+            zip.by_index(index)
+                .ok()
+                .map(|member| member.name().to_string())
+        })
+        .filter(|name| {
+            name != TRANSCRIPT_MEMBER
+                && name != META_MEMBER
+                && name != &audio_member
+                && name != WORDS_MEMBER
+        })
         .collect();
 
     let transcript = String::from_utf8(read_member_from(&mut zip, TRANSCRIPT_MEMBER)?)
@@ -501,7 +518,7 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
                 .map_err(|error| format!("Cannot read {WORDS_MEMBER}: {error}"))?;
             Some(contents)
         }
-        Err(_) => None
+        Err(_) => None,
     };
     let source_metadata = std::fs::metadata(archive)
         .map_err(|error| format!("Cannot stat {}: {error}", archive.display()))?;
@@ -510,7 +527,9 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
     Ok(OpenTsf {
         // Absolute, so saving back later cannot be affected by the working
         // directory having changed since the file was opened.
-        path: archive.canonicalize().unwrap_or_else(|_| archive.to_path_buf()),
+        path: archive
+            .canonicalize()
+            .unwrap_or_else(|_| archive.to_path_buf()),
         transcript,
         audio,
         audio_member,
@@ -535,6 +554,13 @@ pub fn open_tsf(
         meta: container.meta.clone(),
         audio_bytes: container.audio.len(),
     };
+
+    // A save snapshots the active container before it writes. Do not replace
+    // that container until the save has either finished or failed.
+    let _save = state
+        .1
+        .lock()
+        .map_err(|error| format!("Cannot take the container-save lock: {error}"))?;
 
     // Reject queued plays before replacing the audio. `play_span` locks playback
     // then reads the container, so never retain this mutex while calling arm(),
@@ -565,6 +591,10 @@ pub fn close_tsf(
     state: tauri::State<'_, TsfState>,
     playback: tauri::State<'_, crate::playback::PlaybackState>,
 ) -> Result<(), String> {
+    let _save = state
+        .1
+        .lock()
+        .map_err(|error| format!("Cannot take the container-save lock: {error}"))?;
     // Symmetric with open_tsf's arm. The frontend releases playback before
     // calling this, but that call is fire-and-forget and its failure is
     // swallowed — so without this, a release that did not land would leave
@@ -579,9 +609,15 @@ pub fn close_tsf(
 }
 
 fn source_is_unchanged(open: &OpenTsf) -> Result<(), String> {
-    let current = std::fs::metadata(&open.path)
-        .map_err(|error| format!("Cannot check {} before saving: {error}", open.path.display()))?;
-    if current.len() != open.source_metadata.len() || current.modified().ok() != open.source_metadata.modified().ok() {
+    let current = std::fs::metadata(&open.path).map_err(|error| {
+        format!(
+            "Cannot check {} before saving: {error}",
+            open.path.display()
+        )
+    })?;
+    if current.len() != open.source_metadata.len()
+        || current.modified().ok() != open.source_metadata.modified().ok()
+    {
         return Err("The transcript container changed on disk after it was opened. Reopen it before saving so no changes are lost.".to_string());
     }
     if fingerprint_file(&open.path)? != open.source_fingerprint {
@@ -593,16 +629,32 @@ fn source_is_unchanged(open: &OpenTsf) -> Result<(), String> {
 fn temporary_save_path(parent: &Path, output: &Path) -> PathBuf {
     parent.join(format!(
         ".{}.{}.{}.partial",
-        output.file_name().and_then(|name| name.to_str()).unwrap_or("transcript.tsf"),
+        output
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("transcript.tsf"),
         std::process::id(),
         SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ))
 }
 
-fn write_open_archive(temporary: &Path, transcript: &str, open: &OpenTsf) -> Result<(), String> {
+fn create_temporary_file(parent: &Path, output: &Path) -> Result<(PathBuf, File), String> {
+    for _ in 0..TEMPORARY_CREATE_ATTEMPTS {
+        let path = temporary_save_path(parent, output);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Cannot create {}: {error}", path.display())),
+        }
+    }
+    Err(format!(
+        "Cannot create a unique temporary file beside {}",
+        output.display()
+    ))
+}
+
+fn write_open_archive(file: File, transcript: &str, open: &OpenTsf) -> Result<(), String> {
     validate_member_name(&open.audio_member)?;
-    let file = OpenOptions::new().write(true).create_new(true).open(temporary)
-        .map_err(|error| format!("Cannot create {}: {error}", temporary.display()))?;
     let mut zip = ZipWriter::new(BufWriter::new(file));
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
@@ -617,16 +669,24 @@ fn write_open_archive(temporary: &Path, transcript: &str, open: &OpenTsf) -> Res
         .map_err(|error| format!("Cannot write {}: {error}", open.audio_member))?;
     zip.start_file(META_MEMBER, deflated)
         .map_err(|error| format!("Cannot write {META_MEMBER}: {error}"))?;
-    zip.write_all(&serde_json::to_vec_pretty(&open.meta).map_err(|error| format!("Cannot serialise metadata: {error}"))?)
-        .map_err(|error| format!("Cannot write {META_MEMBER}: {error}"))?;
+    zip.write_all(
+        &serde_json::to_vec_pretty(&open.meta)
+            .map_err(|error| format!("Cannot serialise metadata: {error}"))?,
+    )
+    .map_err(|error| format!("Cannot write {META_MEMBER}: {error}"))?;
     if let Some(words) = &open.words {
         zip.start_file(WORDS_MEMBER, deflated)
             .map_err(|error| format!("Cannot write {WORDS_MEMBER}: {error}"))?;
         zip.write_all(words)
             .map_err(|error| format!("Cannot write {WORDS_MEMBER}: {error}"))?;
     }
-    let writer = zip.finish().map_err(|error| format!("Cannot finalise the container: {error}"))?;
-    writer.into_inner().map_err(|error| format!("Cannot flush the container: {error}"))?.sync_all()
+    let writer = zip
+        .finish()
+        .map_err(|error| format!("Cannot finalise the container: {error}"))?;
+    writer
+        .into_inner()
+        .map_err(|error| format!("Cannot flush the container: {error}"))?
+        .sync_all()
         .map_err(|error| format!("Cannot sync the container: {error}"))
 }
 
@@ -634,12 +694,20 @@ fn write_open_archive(temporary: &Path, transcript: &str, open: &OpenTsf) -> Res
 /// through the webview. The source snapshot must still match disk, and unknown
 /// archive members are refused rather than silently discarded.
 #[tauri::command]
-pub fn save_tsf(state: tauri::State<'_, TsfState>, path: String, transcript: String) -> Result<(), String> {
+pub fn save_tsf(
+    state: tauri::State<'_, TsfState>,
+    path: String,
+    transcript: String,
+) -> Result<(), String> {
     // The frontend also blocks duplicate saves, but commands are independently
     // invokable. Keep the archive operation single-flight at the authority.
-    let _save = state.1.lock()
+    let _save = state
+        .1
+        .lock()
         .map_err(|error| format!("Cannot take the container-save lock: {error}"))?;
-    let open = state.0.lock()
+    let open = state
+        .0
+        .lock()
         .map_err(|error| format!("Cannot take the open-container lock: {error}"))?
         .clone()
         .ok_or_else(|| "No transcript container is open".to_string())?;
@@ -651,9 +719,11 @@ pub fn save_tsf(state: tauri::State<'_, TsfState>, path: String, transcript: Str
     }
     source_is_unchanged(&open)?;
     let output = PathBuf::from(path);
-    let parent = output.parent().ok_or_else(|| "Output path has no parent directory".to_string())?;
-    let temporary = temporary_save_path(parent, &output);
-    if let Err(error) = write_open_archive(&temporary, &transcript, &open) {
+    let parent = output
+        .parent()
+        .ok_or_else(|| "Output path has no parent directory".to_string())?;
+    let (temporary, file) = create_temporary_file(parent, &output)?;
+    if let Err(error) = write_open_archive(file, &transcript, &open) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
@@ -667,9 +737,13 @@ pub fn save_tsf(state: tauri::State<'_, TsfState>, path: String, transcript: Str
         let _ = std::fs::remove_file(&temporary);
         format!("Cannot write {}: {error}", output.display())
     })?;
-    let mut guard = state.0.lock()
+    let mut guard = state
+        .0
+        .lock()
         .map_err(|error| format!("Cannot take the open-container lock: {error}"))?;
-    let current = guard.as_mut().ok_or_else(|| "The transcript container was closed while saving".to_string())?;
+    let current = guard
+        .as_mut()
+        .ok_or_else(|| "The transcript container was closed while saving".to_string())?;
     if current.path != open.path {
         return Err("A different transcript container was opened while saving".to_string());
     }
@@ -698,7 +772,10 @@ pub fn create_tsf(
     let mut meta = meta;
     if words.is_some() {
         if let Some(object) = meta.as_object_mut() {
-            object.insert("words".into(), serde_json::Value::String(WORDS_MEMBER.into()));
+            object.insert(
+                "words".into(),
+                serde_json::Value::String(WORDS_MEMBER.into()),
+            );
         }
     }
 
@@ -763,7 +840,11 @@ mod tests {
         std::fs::write(&audio, wav_bytes(3)).unwrap();
 
         let facts = probe_audio(&audio).expect("probe");
-        assert!((facts.duration - 3.0).abs() < 0.01, "duration was {}", facts.duration);
+        assert!(
+            (facts.duration - 3.0).abs() < 0.01,
+            "duration was {}",
+            facts.duration
+        );
         assert!(!facts.codec.is_empty());
     }
 
@@ -777,11 +858,17 @@ mod tests {
 
     #[test]
     fn meta_gains_the_audio_facts_and_keeps_unknown_keys() {
-        let facts = AudioFacts { duration: 12.5, codec: "aac".into() };
+        let facts = AudioFacts {
+            duration: 12.5,
+            codec: "aac".into(),
+        };
         let mut input = draft();
         // A field this side has never heard of must survive: the format's growth
         // depends on producers being able to add keys without readers changing.
-        input.as_object_mut().unwrap().insert("future_field".into(), serde_json::json!({"a": 1}));
+        input
+            .as_object_mut()
+            .unwrap()
+            .insert("future_field".into(), serde_json::json!({"a": 1}));
 
         let bytes = complete_meta(input, &facts, "audio.m4a").expect("meta");
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -795,7 +882,10 @@ mod tests {
 
     #[test]
     fn meta_must_be_an_object() {
-        let facts = AudioFacts { duration: 1.0, codec: "x".into() };
+        let facts = AudioFacts {
+            duration: 1.0,
+            codec: "x".into(),
+        };
         assert!(complete_meta(serde_json::json!([1, 2]), &facts, "audio.wav").is_err());
     }
 
@@ -818,11 +908,17 @@ mod tests {
         assert!(names.contains(&"meta.json".to_string()));
 
         let mut text = String::new();
-        zip.by_name("transcript.txt").unwrap().read_to_string(&mut text).unwrap();
+        zip.by_name("transcript.txt")
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
         assert_eq!(text, transcript);
 
         let mut meta = String::new();
-        zip.by_name("meta.json").unwrap().read_to_string(&mut meta).unwrap();
+        zip.by_name("meta.json")
+            .unwrap()
+            .read_to_string(&mut meta)
+            .unwrap();
         let value: serde_json::Value = serde_json::from_str(&meta).unwrap();
         assert_eq!(value["audio"]["file"], "audio.wav");
     }
@@ -858,7 +954,10 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|entry| entry.file_name().to_string_lossy().contains("partial"))
             .collect();
-        assert!(leftovers.is_empty(), "no temporary file should be left behind");
+        assert!(
+            leftovers.is_empty(),
+            "no temporary file should be left behind"
+        );
     }
 
     #[test]
@@ -873,7 +972,10 @@ mod tests {
 
         let mut zip = zip::ZipArchive::new(File::open(&output).unwrap()).unwrap();
         let mut text = String::new();
-        zip.by_name("transcript.txt").unwrap().read_to_string(&mut text).unwrap();
+        zip.by_name("transcript.txt")
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
         assert_eq!(text, "fresh");
     }
 
@@ -892,7 +994,10 @@ mod tests {
 
         let mut zip = zip::ZipArchive::new(File::open(&output).unwrap()).unwrap();
         let mut words = String::new();
-        zip.by_name("words.json").unwrap().read_to_string(&mut words).unwrap();
+        zip.by_name("words.json")
+            .unwrap()
+            .read_to_string(&mut words)
+            .unwrap();
         assert_eq!(words, "[{\"start\":0}]");
     }
 
@@ -919,8 +1024,8 @@ mod tests {
         std::fs::write(&audio, wav_bytes(1)).unwrap();
         let output = dir.join("out.tsf");
 
-        let result = write_tsf(&output, "text", &audio, draft(), Some(&"x".repeat(50_000)))
-            .expect("write");
+        let result =
+            write_tsf(&output, "text", &audio, draft(), Some(&"x".repeat(50_000))).expect("write");
         assert_eq!(result.bytes, std::fs::metadata(&output).unwrap().len());
     }
 
@@ -957,7 +1062,10 @@ mod tests {
     fn a_round_trip_preserves_the_audio_exactly() {
         let dir = temp_dir("roundtrip");
         let path = written(&dir, "text", None);
-        assert_eq!(read_tsf(&path).unwrap().audio.as_ref(), wav_bytes(2).as_slice());
+        assert_eq!(
+            read_tsf(&path).unwrap().audio.as_ref(),
+            wav_bytes(2).as_slice()
+        );
     }
 
     #[test]
@@ -966,7 +1074,10 @@ mod tests {
         let path = written(&dir, "text", Some("[{\"start\":0}]"));
         let container = read_tsf(&path).expect("read");
         assert_eq!(container.meta["words"], WORDS_MEMBER);
-        assert_eq!(container.words.as_deref(), Some(b"[{\"start\":0}]".as_slice()));
+        assert_eq!(
+            container.words.as_deref(),
+            Some(b"[{\"start\":0}]".as_slice())
+        );
     }
 
     #[test]
@@ -975,26 +1086,43 @@ mod tests {
         let source = written(&dir, "before", Some("[{\"start\":0}]"));
         let open = read_tsf(&source).expect("open");
         let output = dir.join("saved.tsf");
-        write_open_archive(&output, "after", &open).expect("repack");
+        let (temporary, file) = create_temporary_file(&dir, &output).expect("temporary");
+        write_open_archive(file, "after", &open).expect("repack");
+        std::fs::rename(temporary, &output).expect("publish");
 
         let mut zip = ZipArchive::new(File::open(&output).unwrap()).unwrap();
         let mut transcript = String::new();
-        zip.by_name(TRANSCRIPT_MEMBER).unwrap().read_to_string(&mut transcript).unwrap();
+        zip.by_name(TRANSCRIPT_MEMBER)
+            .unwrap()
+            .read_to_string(&mut transcript)
+            .unwrap();
         assert_eq!(transcript, "after");
         let mut audio = Vec::new();
         let member = zip.by_name("audio.wav").unwrap();
         assert_eq!(member.compression(), CompressionMethod::Stored);
         drop(member);
-        zip.by_name("audio.wav").unwrap().read_to_end(&mut audio).unwrap();
+        zip.by_name("audio.wav")
+            .unwrap()
+            .read_to_end(&mut audio)
+            .unwrap();
         assert_eq!(audio, wav_bytes(2));
         let mut words = String::new();
-        zip.by_name(WORDS_MEMBER).unwrap().read_to_string(&mut words).unwrap();
+        zip.by_name(WORDS_MEMBER)
+            .unwrap()
+            .read_to_string(&mut words)
+            .unwrap();
         assert_eq!(words, "[{\"start\":0}]");
     }
 
     #[test]
     fn rejects_unsafe_audio_member_names() {
-        for name in ["", "../audio.m4a", "audio/part.m4a", "audio\\part.m4a", "/audio.m4a"] {
+        for name in [
+            "",
+            "../audio.m4a",
+            "audio/part.m4a",
+            "audio\\part.m4a",
+            "/audio.m4a",
+        ] {
             assert!(validate_member_name(name).is_err(), "{name}");
         }
     }
@@ -1012,7 +1140,22 @@ mod tests {
     fn save_temporary_paths_are_unique() {
         let dir = temp_dir("unique-temp");
         let output = dir.join("out.tsf");
-        assert_ne!(temporary_save_path(&dir, &output), temporary_save_path(&dir, &output));
+        assert_ne!(
+            temporary_save_path(&dir, &output),
+            temporary_save_path(&dir, &output)
+        );
+    }
+
+    #[test]
+    fn temporary_creation_skips_an_existing_path() {
+        let dir = temp_dir("temporary-collision");
+        let output = dir.join("out.tsf");
+        let occupied = temporary_save_path(&dir, &output);
+        File::create(&occupied).unwrap();
+
+        let (temporary, file) = create_temporary_file(&dir, &output).expect("temporary");
+        drop(file);
+        assert_ne!(temporary, occupied);
     }
 
     #[test]
@@ -1027,7 +1170,9 @@ mod tests {
     #[test]
     fn refuses_a_missing_file() {
         let dir = temp_dir("missing");
-        assert!(read_tsf(&dir.join("nope.tsf")).unwrap_err().contains("No such file"));
+        assert!(read_tsf(&dir.join("nope.tsf"))
+            .unwrap_err()
+            .contains("No such file"));
     }
 
     #[test]
@@ -1039,7 +1184,9 @@ mod tests {
         std::fs::write(&audio, wav_bytes(1)).unwrap();
         let path = dir.join("out.tsf");
         let mut meta = draft();
-        meta.as_object_mut().unwrap().insert("tsf_version".into(), serde_json::json!(99));
+        meta.as_object_mut()
+            .unwrap()
+            .insert("tsf_version".into(), serde_json::json!(99));
         write_tsf(&path, "text", &audio, meta, None).expect("write");
 
         let error = read_tsf(&path).unwrap_err();
@@ -1066,9 +1213,10 @@ mod tests {
         std::fs::write(&audio, wav_bytes(1)).unwrap();
         let path = dir.join("out.tsf");
         let mut meta = draft();
-        meta.as_object_mut()
-            .unwrap()
-            .insert("written_by_a_later_version".into(), serde_json::json!({ "x": 1 }));
+        meta.as_object_mut().unwrap().insert(
+            "written_by_a_later_version".into(),
+            serde_json::json!({ "x": 1 }),
+        );
         write_tsf(&path, "text", &audio, meta, None).expect("write");
 
         let container = read_tsf(&path).expect("read");
@@ -1108,9 +1256,14 @@ mod tests {
         let dir = temp_dir("notranscript");
         let path = dir.join("broken.tsf");
         let mut zip = ZipWriter::new(File::create(&path).unwrap());
-        zip.start_file(META_MEMBER, SimpleFileOptions::default()).unwrap();
-        zip.write_all(serde_json::json!({ "tsf_version": 1, "audio": { "file": "a.wav" } }).to_string().as_bytes())
+        zip.start_file(META_MEMBER, SimpleFileOptions::default())
             .unwrap();
+        zip.write_all(
+            serde_json::json!({ "tsf_version": 1, "audio": { "file": "a.wav" } })
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
         zip.finish().unwrap();
 
         let error = read_tsf(&path).unwrap_err();

@@ -173,6 +173,9 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     }
     if (!current) {
       if (externalChange()?.kind !== "deleted") {
+        // A version seen before the deletion says nothing about what comes
+        // back, so forget it and judge the replacement on its own.
+        observedExternalVersion = null;
         setExternalChange({ filePath, kind: "deleted" });
         setExternalChangeDismissed(false);
       }
@@ -185,6 +188,13 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         setExternalChangeDismissed(false);
       }
       return true;
+    }
+    // Back to the version this document was opened at — the conflict the banner
+    // reported no longer exists, so retract it rather than leave it standing.
+    if (externalChange()) {
+      observedExternalVersion = null;
+      setExternalChange(null);
+      setExternalChangeDismissed(false);
     }
     return false;
   };

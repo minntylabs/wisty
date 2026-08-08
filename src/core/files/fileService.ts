@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
-import { open as openFile, readTextFile, stat, writeTextFile } from "@tauri-apps/plugin-fs";
+import { exists, open as openFile, readTextFile, stat, writeTextFile } from "@tauri-apps/plugin-fs";
 import type { TextFileVersion } from "../app/contracts";
 
 export type OpenFileResult =
@@ -195,8 +195,31 @@ export const getFileSize = async (filePath: string): Promise<number> => {
 const safeFileIdentityNumber = (value: number | null): number | null =>
   typeof value === "number" && Number.isSafeInteger(value) ? value : null;
 
+/** Treats an unanswerable question as "still there", so the original fault wins. */
+const pathStillExists = async (filePath: string): Promise<boolean> => {
+  try {
+    return await exists(filePath);
+  } catch {
+    return true;
+  }
+};
+
+/**
+ * A missing path is a state the caller must act on — it becomes the "deleted"
+ * conflict — so it returns null. Every other `stat` failure is a genuine fault
+ * and propagates, rather than being mistaken for a deletion. `stat` rejects for
+ * both, so the two are told apart by asking whether the path is still there.
+ */
 export const getTextFileVersion = async (filePath: string): Promise<TextFileVersion | null> => {
-  const metadata = await stat(filePath);
+  let metadata: Awaited<ReturnType<typeof stat>>;
+  try {
+    metadata = await stat(filePath);
+  } catch (error) {
+    if (await pathStillExists(filePath)) {
+      throw error;
+    }
+    return null;
+  }
   if (!metadata.isFile) {
     return null;
   }

@@ -588,6 +588,42 @@ describe("external text-file changes", () => {
     expect(h.lifecycle.externalChangeState.change()).toBeNull();
   });
 
+  it("retracts the conflict when the file returns to the version it was opened at", async () => {
+    let version: typeof original | null = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    version = { ...original, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+    expect(h.lifecycle.externalChangeState.isVisible()).toBe(true);
+
+    version = original;
+    await expect(h.lifecycle.checkForExternalChange()).resolves.toBe(false);
+    expect(h.lifecycle.externalChangeState.change()).toBeNull();
+    expect(h.lifecycle.externalChangeState.isVisible()).toBe(false);
+  });
+
+  it("reopens the conflict for content that replaces a deleted file", async () => {
+    let version: typeof original | null = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    version = { ...original, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+    h.lifecycle.dismissExternalChange();
+
+    version = null;
+    await h.lifecycle.checkForExternalChange();
+    expect(h.lifecycle.externalChangeState.change()).toEqual({ filePath: "/tmp/notes.txt", kind: "deleted" });
+
+    // The same version as before the deletion, but a fresh file: the earlier
+    // dismissal cannot stand in for consent to this one.
+    version = { ...original, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+    expect(h.lifecycle.externalChangeState.change()).toEqual({ filePath: "/tmp/notes.txt", kind: "changed" });
+    expect(h.lifecycle.externalChangeState.isVisible()).toBe(true);
+  });
+
   it("retains a deleted file's text instead of reloading it as empty", async () => {
     let version: typeof original | null = original;
     const h = createHarness({ getTextFileVersion: async () => version });

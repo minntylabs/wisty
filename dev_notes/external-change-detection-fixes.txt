@@ -16,11 +16,19 @@ FIXES
 
 3. A dismissed conflict records the external version it saw. A later changed
    version or deletion reopens the banner instead of remaining hidden until
-   Save.
+   Save. A file restored to the version the document was opened at retracts
+   the banner, and a file that returns after a deletion is judged afresh
+   rather than against the version seen before it went away.
 
 4. Metadata lookup failures are no longer treated as a missing file. They
    leave the document unsaveable through ordinary Save, rather than silently
-   omitting the backend's expected-source validation.
+   omitting the backend's expected-source validation. A missing path is the
+   exception: Tauri's stat rejects for a deleted file exactly as it does for
+   a permission fault, so the two are told apart by asking whether the path
+   is still there. Deletion continues to report null, as the "deleted"
+   conflict requires; only genuine faults propagate. Losing this distinction
+   made deletion undetectable in the app while the tests, whose fake returns
+   null directly, went on passing.
 
 5. Reload from Disk now runs through the existing discard confirmation flow,
    so it cannot silently throw away dirty editor content.
@@ -36,6 +44,10 @@ Text versions intentionally use size, mtime, device and inode. They can miss
 an in-place same-size edit whose timestamp is unchanged or too coarse. A full
 content digest would close that case but adds a second full read before every
 large-file save; this is a documented metadata-only tradeoff.
+
+A document opened from text handed to Wisty rather than read from disk —
+openFileFromTextAtPath — records no baseline, so it has no external-change
+detection until it is saved.
 
 Focus-triggered checks do not observe changes while Wisty remains focused. A
 filesystem watcher would be the future enhancement if immediate notification

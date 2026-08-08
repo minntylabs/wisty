@@ -318,13 +318,18 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   const emitCursorPositionIfChanged = (state: EditorState) => {
     const head = state.selection.main.head;
     const line = state.doc.lineAt(head);
-    // Characters count cursor positions (1 .. length + 1), so "character X of Y"
-    // keeps X <= Y even with the cursor past the last character of the line.
+    // Characters are counted behind the caret: how many of the line's
+    // characters it has passed, out of how many the line has. So a line of one
+    // character reads "0 of 1" with the caret before it and "1 of 1" after it,
+    // and the total is the number of characters that are actually there —
+    // counting caret positions instead would claim a line of one character has
+    // two. `line.length` excludes the line break, which is not a character the
+    // caret can be placed either side of on this line.
     const position: CursorPositionPayload = {
       currentLine: line.number,
       totalLines: state.doc.lines,
-      currentCharacter: head - line.from + 1,
-      totalCharacters: line.length + 1
+      currentCharacter: head - line.from,
+      totalCharacters: line.length
     };
 
     if (lastReportedPosition && positionsEqual(lastReportedPosition, position)) {

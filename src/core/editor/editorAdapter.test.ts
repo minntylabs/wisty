@@ -82,3 +82,64 @@ describe("editor adapter", () => {
     expect(adapter.getText()).toBe("");
   });
 });
+
+/**
+ * Characters are counted behind the caret, out of the characters the line
+ * actually has. The arithmetic decides whether a line holding one character can
+ * be described as holding two, so both ends of that line are covered here:
+ * `setText` leaves the caret before the text, and a paste leaves it after.
+ */
+describe("cursor position", () => {
+  const lastPosition = (onCursorPositionChanged: ReturnType<typeof vi.fn>) =>
+    onCursorPositionChanged.mock.calls.at(-1)?.[0];
+
+  it("counts no characters behind a caret in front of the only one on the line", () => {
+    const { adapter, onCursorPositionChanged } = createAdapter();
+
+    adapter.setText("a");
+
+    expect(lastPosition(onCursorPositionChanged)).toMatchObject({
+      currentCharacter: 0,
+      totalCharacters: 1
+    });
+  });
+
+  it("counts the one behind a caret that has passed it", async () => {
+    const { adapter, onCursorPositionChanged } = createAdapter();
+    readText.mockResolvedValue("a");
+
+    await adapter.pasteSelection();
+
+    expect(lastPosition(onCursorPositionChanged)).toMatchObject({
+      currentCharacter: 1,
+      totalCharacters: 1
+    });
+  });
+
+  it("reports no characters at all on an empty document", () => {
+    const { adapter, onCursorPositionChanged } = createAdapter();
+
+    adapter.setText("");
+
+    expect(lastPosition(onCursorPositionChanged)).toMatchObject({
+      currentLine: 1,
+      totalLines: 1,
+      currentCharacter: 0,
+      totalCharacters: 0
+    });
+  });
+
+  /** The total is the caret's own line, not the document. */
+  it("counts the characters of the line the caret is on", () => {
+    const { adapter, onCursorPositionChanged } = createAdapter();
+
+    adapter.setText("first\nsecond line");
+
+    expect(lastPosition(onCursorPositionChanged)).toMatchObject({
+      currentLine: 1,
+      totalLines: 2,
+      currentCharacter: 0,
+      totalCharacters: 5
+    });
+  });
+});

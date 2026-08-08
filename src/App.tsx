@@ -89,8 +89,9 @@ function App() {
   const [cursorPosition, setCursorPosition] = createSignal<CursorPositionPayload>({
     currentLine: 1,
     totalLines: 1,
-    currentCharacter: 1,
-    totalCharacters: 1
+    // An empty document: no characters, and none behind the caret.
+    currentCharacter: 0,
+    totalCharacters: 0
   });
   const [spellDictionaries, setSpellDictionaries] = createSignal<DictionaryInfo[]>([]);
   // Deliberately not persisted: transcript mode is a per-session tidying tool,

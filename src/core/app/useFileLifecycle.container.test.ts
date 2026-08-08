@@ -178,6 +178,19 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
   };
 };
 
+/**
+ * Waits for a container save to have actually begun.
+ *
+ * Saving a container now checks the file on disk first, so the write starts a
+ * few microtasks after the call rather than immediately; a single flush would
+ * see it not yet under way.
+ */
+const untilSaving = async (h: ReturnType<typeof createHarness>) => {
+  for (let attempt = 0; attempt < 20 && !h.lifecycle.savingState.isSaving(); attempt += 1) {
+    await Promise.resolve();
+  }
+};
+
 describe("opening a container", () => {
   it("loads its transcript into the editor", async () => {
     const h = createHarness();
@@ -423,7 +436,7 @@ describe("saving a container", () => {
     await h.lifecycle.openFileAtPath(CONTAINER);
 
     const first = h.lifecycle.saveFile();
-    await Promise.resolve();
+    await untilSaving(h);
     expect(h.lifecycle.savingState.isSaving()).toBe(true);
     await h.lifecycle.saveFile();
     expect(h.saveContainer).toHaveBeenCalledTimes(1);
@@ -443,7 +456,7 @@ describe("saving a container", () => {
     await h.lifecycle.openFileAtPath(CONTAINER);
 
     const saving = h.lifecycle.saveFile();
-    await Promise.resolve();
+    await untilSaving(h);
     h.editorText.value = `${TRANSCRIPT} Later edit.`;
     h.revision.value = 2;
     h.document.setRevision(2);
@@ -1261,5 +1274,101 @@ describe("a path that is no longer a file", () => {
 
     expect(h.lifecycle.externalChangeState.change()?.kind).toBe("not-a-file");
     expect(h.showError).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A container is a file on disk like any other, and the one where being
+ * changed underneath costs a recording rather than some text. It gets the same
+ * conflict banner — with the actions pointed at its own reader and writer,
+ * since the text ones would read the archive as text and write plain text over
+ * it.
+ */
+describe("a container changed outside Wisty", () => {
+  const original = { size: 4096, modifiedMs: 1_000, device: 1, inode: 2 };
+
+  it("raises a conflict, as a text file does", async () => {
+    let version = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    version = { ...original, modifiedMs: 2_000 };
+    await expect(h.lifecycle.checkForExternalChange()).resolves.toBe(true);
+
+    expect(h.lifecycle.externalChangeState.change()).toEqual({
+      filePath: CONTAINER,
+      kind: "changed"
+    });
+  });
+
+  it("blocks an ordinary save while the conflict stands", async () => {
+    let version = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    version = { ...original, modifiedMs: 2_000 };
+
+    await h.lifecycle.saveFile();
+
+    expect(h.saveContainer).not.toHaveBeenCalled();
+    expect(h.lifecycle.externalChangeState.isVisible()).toBe(true);
+  });
+
+  /** The text writer would put the transcript where the archive was. */
+  it("overwrites through the container writer, not the text one", async () => {
+    let version = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    version = { ...original, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+
+    await h.lifecycle.overwriteExternalChange();
+
+    expect(h.saveContainer).toHaveBeenCalledWith(CONTAINER, TRANSCRIPT);
+    expect(h.startSaveFileStream).not.toHaveBeenCalled();
+    expect(h.lifecycle.externalChangeState.change()).toBeNull();
+  });
+
+  /** And the text reader would read a zip as UTF-8. */
+  it("reloads through the container reader, not the text one", async () => {
+    let version = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    version = { ...original, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+    const opensBefore = h.openContainer.mock.calls.length;
+
+    await h.lifecycle.reloadExternalChange();
+
+    expect(h.openContainer.mock.calls.length).toBe(opensBefore + 1);
+    expect(h.streamReadTextFile).not.toHaveBeenCalled();
+    expect(h.lifecycle.externalChangeState.change()).toBeNull();
+  });
+
+  it("takes a fresh baseline once it has been saved", async () => {
+    let version = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    // The save rewrites the container, so what is on disk is new.
+    version = { ...original, modifiedMs: 5_000 };
+    await h.lifecycle.saveFileAs();
+
+    await expect(h.lifecycle.checkForExternalChange()).resolves.toBe(false);
+    expect(h.lifecycle.externalChangeState.change()).toBeNull();
+  });
+
+  it("reports a container deleted on disk", async () => {
+    let version: typeof original | null = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    version = null;
+    await h.lifecycle.checkForExternalChange();
+
+    expect(h.lifecycle.externalChangeState.change()).toEqual({
+      filePath: CONTAINER,
+      kind: "deleted"
+    });
+    expect(h.document.state.isDirty).toBe(true);
   });
 });

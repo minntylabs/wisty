@@ -96,12 +96,15 @@ export const createExternalChangeMonitor = (deps: ExternalChangeMonitorDeps) => 
   /**
    * Whether the document a baseline was taken for is still the open one.
    *
+   * By path alone, whatever kind of document it is: a transcript container is
+   * a file on disk that something else can change, and the one where being
+   * changed underneath costs a recording rather than some text.
+   *
    * The lifecycle keeps its own copy of this question for its own reasons — a
    * save marking the wrong document clean. Sharing one would tie two unrelated
    * concerns together for the sake of one line.
    */
-  const documentIsAt = (filePath: string) =>
-    deps.document.state.kind === "text" && deps.document.state.filePath === filePath;
+  const documentIsAt = (filePath: string) => deps.document.state.filePath === filePath;
 
   /**
    * Whether a baseline taken at `takenAt` is still the one in force.
@@ -220,7 +223,7 @@ export const createExternalChangeMonitor = (deps: ExternalChangeMonitorDeps) => 
    * conflict, and answering whether one now stands.
    */
   const check = async (): Promise<boolean> => {
-    if (deps.document.state.kind !== "text" || !deps.document.state.filePath || !baseline) {
+    if (!deps.document.state.filePath || !baseline) {
       return false;
     }
     const filePath = deps.document.state.filePath;

@@ -129,13 +129,15 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   const fileOperationInProgress = () => isLoading() || isSaving();
 
   /**
-   * Whether the document a save started from is still the open one. Opening a
-   * file does not cancel a save already streaming, so what a save learned about
-   * its own document — its saved revision, its baseline — must not be written
-   * over a different document that arrived while it ran.
+   * Whether the document an operation started from is still the open one.
+   *
+   * By path, which is what names a document: opening a file does not cancel a
+   * save already streaming, so what that save learned about its own document —
+   * its saved revision, its baseline — must not be written over a different
+   * document that arrived while it ran. The kind is not part of the question,
+   * and requiring text once stopped a container reloading itself.
    */
-  const documentStillOpenAt = (filePath: string) =>
-    deps.document.state.kind === "text" && deps.document.state.filePath === filePath;
+  const documentStillOpenAt = (filePath: string) => deps.document.state.filePath === filePath;
 
   const beginLoadingState = (filePath: string) => {
     activeLoadId += 1;
@@ -561,6 +563,10 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     deps.editor.setMarkersEnabled(true);
     loadEditorTextAsClean(container.transcript);
     deps.document.setFilePath(filePath, "container");
+    // After the open rather than before it, unlike a text file: the container
+    // is validated in Rust before it replaces the open one, so a baseline
+    // taken first would belong to a document that never opened.
+    await externalChanges.capture(filePath, { missingIsExpected: true });
     await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
     await deps.settings.actions.addRecentFile(filePath);
     deps.rememberedPosition.restore(filePath);
@@ -858,6 +864,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       setSavingCharsWritten(transcript.length);
       deps.document.markSavedAt(revision);
       deps.document.setFilePath(filePath, "container");
+      await externalChanges.capture(filePath);
       await rememberLastDirectory(filePath);
       deps.editor.focus();
     } finally {
@@ -904,7 +911,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
   const saveFile = async () => {
     if (deps.document.state.kind === "container") {
-      await runWithErrorMessage(() => saveContainerAtPath(deps.document.state.filePath), "Unable to save file");
+      const containerPath = deps.document.state.filePath;
+      await runWithErrorMessage(async () => {
+        if (await externalChanges.check() || externalChanges.change()) {
+          externalChanges.undismiss();
+          return;
+        }
+        await saveContainerAtPath(containerPath);
+      }, "Unable to save file");
       return;
     }
     if (!deps.document.state.filePath) {
@@ -987,7 +1001,15 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     if (!target || !documentStillOpenAt(target) || fileOperationInProgress()) {
       return;
     }
+    const isContainer = deps.document.state.kind === "container";
     await runWithErrorMessage(async () => {
+      if (isContainer) {
+        // Its own opener, which reads the archive and its recording. The size
+        // limits are for text being read into the editor and do not apply: a
+        // container is mostly audio, and Rust never hands those bytes over.
+        await openContainerAtPath(target);
+        return;
+      }
       // The file on disk is by definition not the one whose size was checked
       // when this document was opened, so it goes through the limits again.
       const size = await checkFileSizeLimits(target);
@@ -1010,6 +1032,12 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       return;
     }
     await runWithErrorMessage(async () => {
+      if (deps.document.state.kind === "container") {
+        // The container's own writer. The text one would put the transcript
+        // where the archive was and take the recording with it.
+        await saveContainerAtPath(change.filePath);
+        return;
+      }
       // Deliberately unguarded: this is the user answering the conflict, and
       // the version they are overwriting is the one they were shown.
       const savedRevision = await saveDocumentToPathViaStream(change.filePath);

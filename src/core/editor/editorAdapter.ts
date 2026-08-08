@@ -446,8 +446,6 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
 
   const getText = () => editorView?.state.doc.toString() ?? "";
 
-  const getDocLength = () => editorView?.state.doc.length ?? 0;
-
   const sliceDoc = (doc: Text, from: number, to: number) => {
     const safeFrom = Math.max(0, Math.min(doc.length, Math.floor(from)));
     const safeTo = Math.max(safeFrom, Math.min(doc.length, Math.floor(to)));
@@ -455,13 +453,6 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
       return "";
     }
     return doc.sliceString(safeFrom, safeTo);
-  };
-
-  const getTextSlice = (from: number, to: number) => {
-    if (!editorView) {
-      return "";
-    }
-    return sliceDoc(editorView.state.doc, from, to);
   };
 
   /**
@@ -786,8 +777,6 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     destroy,
     focus,
     getText,
-    getDocLength,
-    getTextSlice,
     snapshotText,
     setText,
     append,

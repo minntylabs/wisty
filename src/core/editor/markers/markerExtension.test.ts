@@ -377,13 +377,9 @@ describe("clicking an icon", () => {
     view.destroy();
   });
 
-  it("still works when the icons are hidden", () => {
-    // Hiding is a class on the content element; the widgets stay in the DOM.
-    // Whether a hidden icon should be clickable is a UI question, but it must
-    // not silently report the wrong marker.
-    const { view, clicks } = createView(DOC, false);
-    clickFirstIcon(view);
-    expect(clicks).toEqual([[734.12, 736.8]]);
-    view.destroy();
-  });
+  // There is deliberately no test for clicking a hidden icon. Hiding markers
+  // hides the icons, so there is nothing to click and playback is unavailable
+  // by design. A test dispatching mousedown straight at the node passed
+  // regardless of that, asserting a capability no pointer has — it was removed
+  // rather than renamed, because the honest version asserts nothing useful.
 });

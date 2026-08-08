@@ -484,11 +484,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // a container passes through here, so this is the one place the extension
     // is turned off, and a container turns it back on straight after.
     deps.editor.setMarkersEnabled(false);
-    // Before the container goes, not after: audio still playing from a
-    // transcript the user has closed is confusing, and the device and the
-    // recording should not outlive the document either.
-    deps.playback.release();
     try {
+      // Before the container goes, not after: audio still playing from a
+      // transcript the user has closed is confusing, and the player reads the
+      // very bytes the container is about to drop. Inside the try with it,
+      // because the promise above applies here too — the user is closing a
+      // document, and a fault in the audio device is not a reason to stop
+      // them, nor to raise a dialog about playback they did not ask for.
+      deps.playback.release();
       await deps.fileIo.closeContainer();
     } catch {
       // Nothing the user can act on, and nothing that should block the open.

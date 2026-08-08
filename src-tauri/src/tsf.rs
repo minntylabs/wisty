@@ -13,7 +13,7 @@
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -305,7 +305,10 @@ pub struct OpenTsf {
     pub path: PathBuf,
     pub transcript: String,
     /// Decoded from on every play, and written back verbatim on save.
-    pub audio: Vec<u8>,
+    /// Shared rather than owned outright: playback builds a reader over these
+    /// bytes on every span, and an `Arc` lets it hold a handle instead of a
+    /// second copy of the whole recording. Nothing mutates it after the open.
+    pub audio: Arc<[u8]>,
     /// The audio member's name, so a repack writes it under the same name.
     ///
     /// Comes from the container's own meta.json, so it is untrusted input. It
@@ -443,7 +446,7 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
 
     let transcript = String::from_utf8(read_member_from(&mut zip, TRANSCRIPT_MEMBER)?)
         .map_err(|_| format!("{TRANSCRIPT_MEMBER} is not valid UTF-8"))?;
-    let audio = read_member_from(&mut zip, &audio_member)?;
+    let audio: Arc<[u8]> = Arc::from(read_member_from(&mut zip, &audio_member)?.as_slice());
 
     Ok(OpenTsf {
         // Absolute, so saving back later cannot be affected by the working
@@ -757,7 +760,7 @@ mod tests {
         let container = read_tsf(&path).expect("read");
         assert_eq!(container.transcript, transcript);
         assert_eq!(container.audio_member, "audio.wav");
-        assert_eq!(container.audio, wav_bytes(2));
+        assert_eq!(container.audio.as_ref(), wav_bytes(2).as_slice());
         assert_eq!(container.meta["tsf_version"], 1);
         assert_eq!(container.path, path);
     }
@@ -766,7 +769,7 @@ mod tests {
     fn a_round_trip_preserves_the_audio_exactly() {
         let dir = temp_dir("roundtrip");
         let path = written(&dir, "text", None);
-        assert_eq!(read_tsf(&path).unwrap().audio, wav_bytes(2));
+        assert_eq!(read_tsf(&path).unwrap().audio.as_ref(), wav_bytes(2).as_slice());
     }
 
     #[test]

@@ -33,12 +33,17 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Time;
 
-/// The recording, shared rather than copied.
+/// The recording, shared with the open container rather than copied from it.
 ///
 /// `Cursor` gives `Read + Seek`, and symphonia has a blanket `MediaSource` impl
 /// for any `Cursor<T: AsRef<[u8]>>`. The newtype exists only to supply that
-/// `AsRef`, which `Arc<[u8]>` does not have on its own. Without it every play
-/// would clone ten megabytes to build a reader.
+/// `AsRef`, which `Arc<[u8]>` does not have on its own.
+///
+/// The sharing is the point and is easy to lose: `OpenTsf` holds the same
+/// `Arc`, so playback adds a pointer rather than a second copy of the
+/// recording. Taking a `&[u8]` and calling `Arc::from` here would compile,
+/// behave identically, and quietly double the resident audio for the
+/// document's lifetime.
 #[derive(Clone)]
 struct SharedAudio(Arc<[u8]>);
 
@@ -242,7 +247,13 @@ impl PlaybackState {
 /// already applied by the caller. Any span already playing is replaced, because
 /// clicking a second sentence while the first is still going is the normal way
 /// this gets used.
-#[tauri::command]
+///
+/// `async` so Tauri runs it on a worker rather than the event-loop thread. It
+/// parses the container, seeks and decodes, and replacing a playing span waits
+/// briefly for the device queue to clear — none of which may happen on the
+/// thread drawing the window. On a 28-minute recording the difference is a
+/// visible freeze on every click.
+#[tauri::command(async)]
 pub fn play_span(
     playback: tauri::State<'_, PlaybackState>,
     container: tauri::State<'_, crate::tsf::TsfState>,
@@ -266,7 +277,7 @@ pub fn play_span(
                 let open = open
                     .as_ref()
                     .ok_or_else(|| "No transcript container is open".to_string())?;
-                SharedAudio(Arc::from(open.audio.as_slice()))
+                SharedAudio(Arc::clone(&open.audio))
             };
             let device = rodio::stream::DeviceSinkBuilder::open_default_sink()
                 .map_err(|error| format!("Cannot open an audio output device: {error}"))?;
@@ -321,7 +332,7 @@ pub fn release_playback(playback: tauri::State<'_, PlaybackState>) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_span, span_frames, SharedAudio};
+    use super::{decode_span, span_frames, DecodedSpan, SharedAudio};
     use std::sync::Arc;
 
     const RATE: u32 = 8000;
@@ -407,6 +418,119 @@ mod tests {
 
     /// The last sentence plus its tail pad runs past the end of the recording.
     /// That is ordinary, and must return what exists rather than fail.
+    /// Ten seconds of AAC in which second N is a sine at (N+1)*400 Hz.
+    ///
+    /// Regenerate with:
+    ///
+    ///     for n in $(seq 0 9); do
+    ///       ffmpeg -f lavfi -i "sine=frequency=$(( (n+1)*400 )):duration=1:\
+    ///         sample_rate=16000" -c:a pcm_s16le p$n.wav
+    ///     done
+    ///     ffmpeg -i p0.wav ... -i p9.wav -filter_complex "concat=n=10:v=0:a=1" t.wav
+    ///     ffmpeg -i t.wav -c:a aac -b:a 64k -ac 1 tone-steps.m4a
+    const TONE_STEPS_AAC: &[u8] = include_bytes!("../fixtures/tone-steps.m4a");
+
+    /// The dominant frequency of a decoded span, by zero crossings.
+    fn dominant_hz(span: &DecodedSpan) -> f64 {
+        let crossings = span
+            .samples
+            .windows(2)
+            .filter(|pair| (pair[0] < 0.0) != (pair[1] < 0.0))
+            .count();
+        let seconds = span.samples.len() as f64 / f64::from(span.rate.get());
+        crossings as f64 / 2.0 / seconds
+    }
+
+    /// Where within a decoded span the tone changes, in seconds from its start.
+    ///
+    /// Found by binning zero-crossing rate and taking the first bin that is
+    /// closer to the later tone than the earlier one.
+    fn transition_at(span: &DecodedSpan, from_hz: f64, to_hz: f64) -> Option<f64> {
+        let rate = f64::from(span.rate.get());
+        let bin = (rate * 0.02) as usize; // 20ms, the resolution of the answer
+        for (index, chunk) in span.samples.chunks(bin).enumerate() {
+            if chunk.len() < bin {
+                break;
+            }
+            let crossings = chunk
+                .windows(2)
+                .filter(|pair| (pair[0] < 0.0) != (pair[1] < 0.0))
+                .count();
+            let hz = crossings as f64 / 2.0 / (chunk.len() as f64 / rate);
+            if (hz - to_hz).abs() < (hz - from_hz).abs() {
+                return Some(index as f64 * 0.02);
+            }
+        }
+        None
+    }
+
+    /// Spans land where they are asked to in AAC, to within about 20 ms.
+    ///
+    /// The WAV tests establish that the arithmetic is right; this establishes
+    /// it survives the format containers actually ship, which is not the same
+    /// claim — a codec with its own framing and priming samples could plausibly
+    /// shift things.
+    ///
+    /// WHAT IT DOES NOT PROVE, since an earlier version of this comment said
+    /// otherwise: it is not a guard against AAC encoder priming going
+    /// unaccounted for. That was attempted and could not be made to fail —
+    /// not with an injected offset, and not with symphonia's gapless trimming
+    /// switched off, which is the real toggle. The reason appears to be
+    /// structural: the frame arithmetic is anchored to `actual_ts` from the
+    /// seek, a container timestamp, rather than to a count of frames decoded
+    /// from the start of the file. Priming shifts the latter and not the
+    /// former. So the concern does not arise here — but that is an argument,
+    /// and this test is not evidence for it.
+    ///
+    /// It measures where the TONE CHANGES rather than which tone is playing,
+    /// which is the sharper instrument of the two available: sampling the
+    /// middle of a second only ever confirms the right second.
+    ///
+    /// Frequency rather than amplitude, because a constant level survives PCM
+    /// and does not survive a transform codec — one has no DC response, and
+    /// measuring a stepped level through AAC produces deviations that look
+    /// exactly like a seek bug and are nothing of the kind.
+    #[test]
+    fn lands_on_the_right_second_in_aac() {
+        let audio = SharedAudio(Arc::from(TONE_STEPS_AAC));
+        for boundary in 1..9u32 {
+            // Half a second either side of the step at `boundary` seconds.
+            let span = decode_span(
+                audio.clone(),
+                f64::from(boundary) - 0.5,
+                f64::from(boundary) + 0.5,
+            )
+            .unwrap_or_else(|error| panic!("decode across {boundary}s: {error}"));
+
+            let from_hz = f64::from(boundary) * 400.0;
+            let to_hz = f64::from(boundary + 1) * 400.0;
+            let found = transition_at(&span, from_hz, to_hz)
+                .unwrap_or_else(|| panic!("no tone change found across {boundary}s"));
+
+            // The step sits half way into the span by construction. Measured
+            // at 0.520 on every boundary — one 20ms bin late, which is this
+            // detector's own bias: the bin containing the transition holds
+            // both tones, so the first bin that reads cleanly as the new one
+            // starts a bin afterwards. Landing on exactly the bin size, on all
+            // eight boundaries, is the signature of quantisation rather than
+            // of a real offset, so the true error is under 20ms.
+            //
+            // The window below therefore allows the known bias and a bin
+            // either side. What it catches is a systematic shift of roughly
+            // 40ms or more — which covers the case it was written for, since
+            // unaccounted AAC priming would be about 88ms and would show up
+            // here as 0.41 or 0.59.
+            assert!(
+                (0.48..=0.56).contains(&found),
+                "tone changed {found:.2}s into a span that should have it at \
+                 0.50s (0.52 measured) — spans are landing {:.0}ms {} at \
+                 {boundary}s",
+                (found - 0.52).abs() * 1000.0,
+                if found > 0.52 { "early" } else { "late" }
+            );
+        }
+    }
+
     #[test]
     fn truncates_a_span_running_past_the_end() {
         let span = decode_span(stepped_wav(), 9.5, 12.0).expect("decode");

@@ -9,7 +9,7 @@ import type { PlaybackPort } from "./playbackService";
 
 export const tauriPlaybackPort: PlaybackPort = {
   /** Absolute seconds into the recording, padding already applied. */
-  playSpan: (start, end) => invoke("play_span", { start, end }),
+  playSpan: (start, end, session) => invoke("play_span", { start, end, session }),
   stopPlayback: () => invoke("stop_playback"),
-  releasePlayback: () => invoke("release_playback")
+  releasePlayback: (session) => invoke("release_playback", { session })
 };

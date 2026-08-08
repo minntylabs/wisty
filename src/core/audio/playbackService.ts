@@ -12,9 +12,10 @@
  */
 
 export type PlaybackPort = {
-  playSpan: (start: number, end: number) => Promise<void>;
+  /** `session` identifies the document; see createPlaybackService. */
+  playSpan: (start: number, end: number, session: number) => Promise<void>;
   stopPlayback: () => Promise<void>;
-  releasePlayback: () => Promise<void>;
+  releasePlayback: (session: number) => Promise<void>;
 };
 
 /**
@@ -64,11 +65,20 @@ export type PlaybackService = {
  * `onError` exists because playback is fire-and-forget from a click handler:
  * nothing awaits these, so a rejected promise would otherwise be an unhandled
  * rejection in the console and silence for the user.
+ *
+ * The session counter exists because `play_span` is an async Tauri command and
+ * `release_playback` is not, so they do not run in the order they were sent.
+ * Clicking a sentence and immediately closing the document could otherwise
+ * start audio from a document that is already gone. Each play carries the
+ * session it belongs to, releasing moves the session on, and Rust drops a play
+ * whose stamp has been superseded — which works however the two are ordered.
  */
 export const createPlaybackService = (
   port: PlaybackPort,
   onError: (error: unknown) => void
 ): PlaybackService => {
+  let session = 0;
+
   const run = (action: () => Promise<void>) => {
     void action().catch(onError);
   };
@@ -82,9 +92,17 @@ export const createPlaybackService = (
         return;
       }
       const span = paddedSpan(start, end);
-      run(() => port.playSpan(span.start, span.end));
+      const stamp = session;
+      run(() => port.playSpan(span.start, span.end, stamp));
     },
     stop: () => run(() => port.stopPlayback()),
-    release: () => run(() => port.releasePlayback())
+    release: () => {
+      session += 1;
+      // Deliberately not routed to onError. This runs while a document is
+      // closing, which the user did not ask for audio during: a missing output
+      // device must not raise a dialog blaming playback for a close. Nothing
+      // downstream can act on it either, since the document is going anyway.
+      void port.releasePlayback(session).catch(() => {});
+    }
   };
 };

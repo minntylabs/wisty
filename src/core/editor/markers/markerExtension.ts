@@ -288,6 +288,12 @@ const markerTheme = EditorView.baseTheme({
  * Keyboard playback, and the reason it is a caret command rather than focus
  * moving between icons.
  *
+ * F5 works whether or not the icons are shown. Hiding markers is about reading
+ * the transcript without the clutter, not about giving up playback — and
+ * someone who presses F5 with the icons hidden has asked for a sentence
+ * plainly enough. What hiding removes is the mouse path, because there is
+ * nothing left to click.
+ *
  * Tabbing to the icons was the obvious idea and does not fit this editor. Tab
  * already inserts indentation (editorAdapter's indentWithTab); the icons are
  * replaced ranges that atomicRanges deliberately keeps the caret out of, so
@@ -313,10 +319,15 @@ const playbackKeymap = (
   keymap.of([
     {
       key: "F5",
+      // Every path returns true, including the ones that play nothing. An
+      // unconsumed F5 reaches the webview, and WebView2 has browser accelerator
+      // keys on by default, where F5 reloads the page and takes unsaved edits
+      // with it. bundle.targets is "all", so Windows is in scope. There is no
+      // other meaning of F5 to fall through to in any case.
       run: (view) => {
         const markers = view.state.field(markerField, false);
         if (!markers) {
-          return false;
+          return true;
         }
         const pos = view.state.selection.main.head;
         const line = view.state.doc.lineAt(pos);
@@ -331,7 +342,7 @@ const playbackKeymap = (
           return undefined;
         });
         if (!chosen) {
-          return false;
+          return true;
         }
         onMarkerClick(chosen.start, chosen.end);
         return true;

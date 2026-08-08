@@ -18,6 +18,7 @@
 //! failure would be inaudible until it was wrong by a word.
 
 use std::io::Cursor;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rodio::buffer::SamplesBuffer;
@@ -223,10 +224,25 @@ struct Playing {
     audio: SharedAudio,
 }
 
-#[derive(Default)]
-/// Private field on purpose: unlike TsfState, whose audio this module reads,
+/// Private fields on purpose: unlike TsfState, whose audio this module reads,
 /// nothing outside here has any business holding the device or the player.
-pub struct PlaybackState(Mutex<Option<Playing>>);
+#[derive(Default)]
+pub struct PlaybackState {
+    playing: Mutex<Option<Playing>>,
+    /// The oldest session whose plays are still wanted.
+    ///
+    /// `play_span` is async, so Tauri runs it on a worker and it does NOT
+    /// execute in IPC order with the synchronous `release_playback`. Clicking a
+    /// sentence and immediately closing the document can therefore run the play
+    /// *after* the release — which would re-open the device and start talking
+    /// over a document the user has just closed, or fail with "no container
+    /// open" and raise a dialog about a click they made before closing.
+    ///
+    /// Ordering cannot be relied on, so the frontend stamps each play with the
+    /// session it belongs to and bumps the session when it releases. A play
+    /// carrying a superseded stamp is dropped, whenever it happens to arrive.
+    session: AtomicU64,
+}
 
 impl PlaybackState {
     fn with_player<T>(
@@ -234,7 +250,7 @@ impl PlaybackState {
         run: impl FnOnce(&mut Option<Playing>) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut guard = self
-            .0
+            .playing
             .lock()
             .map_err(|error| format!("Cannot take the playback lock: {error}"))?;
         run(&mut guard)
@@ -259,7 +275,15 @@ pub fn play_span(
     container: tauri::State<'_, crate::tsf::TsfState>,
     start: f64,
     end: f64,
+    session: u64,
 ) -> Result<(), String> {
+    // Superseded by a release that happened after this play was requested but
+    // before it ran. Silently, because the user did nothing wrong: they clicked
+    // a sentence and then closed the document, and the only correct outcome is
+    // no sound and no dialog.
+    if session < playback.session.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     if !start.is_finite() || !end.is_finite() {
         return Err(format!("A span needs finite times, got {start} and {end}"));
     }
@@ -321,7 +345,13 @@ pub fn stop_playback(playback: tauri::State<'_, PlaybackState>) -> Result<(), St
 /// the user has closed is both confusing and a way to keep ten megabytes
 /// resident after they have moved on.
 #[tauri::command]
-pub fn release_playback(playback: tauri::State<'_, PlaybackState>) -> Result<(), String> {
+pub fn release_playback(
+    playback: tauri::State<'_, PlaybackState>,
+    session: u64,
+) -> Result<(), String> {
+    // Take the session forward first, so a play still queued behind this is
+    // already superseded by the time it runs.
+    playback.session.store(session, Ordering::SeqCst);
     playback.with_player(|slot| {
         if let Some(playing) = slot.take() {
             playing.player.stop();
@@ -332,7 +362,7 @@ pub fn release_playback(playback: tauri::State<'_, PlaybackState>) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_span, span_frames, DecodedSpan, SharedAudio};
+    use super::{decode_span, span_frames, DecodedSpan, Ordering, PlaybackState, SharedAudio};
     use std::sync::Arc;
 
     const RATE: u32 = 8000;
@@ -416,8 +446,28 @@ mod tests {
         }
     }
 
-    /// The last sentence plus its tail pad runs past the end of the recording.
-    /// That is ordinary, and must return what exists rather than fail.
+    /// The session guard, which is the whole of the defence against a play
+    /// arriving after the document it belongs to was closed.
+    ///
+    /// Only the comparison is testable here — actually racing the commands
+    /// would need a Tauri runtime — but the comparison is the part that would
+    /// be got backwards, and getting it backwards means audio from a closed
+    /// document with nothing to show why.
+    #[test]
+    fn supersedes_plays_from_a_released_session() {
+        let state = PlaybackState::default();
+        // Nothing released yet: a play stamped with the current session stands.
+        assert_eq!(state.session.load(Ordering::SeqCst), 0);
+
+        // release_playback stores the session the frontend has moved on to.
+        state.session.store(1, Ordering::SeqCst);
+        assert!(0 < state.session.load(Ordering::SeqCst), "stale play must be dropped");
+        assert!(
+            !(1 < state.session.load(Ordering::SeqCst)),
+            "a play from the new session must still be allowed"
+        );
+    }
+
     /// Ten seconds of AAC in which second N is a sine at (N+1)*400 Hz.
     ///
     /// Regenerate with:
@@ -429,17 +479,6 @@ mod tests {
     ///     ffmpeg -i p0.wav ... -i p9.wav -filter_complex "concat=n=10:v=0:a=1" t.wav
     ///     ffmpeg -i t.wav -c:a aac -b:a 64k -ac 1 tone-steps.m4a
     const TONE_STEPS_AAC: &[u8] = include_bytes!("../fixtures/tone-steps.m4a");
-
-    /// The dominant frequency of a decoded span, by zero crossings.
-    fn dominant_hz(span: &DecodedSpan) -> f64 {
-        let crossings = span
-            .samples
-            .windows(2)
-            .filter(|pair| (pair[0] < 0.0) != (pair[1] < 0.0))
-            .count();
-        let seconds = span.samples.len() as f64 / f64::from(span.rate.get());
-        crossings as f64 / 2.0 / seconds
-    }
 
     /// Where within a decoded span the tone changes, in seconds from its start.
     ///
@@ -531,6 +570,8 @@ mod tests {
         }
     }
 
+    /// The last sentence plus its tail pad runs past the end of the recording.
+    /// That is ordinary, and must return what exists rather than fail.
     #[test]
     fn truncates_a_span_running_past_the_end() {
         let span = decode_span(stepped_wav(), 9.5, 12.0).expect("decode");

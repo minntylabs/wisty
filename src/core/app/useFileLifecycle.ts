@@ -487,10 +487,12 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     try {
       // Before the container goes, not after: audio still playing from a
       // transcript the user has closed is confusing, and the player reads the
-      // very bytes the container is about to drop. Inside the try with it,
-      // because the promise above applies here too — the user is closing a
-      // document, and a fault in the audio device is not a reason to stop
-      // them, nor to raise a dialog about playback they did not ask for.
+      // very bytes the container is about to drop.
+      //
+      // It cannot throw — the service swallows its own failures rather than
+      // raising a dialog about playback during a close nobody asked audio for —
+      // so being inside this try buys nothing and is not what protects the
+      // open. Left here only because it must run before closeContainer.
       deps.playback.release();
       await deps.fileIo.closeContainer();
     } catch {

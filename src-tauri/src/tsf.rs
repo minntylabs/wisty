@@ -542,7 +542,11 @@ pub fn read_tsf(archive: &Path) -> Result<OpenTsf, String> {
 }
 
 /// Opens a .tsf: the transcript and metadata are returned, the audio is kept.
-#[tauri::command]
+///
+/// `async` for the same reason as `play_span`: reading the container pulls the
+/// whole recording into memory, and it may then wait on an in-flight save. None
+/// of that may happen on the thread drawing the window.
+#[tauri::command(async)]
 pub fn open_tsf(
     state: tauri::State<'_, TsfState>,
     playback: tauri::State<'_, crate::playback::PlaybackState>,
@@ -586,7 +590,10 @@ pub fn open_tsf(
 ///
 /// Called when the document is closed or replaced. Without it the bytes would
 /// stay resident after the user moved on to an ordinary text file.
-#[tauri::command]
+///
+/// `async` because it waits for any in-flight save, and because dropping the
+/// audio is not work for the event-loop thread.
+#[tauri::command(async)]
 pub fn close_tsf(
     state: tauri::State<'_, TsfState>,
     playback: tauri::State<'_, crate::playback::PlaybackState>,
@@ -693,7 +700,13 @@ fn write_open_archive(file: File, transcript: &str, open: &OpenTsf) -> Result<()
 /// Rebuilds the open container with the edited transcript without routing audio
 /// through the webview. The source snapshot must still match disk, and unknown
 /// archive members are refused rather than silently discarded.
-#[tauri::command]
+///
+/// `async` so Tauri runs it on a worker rather than the event-loop thread. It
+/// recompresses the transcript, restores the recording verbatim, syncs the
+/// result to disk and fingerprints the container twice — on a 28-minute
+/// recording that is seconds of work, and on the main thread it is seconds of
+/// frozen window with no way to show save progress.
+#[tauri::command(async)]
 pub fn save_tsf(
     state: tauri::State<'_, TsfState>,
     path: String,
@@ -754,7 +767,9 @@ pub fn save_tsf(
     Ok(())
 }
 
-#[tauri::command]
+/// `async` for the same reason as `save_tsf`: probing, compressing and syncing
+/// a whole recording is not work for the event-loop thread.
+#[tauri::command(async)]
 pub fn create_tsf(
     output_path: String,
     transcript: String,

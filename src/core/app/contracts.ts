@@ -95,11 +95,27 @@ export type ResetEditorOptions = {
   addToHistory?: boolean;
 };
 
+/**
+ * The document as it was at one instant, readable in pieces.
+ *
+ * A streamed save slices the document across many awaits, so reading the live
+ * editor would let an edit made mid-save shift the text under the writer and
+ * tear the file. A snapshot reads what was there when the save began, and
+ * carries the revision it belongs to so the caller can tell whether the
+ * document has moved on since.
+ */
+export type TextSnapshot = {
+  length: number;
+  revision: number;
+  slice: (from: number, to: number) => string;
+};
+
 export type EditorPort = {
   focus: () => void;
   getText: () => string;
   getDocLength: () => number;
   getTextSlice: (from: number, to: number) => string;
+  snapshotText: () => TextSnapshot;
   getRevision: () => number;
   setText: (text: string, options?: { emitChange?: boolean }) => void;
   append: (text: string, options?: AppendTextOptions) => void;

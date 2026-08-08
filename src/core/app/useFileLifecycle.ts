@@ -5,7 +5,8 @@ import type {
   FileDialogsPort,
   FileIoPort,
   FontPickerPort,
-  SettingsPort
+  SettingsPort,
+  TextSnapshot
 } from "./contracts";
 import { createSignal } from "solid-js";
 import type { LaunchFileStreamChunkResult } from "../window/launchArgService";
@@ -13,7 +14,7 @@ import { toAppError, type AppErrorCode } from "../errors/appError";
 import { stripMarkers } from "../tsf/markers";
 
 type UseFileLifecycleDeps = {
-  editor: Pick<EditorPort, "focus" | "getText" | "getDocLength" | "getTextSlice" | "setText" | "append" | "reset" | "setLargeLineSafeMode" | "getRevision" | "setMarkersEnabled">;
+  editor: Pick<EditorPort, "focus" | "getText" | "snapshotText" | "setText" | "append" | "reset" | "setLargeLineSafeMode" | "getRevision" | "setMarkersEnabled">;
   document: Pick<DocumentPort, "state" | "setRevision" | "markCleanAt" | "markSavedAt" | "setFilePath" | "setUntitled">;
   settings: Pick<SettingsPort, "state" | "actions">;
   fileDialogs: FileDialogsPort;
@@ -629,8 +630,23 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     deps.editor.focus();
   };
 
-  const saveDocumentToPathViaStream = async (filePath: string, text?: string) => {
-    const totalChars = text?.length ?? deps.editor.getDocLength();
+  /**
+   * Writes the document to `filePath` in chunks, returning the editor revision
+   * that was written.
+   *
+   * The text is snapshotted before the first chunk rather than sliced from the
+   * live editor. Chunks are separated by awaits on the backend, so the user can
+   * type throughout: reading the editor as it is now would shift every later
+   * slice and write a file that matches no version of the document. The
+   * returned revision is what the caller marks saved — it is the one on disk,
+   * which is not necessarily the one in the editor by the time this resolves.
+   */
+  const saveDocumentToPathViaStream = async (filePath: string, text?: string): Promise<number> => {
+    const source: TextSnapshot =
+      text === undefined
+        ? deps.editor.snapshotText()
+        : { length: text.length, revision: deps.editor.getRevision(), slice: (from, to) => text.slice(from, to) };
+    const totalChars = source.length;
     const saveId = beginSavingState(filePath, totalChars);
     let streamId: string | undefined;
     let finished = false;
@@ -648,7 +664,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
         let to = Math.min(totalChars, from + SAVE_STREAM_CHUNK_CHARS);
         if (to < totalChars) {
-          const charBefore = text ? text.slice(to - 1, to) : deps.editor.getTextSlice(to - 1, to);
+          const charBefore = source.slice(to - 1, to);
           const charCode = charBefore.charCodeAt(0);
           if (charCode >= 0xd800 && charCode <= 0xdbff) {
             to -= 1;
@@ -658,7 +674,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
           to = Math.min(totalChars, from + 1);
         }
 
-        const chunk = text ? text.slice(from, to) : deps.editor.getTextSlice(from, to);
+        const chunk = source.slice(from, to);
         if (!chunk) {
           from = to;
           continue;
@@ -676,6 +692,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await deps.saveFileStream.finishSaveFileStream(streamId);
       finished = true;
       setSavingCharsWritten(totalChars);
+      return source.revision;
     } catch (error) {
       if (isFileSaveCancelledError(error)) {
         throw error;
@@ -743,10 +760,10 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       }
 
       const previousPath = deps.document.state.filePath;
-      await saveDocumentToPathViaStream(result.filePath);
+      const savedRevision = await saveDocumentToPathViaStream(result.filePath);
       await deps.rememberedPosition.migrate(previousPath, result.filePath);
       deps.document.setFilePath(result.filePath);
-      deps.document.markCleanAt(deps.editor.getRevision());
+      deps.document.markSavedAt(savedRevision);
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(result.filePath));
       await deps.settings.actions.addRecentFile(result.filePath);
       deps.editor.focus();
@@ -764,8 +781,8 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     }
 
     await runWithErrorMessage(async () => {
-      await saveDocumentToPathViaStream(deps.document.state.filePath);
-      deps.document.markCleanAt(deps.editor.getRevision());
+      const savedRevision = await saveDocumentToPathViaStream(deps.document.state.filePath);
+      deps.document.markSavedAt(savedRevision);
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(deps.document.state.filePath));
       deps.editor.focus();
     }, "Unable to save file");

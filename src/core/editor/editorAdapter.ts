@@ -1,8 +1,9 @@
-import { Compartment, EditorSelection, EditorState, Transaction } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState, Text, Transaction } from "@codemirror/state";
 import { defaultKeymap, history, indentWithTab, isolateHistory, redo, undo } from "@codemirror/commands";
 import { search, searchKeymap } from "@codemirror/search";
 import { drawSelection, dropCursor, EditorView, highlightActiveLine, keymap } from "@codemirror/view";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import type { TextSnapshot } from "../app/contracts";
 import { AppSettings, FormatViewMode, RememberedPosition } from "../settings/settingsTypes";
 import {
   createFormatting,
@@ -447,17 +448,38 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
 
   const getDocLength = () => editorView?.state.doc.length ?? 0;
 
+  const sliceDoc = (doc: Text, from: number, to: number) => {
+    const safeFrom = Math.max(0, Math.min(doc.length, Math.floor(from)));
+    const safeTo = Math.max(safeFrom, Math.min(doc.length, Math.floor(to)));
+    if (safeFrom === safeTo) {
+      return "";
+    }
+    return doc.sliceString(safeFrom, safeTo);
+  };
+
   const getTextSlice = (from: number, to: number) => {
     if (!editorView) {
       return "";
     }
-    const docLength = editorView.state.doc.length;
-    const safeFrom = Math.max(0, Math.min(docLength, Math.floor(from)));
-    const safeTo = Math.max(safeFrom, Math.min(docLength, Math.floor(to)));
-    if (safeFrom === safeTo) {
-      return "";
+    return sliceDoc(editorView.state.doc, from, to);
+  };
+
+  /**
+   * CodeMirror documents are persistent, so holding one costs a reference
+   * rather than a copy of the text. That is what makes this affordable on the
+   * files the streaming save exists for: the alternative, `getText()`, doubles
+   * a large document in memory to produce a single string.
+   */
+  const snapshotText = (): TextSnapshot => {
+    const doc = editorView?.state.doc;
+    if (!doc) {
+      return { length: 0, revision, slice: () => "" };
     }
-    return editorView.state.doc.sliceString(safeFrom, safeTo);
+    return {
+      length: doc.length,
+      revision,
+      slice: (from: number, to: number) => sliceDoc(doc, from, to)
+    };
   };
 
   const getRevision = () => revision;
@@ -766,6 +788,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     getText,
     getDocLength,
     getTextSlice,
+    snapshotText,
     setText,
     append,
     reset,

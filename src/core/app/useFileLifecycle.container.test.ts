@@ -20,6 +20,8 @@ type HarnessOverrides = {
   openContainer?: (filePath: string) => Promise<{ transcript: string; meta: Record<string, unknown>; audioBytes: number }>;
   saveContainer?: (filePath: string, transcript: string) => Promise<void>;
   setLastDirectory?: () => Promise<void>;
+  /** Runs after each streamed chunk is written, so a test can edit mid-save. */
+  onWriteChunk?: (chunkNumber: number) => void | Promise<void>;
   /** What the open dialog returns. Defaults to the container. */
   dialogPath?: string;
   fileSize?: number;
@@ -56,8 +58,12 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     editor: {
       focus: () => {},
       getText: () => editorText.value,
-      getDocLength: () => editorText.value.length,
-      getTextSlice: (from: number, to: number) => editorText.value.slice(from, to),
+      // Snapshots the text as it is now, exactly as the real adapter does:
+      // later edits to editorText.value must not be visible through it.
+      snapshotText: () => {
+        const text = editorText.value;
+        return { length: text.length, revision: revision.value, slice: (from: number, to: number) => text.slice(from, to) };
+      },
       setText: (text: string) => {
         events.push("set-text");
         editorText.value = text;
@@ -114,6 +120,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
       startSaveFileStream,
       writeSaveFileChunk: async (_streamId: string, chunk: string) => {
         savedChunks.push(chunk);
+        await overrides.onWriteChunk?.(savedChunks.length);
         return { bytesWrittenTotal: savedChunks.join("").length };
       },
       finishSaveFileStream: async () => ({ bytesWrittenTotal: 1 }),
@@ -476,4 +483,51 @@ describe("saving a container", () => {
     expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/notes.txt");
     expect(h.showError).not.toHaveBeenCalled();
   });
+});
+
+describe("saving a text document while it is being edited", () => {
+  /** Long enough to need more than one streamed chunk. */
+  const LONG_TEXT = "a".repeat(300_000);
+
+  it("writes the text as it was when the save began", async () => {
+    const h = createHarness({
+      onWriteChunk: (chunkNumber) => {
+        if (chunkNumber === 1) {
+          // The user types while the first chunk is in flight. Reading the live
+          // editor for the remaining chunks would write a file matching neither
+          // version of the document.
+          h.editorText.value = "replaced";
+          h.revision.value = 2;
+          h.document.setRevision(2);
+        }
+      }
+    });
+    await h.lifecycle.openFileFromTextAtPath("/tmp/notes.txt", "seed");
+    h.editorText.value = LONG_TEXT;
+
+    await h.lifecycle.saveFile();
+
+    expect(h.savedChunks.length).toBeGreaterThan(1);
+    expect(h.savedChunks.join("")).toBe(LONG_TEXT);
+    expect(h.showError).not.toHaveBeenCalled();
+  });
+
+  it("keeps the document dirty at the edit made during the save", async () => {
+    const h = createHarness({
+      onWriteChunk: (chunkNumber) => {
+        if (chunkNumber === 1) {
+          h.revision.value = 2;
+          h.document.setRevision(2);
+        }
+      }
+    });
+    await h.lifecycle.openFileFromTextAtPath("/tmp/notes.txt", "seed");
+    h.editorText.value = LONG_TEXT;
+
+    await h.lifecycle.saveFile();
+
+    expect(h.document.state.isDirty).toBe(true);
+    expect(h.document.state.baselineRevision).toBe(1);
+  });
+
 });

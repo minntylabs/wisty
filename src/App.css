@@ -76,9 +76,9 @@ body {
   justify-content: space-between;
   gap: 16px;
   padding: 8px 12px;
-  background: #fff4d6;
-  border-bottom: 1px solid #d79b26;
-  color: #5e3d00;
+  background: #edf1f6;
+  border-bottom: 1px solid #c5cfdb;
+  color: #314155;
   font-size: 13px;
 }
 
@@ -102,9 +102,9 @@ body {
 }
 
 :root[data-theme="dark"] .external-change-banner {
-  background: #402d08;
-  border-color: #9a6b12;
-  color: #f6d797;
+  background: #202b38;
+  border-color: #3c4c60;
+  color: #d2dce8;
 }
 
 .menu-bar {

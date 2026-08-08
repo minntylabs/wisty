@@ -49,6 +49,8 @@ type EditorAdapterOptions = {
    * test with no playback at all.
    */
   onMarkerClick?: (start: number, end: number) => void;
+  /** Escape was pressed in a transcript. Silences whatever is playing. */
+  onStopPlayback?: () => void;
 };
 
 type SetTextOptions = {
@@ -85,10 +87,11 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   // them costs work proportional to how many there are, and an ordinary text
   // file has none to find. Measured at ~6ms per keystroke on a 10MB document,
   // which is the difference between typing feeling fine and feeling broken.
-  const markers = createMarkers(
-    () => options.getSettings().markersVisible,
-    (start, end) => options.onMarkerClick?.(start, end)
-  );
+  const markers = createMarkers({
+    getInitialVisible: () => options.getSettings().markersVisible,
+    onMarkerClick: (start, end) => options.onMarkerClick?.(start, end),
+    onStop: () => options.onStopPlayback?.()
+  });
   let transcriptEnabled = false;
   let markersEnabled = false;
 

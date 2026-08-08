@@ -26,13 +26,15 @@ const DOC =
 
 const createView = (doc: string = DOC, visible = true) => {
   const clicks: [number, number][] = [];
-  const markers = createMarkers(
-    () => visible,
-    (start, end) => clicks.push([start, end])
-  );
+  const stops: number[] = [];
+  const markers = createMarkers({
+    getInitialVisible: () => visible,
+    onMarkerClick: (start, end) => clicks.push([start, end]),
+    onStop: () => stops.push(1)
+  });
   const state = EditorState.create({ doc, extensions: [markers.extension] });
   const view = new EditorView({ state, parent: document.body });
-  return { view, markers, clicks };
+  return { view, markers, clicks, stops };
 };
 
 /** Every marker still parseable in the document, as "start-end" strings. */
@@ -382,4 +384,72 @@ describe("clicking an icon", () => {
   // by design. A test dispatching mousedown straight at the node passed
   // regardless of that, asserting a capability no pointer has — it was removed
   // rather than renamed, because the honest version asserts nothing useful.
+});
+
+/**
+ * Keyboard playback. Tabbing between icons was rejected — see playbackKeymap —
+ * so these are the whole of the keyboard path and worth covering properly.
+ */
+describe("keyboard playback", () => {
+  const press = (view: EditorView, key: string) => {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    view.contentDOM.dispatchEvent(event);
+    return event;
+  };
+
+  const caretAt = (view: EditorView, pos: number) => {
+    view.dispatch({ selection: EditorSelection.cursor(pos) });
+  };
+
+  it("F5 plays the sentence the caret is in", () => {
+    const { view, clicks } = createView();
+    // Inside "And then it rained.", which the second marker introduces.
+    caretAt(view, DOC.indexOf("rained"));
+    press(view, "F5");
+    expect(clicks).toEqual([[736.8, 740.15]]);
+    view.destroy();
+  });
+
+  it("F5 plays the first sentence of the turn when the caret is in the label", () => {
+    // No marker at or before the caret on this line, and "play this turn" is
+    // the only sensible reading of F5 there.
+    const { view, clicks } = createView();
+    caretAt(view, 2);
+    press(view, "F5");
+    expect(clicks).toEqual([[734.12, 736.8]]);
+    view.destroy();
+  });
+
+  it("F5 never reaches back to the previous speaker's line", () => {
+    // A turn is a line. Without confining the search, a caret before the first
+    // marker of a turn would play the end of the turn above it.
+    const { view, clicks } = createView();
+    caretAt(view, DOC.indexOf("BOB:") + 2);
+    press(view, "F5");
+    expect(clicks).toEqual([[742.9, 745.3]]);
+    view.destroy();
+  });
+
+  it("F5 does nothing on a line with no markers", () => {
+    const { view, clicks } = createView("ALICE: no markers here at all");
+    caretAt(view, 12);
+    press(view, "F5");
+    expect(clicks).toEqual([]);
+    view.destroy();
+  });
+
+  it("Escape stops playback", () => {
+    const { view, stops } = createView();
+    press(view, "Escape");
+    expect(stops).toHaveLength(1);
+    view.destroy();
+  });
+
+  it("Escape does not consume the event", () => {
+    // Tidy mode clears its selection on Escape too. Consuming it here would
+    // mean two presses to silence the audio and clear the selection.
+    const { view } = createView();
+    expect(press(view, "Escape").defaultPrevented).toBe(false);
+    view.destroy();
+  });
 });

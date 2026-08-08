@@ -120,6 +120,7 @@ function App() {
   const editorAdapter = createEditorAdapter({
     getSettings: () => settingsStore.state,
     onMarkerClick: playback.playMarker,
+    onStopPlayback: playback.stop,
     onDocChanged: ({ revision }) => {
       documentStore.setRevision(revision);
     },

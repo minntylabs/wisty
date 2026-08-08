@@ -15,12 +15,13 @@
 import {
   EditorState,
   Extension,
+  Prec,
   Range,
   StateEffect,
   StateField,
   Transaction
 } from "@codemirror/state";
-import { Decoration, DecorationSet, EditorView, WidgetType } from "@codemirror/view";
+import { Decoration, DecorationSet, EditorView, WidgetType, keymap } from "@codemirror/view";
 import { changeSplits, Marker, parseMarkers } from "../../tsf/markers";
 
 /** Shows or hides the marker icons. Dispatched by the menu/keyboard toggle. */
@@ -283,6 +284,76 @@ const markerTheme = EditorView.baseTheme({
   }
 });
 
+/**
+ * Keyboard playback, and the reason it is a caret command rather than focus
+ * moving between icons.
+ *
+ * Tabbing to the icons was the obvious idea and does not fit this editor. Tab
+ * already inserts indentation (editorAdapter's indentWithTab); the icons are
+ * replaced ranges that atomicRanges deliberately keeps the caret out of, so
+ * making them focusable means putting tabindex on nodes the editor is actively
+ * excluding; and Space on a focused element inside a contenteditable risks
+ * typing a space into the document.
+ *
+ * Playing the sentence the caret is in needs none of that, and fits how the
+ * editor is actually used — while tidying, the caret is already in the sentence
+ * in question.
+ *
+ * The marker introducing that sentence is the last one at or before the caret
+ * on its line. Falling back to the line's first marker covers the caret sitting
+ * in the speaker label, where "play this turn" is the only sensible reading.
+ * Confined to the line because a turn is a line: without that, a caret before
+ * the first marker would play the previous speaker's last sentence.
+ */
+const playbackKeymap = (
+  markerField: StateField<DecorationSet>,
+  onMarkerClick: MarkerClickHandler,
+  onStop: () => void
+) => [
+  keymap.of([
+    {
+      key: "F5",
+      run: (view) => {
+        const markers = view.state.field(markerField, false);
+        if (!markers) {
+          return false;
+        }
+        const pos = view.state.selection.main.head;
+        const line = view.state.doc.lineAt(pos);
+        let chosen: MarkerIconWidget | undefined;
+        markers.between(line.from, line.to, (from, _to, value) => {
+          const widget = (value.spec as { widget?: MarkerIconWidget }).widget;
+          // Ascending, so the last one starting at or before the caret wins;
+          // the first marker on the line is whatever was seen first.
+          if (widget && (from <= pos || chosen === undefined)) {
+            chosen = widget;
+          }
+          return undefined;
+        });
+        if (!chosen) {
+          return false;
+        }
+        onMarkerClick(chosen.start, chosen.end);
+        return true;
+      }
+    }
+  ]),
+  // Highest precedence so it runs before tidy mode's Escape, and returns false
+  // so it consumes nothing: pressing Escape silences the audio AND still
+  // clears a tidy-mode selection, rather than taking two presses to do both.
+  Prec.highest(
+    keymap.of([
+      {
+        key: "Escape",
+        run: () => {
+          onStop();
+          return false;
+        }
+      }
+    ])
+  )
+];
+
 export type MarkersExtension = {
   markerField: StateField<DecorationSet>;
   /** Every marker in the document. Walks them all, so not for the hot path. */
@@ -291,10 +362,19 @@ export type MarkersExtension = {
   extension: Extension;
 };
 
-export const createMarkers = (
-  getInitialVisible: () => boolean,
-  onMarkerClick: MarkerClickHandler
-): MarkersExtension => {
+export type MarkersOptions = {
+  getInitialVisible: () => boolean;
+  /** A marker's icon was clicked, or F5 was pressed inside its sentence. */
+  onMarkerClick: MarkerClickHandler;
+  /** Escape was pressed. Silences whatever is playing. */
+  onStop: () => void;
+};
+
+export const createMarkers = ({
+  getInitialVisible,
+  onMarkerClick,
+  onStop
+}: MarkersOptions): MarkersExtension => {
   const visibilityField = createVisibilityField(getInitialVisible);
   // The field is built per instance rather than shared at module scope so the
   // click handler can be closed over. Injecting it is what keeps this module
@@ -305,6 +385,12 @@ export const createMarkers = (
     markerField,
     visibilityField,
     markersIn: (state) => markersInField(state, markerField),
-    extension: [markerField, visibilityField, createChangeFilter(markerField), markerTheme]
+    extension: [
+      markerField,
+      visibilityField,
+      createChangeFilter(markerField),
+      playbackKeymap(markerField, onMarkerClick, onStop),
+      markerTheme
+    ]
   };
 };

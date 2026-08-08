@@ -124,35 +124,66 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   let activeSaveId = 0;
   let savingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
   let textFileVersion: TextFileVersion | null = null;
+  let textFileVersionGeneration = 0;
+  let observedExternalVersion: TextFileVersion | null = null;
+  let textFileVersionError: Error | null = null;
 
   const clearTextFileVersion = () => {
+    textFileVersionGeneration += 1;
     textFileVersion = null;
+    observedExternalVersion = null;
+    textFileVersionError = null;
     setExternalChange(null);
     setExternalChangeDismissed(false);
   };
 
   const captureTextFileVersion = async (filePath: string) => {
-    textFileVersion = await deps.fileIo.getTextFileVersion(filePath);
+    try {
+      textFileVersion = await deps.fileIo.getTextFileVersion(filePath);
+      textFileVersionError = null;
+    } catch (error) {
+      textFileVersion = null;
+      textFileVersionError = error instanceof Error ? error : new Error("Cannot check the file on disk");
+      throw textFileVersionError;
+    }
+    textFileVersionGeneration += 1;
+    observedExternalVersion = null;
     setExternalChange(null);
     setExternalChangeDismissed(false);
   };
 
   const checkForExternalChange = async (): Promise<boolean> => {
+    if (textFileVersionError) {
+      throw textFileVersionError;
+    }
     if (deps.document.state.kind !== "text" || !deps.document.state.filePath || !textFileVersion) {
       return false;
     }
-    if (externalChange()) {
-      return true;
+    const filePath = deps.document.state.filePath;
+    const baseline = textFileVersion;
+    const generation = textFileVersionGeneration;
+    const current = await deps.fileIo.getTextFileVersion(filePath);
+    if (
+      generation !== textFileVersionGeneration
+      || deps.document.state.kind !== "text"
+      || deps.document.state.filePath !== filePath
+      || textFileVersion !== baseline
+    ) {
+      return false;
     }
-    const current = await deps.fileIo.getTextFileVersion(deps.document.state.filePath);
     if (!current) {
-      setExternalChange({ filePath: deps.document.state.filePath, kind: "deleted" });
-      setExternalChangeDismissed(false);
+      if (externalChange()?.kind !== "deleted") {
+        setExternalChange({ filePath, kind: "deleted" });
+        setExternalChangeDismissed(false);
+      }
       return true;
     }
-    if (!sameTextFileVersion(textFileVersion, current)) {
-      setExternalChange({ filePath: deps.document.state.filePath, kind: "changed" });
-      setExternalChangeDismissed(false);
+    if (!sameTextFileVersion(baseline, current)) {
+      if (!observedExternalVersion || !sameTextFileVersion(observedExternalVersion, current)) {
+        observedExternalVersion = current;
+        setExternalChange({ filePath, kind: "changed" });
+        setExternalChangeDismissed(false);
+      }
       return true;
     }
     return false;
@@ -611,6 +642,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
       // The container goes here rather than at the branch above, so backing
       // out of a large-file prompt leaves the open transcript untouched.
+      clearTextFileVersion();
       await releaseContainer();
       await loadEditorFileAsCleanFromFsStream(selected.filePath, fileSize);
       deps.document.setFilePath(selected.filePath);
@@ -629,6 +661,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
           await openContainerAtPath(filePath);
           return;
         }
+        clearTextFileVersion();
         await releaseContainer();
         await loadEditorFileAsCleanFromFsStream(filePath);
         deps.document.setFilePath(filePath);
@@ -652,6 +685,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         await openContainerAtPath(filePath);
         return;
       }
+      clearTextFileVersion();
       await releaseContainer();
       await loadEditorFileAsCleanFromLaunchStream(filePath, fileSizeBytes);
       deps.document.setFilePath(filePath);

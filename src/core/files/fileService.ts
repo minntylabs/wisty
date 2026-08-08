@@ -196,20 +196,16 @@ const safeFileIdentityNumber = (value: number | null): number | null =>
   typeof value === "number" && Number.isSafeInteger(value) ? value : null;
 
 export const getTextFileVersion = async (filePath: string): Promise<TextFileVersion | null> => {
-  try {
-    const metadata = await stat(filePath);
-    if (!metadata.isFile) {
-      return null;
-    }
-    return {
-      size: metadata.size,
-      modifiedMs: metadata.mtime?.getTime() ?? null,
-      device: safeFileIdentityNumber(metadata.dev),
-      inode: safeFileIdentityNumber(metadata.ino)
-    };
-  } catch {
+  const metadata = await stat(filePath);
+  if (!metadata.isFile) {
     return null;
   }
+  return {
+    size: metadata.size,
+    modifiedMs: metadata.mtime?.getTime() ?? null,
+    device: safeFileIdentityNumber(metadata.dev),
+    inode: safeFileIdentityNumber(metadata.ino)
+  };
 };
 
 export const fileExists = async (filePath: string): Promise<boolean> => {

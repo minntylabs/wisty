@@ -1,0 +1,42 @@
+EXTERNAL TEXT-FILE CHANGE DETECTION, 2026-08-08
+=================================================
+
+The initial external-change implementation recorded a text file's metadata
+after loading, compared asynchronous focus checks against mutable document
+state, and allowed Reload from Disk to discard dirty edits immediately.
+
+FIXES
+
+1. A text-file version is cleared before every plain-text open. This prevents
+   a failed replacement open from retaining the previous document's baseline.
+
+2. Version checks capture the path, baseline and generation before awaiting
+   filesystem metadata. A result is discarded when another document has been
+   opened in the meantime.
+
+3. A dismissed conflict records the external version it saw. A later changed
+   version or deletion reopens the banner instead of remaining hidden until
+   Save.
+
+4. Metadata lookup failures are no longer treated as a missing file. They
+   leave the document unsaveable through ordinary Save, rather than silently
+   omitting the backend's expected-source validation.
+
+5. Reload from Disk now runs through the existing discard confirmation flow,
+   so it cannot silently throw away dirty editor content.
+
+RESIDUAL LIMITS
+
+The backend rechecks metadata immediately before rename, but portable POSIX
+and Windows APIs do not offer rename-if-this-path-still-has-this-version.
+An uncooperative writer can therefore still win the tiny interval between the
+check and rename.
+
+Text versions intentionally use size, mtime, device and inode. They can miss
+an in-place same-size edit whose timestamp is unchanged or too coarse. A full
+content digest would close that case but adds a second full read before every
+large-file save; this is a documented metadata-only tradeoff.
+
+Focus-triggered checks do not observe changes while Wisty remains focused. A
+filesystem watcher would be the future enhancement if immediate notification
+becomes necessary.

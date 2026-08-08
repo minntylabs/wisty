@@ -223,7 +223,9 @@ function App() {
 
   onMount(() => {
     const checkForExternalChange = () => {
-      void fileLifecycle.checkForExternalChange();
+      void fileLifecycle.checkForExternalChange().catch(() => {
+        // Save reports a version-check failure; focus must not interrupt typing.
+      });
     };
     window.addEventListener("focus", checkForExternalChange);
     onCleanup(() => window.removeEventListener("focus", checkForExternalChange));
@@ -593,7 +595,7 @@ function App() {
             visible: fileLifecycle.externalChangeState.isVisible(),
             kind: fileLifecycle.externalChangeState.change()?.kind,
             filePath: fileLifecycle.externalChangeState.change()?.filePath ?? "",
-            onReload: () => void fileLifecycle.reloadExternalChange(),
+            onReload: () => void closeFlow.runOrConfirmDiscard(fileLifecycle.reloadExternalChange),
             onSaveAs: () => void fileLifecycle.saveFileAs(),
             onOverwrite: () => void fileLifecycle.overwriteExternalChange(),
             onDismiss: fileLifecycle.dismissExternalChange

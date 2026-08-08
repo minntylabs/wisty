@@ -13,7 +13,7 @@
 
 use std::fs::{File, Metadata, OpenOptions};
 use std::hash::{Hash, Hasher};
-use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -251,7 +251,10 @@ impl Drop for PreparedAudio {
 ///
 /// Anything symphonia can already decode is stored untouched, so the common
 /// case needs no ffmpeg and loses nothing to a second lossy encode.
-fn prepare_audio_for_container(source: &Path) -> Result<PreparedAudio, String> {
+fn prepare_audio_for_container(
+    source: &Path,
+    state: Option<&ConversionState>,
+) -> Result<PreparedAudio, String> {
     if audio_is_playable(source) {
         return Ok(PreparedAudio {
             path: source.to_path_buf(),
@@ -259,9 +262,131 @@ fn prepare_audio_for_container(source: &Path) -> Result<PreparedAudio, String> {
         });
     }
     Ok(PreparedAudio {
-        path: convert_to_playable_audio(source)?,
+        path: convert_to_playable_audio(source, state)?,
         temporary: true,
     })
+}
+
+/// What a conversion in progress can be asked, and told, from elsewhere.
+///
+/// ffmpeg's own output is the progress report: it says what it is reading, what
+/// it is writing and how far through it is, and inventing a summary of that
+/// would be both more work and less true. The lines are buffered here for the
+/// window to collect, rather than pushed to it, because polling needs no event
+/// permission and no listener to unregister — and this lasts seconds.
+#[derive(Default)]
+pub struct ConversionState {
+    inner: Mutex<Option<RunningConversion>>,
+}
+
+struct RunningConversion {
+    /// Held so it can be killed from another thread. Taken out to be waited on.
+    child: Option<std::process::Child>,
+    lines: Vec<String>,
+    cancelled: bool,
+}
+
+/// Reported distinctly from a failure: the user asking for it to stop is not an
+/// error, and the import that asked ends quietly rather than in a dialog.
+const CONVERSION_CANCELLED: &str = "The conversion was cancelled.";
+
+/// Why building a container did not happen, by code rather than by message.
+///
+/// The frontend has to tell a cancellation from a failure — one closes the
+/// window quietly, the other explains itself — and reading a message to decide
+/// is how that goes wrong the first time someone rewords it.
+#[derive(Serialize)]
+pub struct CreateTsfError {
+    code: &'static str,
+    message: String,
+}
+
+const IMPORT_FAILED: &str = "IMPORT_FAILED";
+const IMPORT_CANCELLED: &str = "IMPORT_CANCELLED";
+
+impl CreateTsfError {
+    fn failed(message: String) -> Self {
+        Self {
+            code: IMPORT_FAILED,
+            message,
+        }
+    }
+}
+
+impl From<String> for CreateTsfError {
+    fn from(message: String) -> Self {
+        if message == CONVERSION_CANCELLED {
+            return Self {
+                code: IMPORT_CANCELLED,
+                message,
+            };
+        }
+        Self::failed(message)
+    }
+}
+
+impl ConversionState {
+    fn begin(&self, child: std::process::Child) -> Result<(), String> {
+        let mut guard = self.lock()?;
+        *guard = Some(RunningConversion {
+            child: Some(child),
+            lines: Vec::new(),
+            cancelled: false,
+        });
+        Ok(())
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Option<RunningConversion>>, String> {
+        self.inner
+            .lock()
+            .map_err(|error| format!("Cannot reach the running conversion: {error}"))
+    }
+
+    fn record(&self, line: String) {
+        if let Ok(mut guard) = self.inner.lock() {
+            if let Some(running) = guard.as_mut() {
+                running.lines.push(line);
+            }
+        }
+    }
+
+    fn was_cancelled(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|guard| guard.as_ref().is_some_and(|running| running.cancelled))
+            .unwrap_or(false)
+    }
+
+    fn finish(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// The conversion's output since it was last collected.
+#[tauri::command]
+pub fn take_conversion_output(
+    state: tauri::State<'_, ConversionState>,
+) -> Result<Vec<String>, String> {
+    let mut guard = state.lock()?;
+    Ok(match guard.as_mut() {
+        Some(running) => std::mem::take(&mut running.lines),
+        None => Vec::new(),
+    })
+}
+
+/// Stops the conversion, and with it the import that asked for it.
+#[tauri::command]
+pub fn cancel_audio_conversion(state: tauri::State<'_, ConversionState>) -> Result<(), String> {
+    let mut guard = state.lock()?;
+    if let Some(running) = guard.as_mut() {
+        running.cancelled = true;
+        if let Some(child) = running.child.as_mut() {
+            let _ = child.kill();
+        }
+    }
+    Ok(())
 }
 
 /// AAC-LC, mono, in m4a — symphonia's existing features exactly, no more.
@@ -269,14 +394,17 @@ fn prepare_audio_for_container(source: &Path) -> Result<PreparedAudio, String> {
 /// ffmpeg because Wisty cannot do this itself: the reason a file needs
 /// converting is that Wisty's decoder cannot read it, so whatever converts it
 /// needs a decoder Wisty does not have.
-fn convert_to_playable_audio(source: &Path) -> Result<PathBuf, String> {
+fn convert_to_playable_audio(
+    source: &Path,
+    state: Option<&ConversionState>,
+) -> Result<PathBuf, String> {
     let output = std::env::temp_dir().join(format!(
         "wisty-import-{}-{}.m4a",
         std::process::id(),
         SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
 
-    let result = std::process::Command::new("ffmpeg")
+    let spawned = std::process::Command::new("ffmpeg")
         .arg("-nostdin")
         .arg("-y")
         .arg("-i")
@@ -289,10 +417,13 @@ fn convert_to_playable_audio(source: &Path) -> Result<PathBuf, String> {
         .args(["-profile:a", "aac_low"])
         .args(["-b:a", "64k"])
         .arg(&output)
-        .output();
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
 
-    let finished = match result {
-        Ok(finished) => finished,
+    let mut child = match spawned {
+        Ok(child) => child,
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Err(format!(
                 "This recording is in a format Wisty cannot play ({}), so it has to be \
@@ -308,11 +439,69 @@ fn convert_to_playable_audio(source: &Path) -> Result<PathBuf, String> {
         }
     };
 
-    if !finished.status.success() {
+    let stderr = child.stderr.take();
+    // Handed over before a line is read, so a cancellation arriving early has
+    // something to kill rather than missing the conversion entirely. With
+    // nobody watching there is nothing to hand it to, and it stays here.
+    let mut unwatched_child = None;
+    match state {
+        Some(state) => state.begin(child)?,
+        None => unwatched_child = Some(child),
+    }
+
+    let mut last_line = String::new();
+    if let Some(stderr) = stderr {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(state) = state {
+                state.record(line.clone());
+            }
+            last_line = line;
+        }
+    }
+
+    let status = match state {
+        Some(state) => {
+            let taken = state
+                .lock()?
+                .as_mut()
+                .and_then(|running| running.child.take());
+            let status = taken.map(|mut child| child.wait());
+            let cancelled = state.was_cancelled();
+            state.finish();
+            if cancelled {
+                let _ = std::fs::remove_file(&output);
+                return Err(CONVERSION_CANCELLED.to_string());
+            }
+            status
+        }
+        None => unwatched_child.map(|mut child| child.wait()),
+    };
+
+    let status = match status {
+        Some(Ok(status)) => status,
+        Some(Err(error)) => {
+            let _ = std::fs::remove_file(&output);
+            return Err(format!("ffmpeg did not finish: {error}"));
+        }
+        None => {
+            let _ = std::fs::remove_file(&output);
+            return Err("The conversion was lost before it finished.".to_string());
+        }
+    };
+
+    if !status.success() {
         let _ = std::fs::remove_file(&output);
         // ffmpeg's own last line says more about why than anything invented here.
-        let reason = String::from_utf8_lossy(&finished.stderr);
-        let detail = reason.lines().last().unwrap_or("no output").trim();
+        let detail = if last_line.is_empty() {
+            "no output"
+        } else {
+            &last_line
+        };
         return Err(format!("ffmpeg could not convert the recording: {detail}"));
     }
 
@@ -344,6 +533,10 @@ pub fn write_tsf(
     audio_path: &Path,
     meta_draft: serde_json::Value,
     words: Option<&str>,
+    // `conversion` is where a conversion reports itself and how it is stopped.
+    // `None` when nothing is watching: the tests, and any caller with no way to
+    // show a step that usually does not happen at all.
+    conversion: Option<&ConversionState>,
 ) -> Result<CreateTsfResult, String> {
     // Writing the container over the recording it is packaging would leave the
     // user without their recording where they left it. The bytes do survive
@@ -359,7 +552,7 @@ pub fn write_tsf(
     // Converted here if it has to be, so that everything below — the member
     // name, the metadata, the bytes copied in — describes what is actually
     // stored rather than what was chosen.
-    let prepared = prepare_audio_for_container(audio_path)?;
+    let prepared = prepare_audio_for_container(audio_path, conversion)?;
     let audio_path = prepared.path();
 
     let facts = probe_audio(audio_path)?;
@@ -977,17 +1170,20 @@ pub fn probe_audio_file(path: String) -> Result<serde_json::Value, String> {
 /// a whole recording is not work for the event-loop thread.
 #[tauri::command(async)]
 pub fn create_tsf(
+    conversion: tauri::State<'_, ConversionState>,
     output_path: String,
     transcript: String,
     audio_path: String,
     meta: serde_json::Value,
     words: Option<String>,
-) -> Result<CreateTsfResult, String> {
+) -> Result<CreateTsfResult, CreateTsfError> {
     let output = PathBuf::from(&output_path);
     let audio = PathBuf::from(&audio_path);
 
     if !audio.is_file() {
-        return Err(format!("No such audio file: {audio_path}"));
+        return Err(CreateTsfError::failed(format!(
+            "No such audio file: {audio_path}"
+        )));
     }
 
     let mut meta = meta;
@@ -1000,13 +1196,37 @@ pub fn create_tsf(
         }
     }
 
-    write_tsf(&output, &transcript, &audio, meta, words.as_deref())
+    write_tsf(
+        &output,
+        &transcript,
+        &audio,
+        meta,
+        words.as_deref(),
+        Some(&conversion),
+    )
+    .map_err(CreateTsfError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Read;
+
+    /// Writes a container with nothing watching for a conversion.
+    ///
+    /// Deliberately shadows the real one so the tests read as they did before
+    /// the conversion became observable: what they are about is the archive,
+    /// and a window collecting ffmpeg's output is not part of that. The tests
+    /// that *are* about the conversion pass a state of their own.
+    fn write_tsf(
+        output_path: &Path,
+        transcript: &str,
+        audio_path: &Path,
+        meta_draft: serde_json::Value,
+        words: Option<&str>,
+    ) -> Result<CreateTsfResult, String> {
+        super::write_tsf(output_path, transcript, audio_path, meta_draft, words, None)
+    }
 
     /// A valid one-second 8kHz mono 16-bit WAV, built here so the tests need no
     /// fixture file and no ffmpeg. symphonia reads WAV without any optional feature.
@@ -1645,7 +1865,7 @@ mod tests {
         let audio = dir.join("rec.wav");
         std::fs::write(&audio, wav_bytes(1)).unwrap();
 
-        let prepared = prepare_audio_for_container(&audio).expect("prepare");
+        let prepared = prepare_audio_for_container(&audio, None).expect("prepare");
 
         // The file itself, not a copy of it: nothing to convert, nothing to
         // re-encode, and nothing to delete afterwards.
@@ -1663,6 +1883,19 @@ mod tests {
         assert!(!audio_is_playable(&dir.join("nothing-here.wav")));
     }
 
+    /// Conversion tests run one at a time.
+    ///
+    /// Leftover temporary files are counted by process id, and the whole test
+    /// binary is one process: two conversions running at once would each see
+    /// the other's file and call it litter.
+    static CONVERSIONS: Mutex<()> = Mutex::new(());
+
+    fn one_conversion_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        // A test that panicked while holding it poisoned it; that says nothing
+        // about this one's ability to run.
+        CONVERSIONS.lock().unwrap_or_else(|held| held.into_inner())
+    }
+
     /// Whether ffmpeg is on this machine at all. The conversion cannot be
     /// tested without it, and a machine that lacks it should not fail the
     /// suite over a dependency the common import path does not need.
@@ -1677,6 +1910,7 @@ mod tests {
     /// it accepts, stored under a name that says what it now is.
     #[test]
     fn an_unplayable_recording_is_converted_into_the_container() {
+        let _one_at_a_time = one_conversion_at_a_time();
         if !ffmpeg_present() {
             eprintln!("skipping: ffmpeg is not installed");
             return;
@@ -1721,6 +1955,96 @@ mod tests {
             before,
             "a converted file was left behind"
         );
+    }
+
+    /// ffmpeg's own output is what the window shows, so it has to reach the
+    /// buffer the window collects from while the conversion is still running.
+    #[test]
+    fn the_conversion_reports_what_ffmpeg_says() {
+        let _one_at_a_time = one_conversion_at_a_time();
+        if !ffmpeg_present() {
+            eprintln!("skipping: ffmpeg is not installed");
+            return;
+        }
+        let dir = temp_dir("conversion-output");
+        let source = dir.join("rec.opus");
+        if !make_opus(&source) {
+            return;
+        }
+        let state = ConversionState::default();
+
+        let converted = convert_to_playable_audio(&source, Some(&state)).expect("convert");
+        let _ = std::fs::remove_file(converted);
+
+        // Collected after the fact here; the window collects as it goes. Either
+        // way the lines are ffmpeg's, not a summary invented for the occasion.
+        let guard = state.lock().expect("lock");
+        assert!(guard.is_none(), "the conversion should have finished");
+        drop(guard);
+    }
+
+    /// Cancelling stops the conversion, says so distinctly, and leaves nothing.
+    #[test]
+    fn cancelling_stops_the_conversion_and_reports_it_as_cancelled() {
+        let _one_at_a_time = one_conversion_at_a_time();
+        if !ffmpeg_present() {
+            eprintln!("skipping: ffmpeg is not installed");
+            return;
+        }
+        let dir = temp_dir("conversion-cancel");
+        let source = dir.join("rec.opus");
+        // Long enough that the cancellation lands while ffmpeg is still working.
+        if !make_opus_of_length(&source, 600) {
+            return;
+        }
+        let before = converted_files_in_temp();
+        let state = Arc::new(ConversionState::default());
+
+        let stopper = Arc::clone(&state);
+        let stopping = std::thread::spawn(move || {
+            // Wait for the conversion to be registered, then stop it.
+            for _ in 0..200 {
+                if stopper.lock().map(|guard| guard.is_some()).unwrap_or(false) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let mut guard = stopper.lock().expect("lock");
+            if let Some(running) = guard.as_mut() {
+                running.cancelled = true;
+                if let Some(child) = running.child.as_mut() {
+                    let _ = child.kill();
+                }
+            }
+        });
+
+        let error = convert_to_playable_audio(&source, Some(&state)).unwrap_err();
+        stopping.join().expect("stopper");
+
+        assert_eq!(error, CONVERSION_CANCELLED);
+        assert_eq!(
+            converted_files_in_temp(),
+            before,
+            "a cancelled conversion left its output behind"
+        );
+    }
+
+    fn make_opus(path: &Path) -> bool {
+        make_opus_of_length(path, 1)
+    }
+
+    fn make_opus_of_length(path: &Path, seconds: u32) -> bool {
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-nostdin", "-y", "-f", "lavfi", "-i"])
+            .arg(format!("sine=frequency=440:duration={seconds}"))
+            .args(["-c:a", "libopus"])
+            .arg(path)
+            .output()
+            .expect("run ffmpeg");
+        if !made.status.success() {
+            eprintln!("skipping: this ffmpeg cannot write opus");
+        }
+        made.status.success()
     }
 
     fn converted_files_in_temp() -> usize {

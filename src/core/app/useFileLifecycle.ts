@@ -15,6 +15,7 @@ import { toAppError, type AppErrorCode } from "../errors/appError";
 import { createExternalChangeMonitor, externalChangeKindFromSaveError } from "./externalChangeMonitor";
 import { stripMarkers } from "../tsf/markers";
 import { importTranscript } from "../tsf/importTranscript";
+import { createConversionWatch } from "../tsf/conversionWatch";
 import type { CueProblem } from "../tsf/vtt";
 
 type UseFileLifecycleDeps = {
@@ -60,6 +61,17 @@ type UseFileLifecycleDeps = {
   confirmImportProblems: (problems: CueProblem[], cueCount: number) => Promise<boolean>;
   /** For the provenance an imported container records about its maker. */
   appVersion: () => string;
+  /**
+   * A recording the player cannot read is converted on the way in, which is
+   * the one part of an import that takes noticeable time. This is how that
+   * step is shown while it runs.
+   */
+  conversion: {
+    takeOutput: () => Promise<string[]>;
+    onOutput: (lines: string[]) => void;
+    /** Nothing is converting any more, whether it finished or was stopped. */
+    onFinished: () => void;
+  };
 };
 
 const SOFT_FILE_LIMIT_BYTES = 50 * 1024 * 1024;
@@ -1026,19 +1038,45 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    * closed would be a file operation the user has to go and find.
    */
   const importTranscriptFile = async () => {
+    const watch = createConversionWatch({
+      takeOutput: deps.conversion.takeOutput,
+      onOutput: deps.conversion.onOutput
+    });
+
     await runWithErrorMessage(async () => {
-      const result = await importTranscript({
-        dialogs: {
-          pickSubtitles: () => deps.fileDialogs.openSubtitleFilePath(deps.settings.state.lastDirectory),
-          pickAudio: (defaultPath) => deps.fileDialogs.openAudioFilePath(defaultPath),
-          pickContainerPath: (defaultPath) => deps.fileDialogs.saveContainerPathAs(defaultPath)
-        },
-        readTextFile: deps.fileIo.readTextFile,
-        probeAudio: deps.fileIo.probeAudio,
-        createContainer: deps.fileIo.createContainer,
-        confirmProblems: deps.confirmImportProblems,
-        appVersion: deps.appVersion
-      });
+      let result: Awaited<ReturnType<typeof importTranscript>>;
+      try {
+        result = await importTranscript({
+          dialogs: {
+            pickSubtitles: () => deps.fileDialogs.openSubtitleFilePath(deps.settings.state.lastDirectory),
+            pickAudio: (defaultPath) => deps.fileDialogs.openAudioFilePath(defaultPath),
+            pickContainerPath: (defaultPath) => deps.fileDialogs.saveContainerPathAs(defaultPath)
+          },
+          readTextFile: deps.fileIo.readTextFile,
+          probeAudio: deps.fileIo.probeAudio,
+          // Watched for as long as the container is being built, which is the
+          // only part of this that can convert anything.
+          createContainer: async (params) => {
+            watch.start();
+            try {
+              return await deps.fileIo.createContainer(params);
+            } finally {
+              await watch.stop();
+              deps.conversion.onFinished();
+            }
+          },
+          confirmProblems: deps.confirmImportProblems,
+          appVersion: deps.appVersion
+        });
+      } catch (error) {
+        // Stopping the conversion is the user ending the import, not a fault
+        // to explain to them.
+        if (toAppError(error, "UNKNOWN", "Unable to import transcript").code === "IMPORT_CANCELLED") {
+          deps.editor.focus();
+          return;
+        }
+        throw error;
+      }
 
       if (result.kind === "cancelled") {
         deps.editor.focus();

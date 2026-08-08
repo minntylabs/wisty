@@ -784,3 +784,25 @@ body {
 .import-problems li + li {
   margin-top: 4px;
 }
+
+.conversion-panel {
+  width: 560px;
+}
+
+/* ffmpeg's own output: monospaced, scrolling, and bounded so a long
+   conversion cannot grow the dialog past the window. */
+.conversion-log {
+  margin: 12px 0 0;
+  padding: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: var(--bg-page);
+  color: var(--status-text);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

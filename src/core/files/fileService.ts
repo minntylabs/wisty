@@ -396,3 +396,17 @@ export const createContainer = async (
     meta: params.meta,
     words: params.words
   });
+
+/**
+ * Whatever the conversion has said since this was last called.
+ *
+ * Polled rather than pushed: it needs no event permission and no listener to
+ * unregister, and a conversion lasts seconds. The lines are ffmpeg's own.
+ */
+export const takeConversionOutput = async (): Promise<string[]> =>
+  invoke<string[]>("take_conversion_output");
+
+/** Stops the conversion, and with it the import that asked for it. */
+export const cancelAudioConversion = async (): Promise<void> => {
+  await invoke("cancel_audio_conversion");
+};

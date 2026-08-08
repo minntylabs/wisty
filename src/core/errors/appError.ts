@@ -7,6 +7,9 @@ export type AppErrorCode =
   | "SAVE_EXTERNAL_DELETE"
   | "SAVE_EXTERNAL_APPEARED"
   | "SAVE_EXTERNAL_NOT_A_FILE"
+  // Building a container stopped because the user stopped its conversion.
+  | "IMPORT_CANCELLED"
+  | "IMPORT_FAILED"
   | "LAUNCH_OPEN_FAILED"
   | "SETTINGS_LOAD_FAILED"
   | "FONT_PICK_FAILED"

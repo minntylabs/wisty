@@ -39,6 +39,8 @@ import {
   openTextFilePath,
   probeAudioFile,
   readTextFileAtPath,
+  takeConversionOutput,
+  cancelAudioConversion,
   saveContainer,
   saveContainerPathAs,
   saveTextFile,
@@ -187,6 +189,14 @@ function App() {
       });
     });
 
+  /**
+   * The conversion is showing while it has said anything and has not finished.
+   * ffmpeg is talkative from its first moment, so this appears immediately for
+   * a recording that needs converting and never for one that does not.
+   */
+  const [conversionLines, setConversionLines] = createSignal<string[]>([]);
+  const [converting, setConverting] = createSignal(false);
+
   const confirmImportProblems = (problems: CueProblem[], cueCount: number): Promise<boolean> =>
     new Promise((resolve) => {
       setImportProblems({ lines: describeCueProblems(problems), cueCount, resolve });
@@ -248,7 +258,18 @@ function App() {
     confirmOpenLargeFile,
     showFileTooLarge,
     confirmImportProblems,
-    appVersion
+    appVersion,
+    conversion: {
+      takeOutput: takeConversionOutput,
+      onOutput: (lines) => {
+        setConverting(true);
+        setConversionLines((seen) => [...seen, ...lines]);
+      },
+      onFinished: () => {
+        setConverting(false);
+        setConversionLines([]);
+      }
+    }
   });
 
   const closeFlow = useCloseFlow({
@@ -604,6 +625,13 @@ function App() {
                 state.resolve();
               }
               closeLargeFileDialog();
+            }
+          }}
+          audioConversion={{
+            open: converting(),
+            lines: conversionLines(),
+            onCancel: () => {
+              void cancelAudioConversion();
             }
           }}
           importProblems={{

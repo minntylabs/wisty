@@ -8,6 +8,7 @@ import { FileLoadingModal } from "./FileLoadingModal";
 import { FileSavingModal } from "./FileSavingModal";
 import { LargeFileOpenModal } from "./LargeFileOpenModal";
 import { ImportProblemsModal } from "./ImportProblemsModal";
+import { AudioConversionModal } from "./AudioConversionModal";
 import { MenuBar } from "./MenuBar";
 import type { ErrorModalEntry } from "../core/app/useErrorModalQueue";
 import type { CursorPositionPayload } from "../core/editor/editorAdapter";
@@ -48,6 +49,11 @@ type AppShellProps = {
     cueCount: number;
     onCancel: () => void;
     onImportAnyway: () => void;
+  };
+  audioConversion: {
+    open: boolean;
+    lines: string[];
+    onCancel: () => void;
   };
   showTransferHitBlocker: boolean;
   loading: {
@@ -161,6 +167,12 @@ export const AppShell = (props: AppShellProps) => {
         cueCount={props.importProblems.cueCount}
         onCancel={props.importProblems.onCancel}
         onImportAnyway={props.importProblems.onImportAnyway}
+      />
+
+      <AudioConversionModal
+        open={props.audioConversion.open}
+        lines={props.audioConversion.lines}
+        onCancel={props.audioConversion.onCancel}
       />
 
       <Show when={props.showTransferHitBlocker}>

@@ -36,6 +36,8 @@ type HarnessOverrides = {
   dialogPath?: string;
   fileSize?: number;
   confirmOpenLargeFile?: () => Promise<boolean>;
+  readTextFile?: () => Promise<string>;
+  createContainer?: (params: { outputPath: string }) => Promise<{ path: string }>;
 };
 
 const createHarness = (overrides: HarnessOverrides = {}) => {
@@ -109,7 +111,9 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
       }),
       saveTextFilePathAs: async () => ({ kind: "saved" as const, filePath: "/tmp/other.txt" }),
       saveContainerPathAs: async () => ({ kind: "saved" as const, filePath: "/tmp/other.tsf" }),
-      saveTextExportPathAs: async () => ({ kind: "saved" as const, filePath: "/tmp/export.txt" })
+      saveTextExportPathAs: async () => ({ kind: "saved" as const, filePath: "/tmp/export.txt" }),
+      openSubtitleFilePath: async () => ({ kind: "opened" as const, filePath: "/transcripts/a.vtt" }),
+      openAudioFilePath: async () => ({ kind: "opened" as const, filePath: "/recordings/a.m4a" })
     },
     fileIo: {
       getFileSize: async () => overrides.fileSize ?? 10,
@@ -121,7 +125,9 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
         return version ? { kind: "present" as const, version } : { kind: "missing" as const };
       },
       fileExists: async () => true,
-      readTextFile: async () => "plain text",
+      readTextFile: overrides.readTextFile ?? (async () => "plain text"),
+      probeAudio: async () => ({ duration: 600, codec: "opus" }),
+      createContainer: vi.fn(overrides.createContainer ?? (async (params: { outputPath: string }) => ({ path: params.outputPath }))),
       streamReadTextFile,
       saveTextFile: async () => {},
       getDirectoryFromFilePath: () => "/archive",
@@ -155,6 +161,13 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     errors: { showError },
     playback: { release: releasePlayback },
     confirmOpenLargeFile: overrides.confirmOpenLargeFile ?? (async () => true),
+    confirmImportProblems: async () => true,
+    appVersion: () => "2.5.0",
+    conversion: {
+      takeOutput: async () => [],
+      onOutput: () => {},
+      onFinished: () => {}
+    },
     showFileTooLarge
   } as unknown as Parameters<typeof useFileLifecycle>[0];
 
@@ -1469,5 +1482,60 @@ describe("while a container is being opened", () => {
 
     finishOpen?.();
     await reopening;
+  });
+});
+
+const VTT = `WEBVTT
+
+00:00:01.000 --> 00:00:03.000
+<v ALICE>So we walked down.
+`;
+
+describe("importing a transcript", () => {
+  it("opens the container it built", async () => {
+    const h = createHarness({
+      readTextFile: async () => VTT,
+      createContainer: async () => ({ path: "/out/made.tsf" })
+    });
+
+    await h.lifecycle.importTranscript();
+
+    expect(h.openContainer).toHaveBeenCalledWith("/out/made.tsf");
+    expect(h.document.state.kind).toBe("container");
+    expect(h.showError).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Stopping the conversion is the user ending the import, not a fault. It has
+   * to end as quietly as pressing Cancel in any of the dialogs before it.
+   */
+  it("says nothing when the conversion was cancelled", async () => {
+    const h = createHarness({
+      readTextFile: async () => VTT,
+      createContainer: async () => {
+        throw { code: "IMPORT_CANCELLED", message: "The conversion was cancelled." };
+      }
+    });
+
+    await h.lifecycle.importTranscript();
+
+    expect(h.showError).not.toHaveBeenCalled();
+    expect(h.openContainer).not.toHaveBeenCalled();
+  });
+
+  it("still reports a conversion that failed", async () => {
+    const h = createHarness({
+      readTextFile: async () => VTT,
+      createContainer: async () => {
+        throw { code: "IMPORT_FAILED", message: "ffmpeg could not convert the recording: nope" };
+      }
+    });
+
+    await h.lifecycle.importTranscript();
+
+    expect(h.showError).toHaveBeenCalledWith(
+      "Unable to import transcript",
+      expect.objectContaining({ message: expect.stringContaining("ffmpeg") })
+    );
   });
 });

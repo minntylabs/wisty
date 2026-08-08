@@ -1137,6 +1137,7 @@ pub fn run() {
         .manage(LaunchArgState::new(launch_file))
         .manage(spellcheck::SpellState::default())
         .manage(tsf::TsfState::default())
+        .manage(tsf::ConversionState::default())
         .manage(playback::PlaybackState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1166,6 +1167,8 @@ pub fn run() {
             spellcheck::spell_remove_word,
             tsf::create_tsf,
             tsf::probe_audio_file,
+            tsf::take_conversion_output,
+            tsf::cancel_audio_conversion,
             tsf::open_tsf,
             tsf::save_tsf,
             tsf::close_tsf,

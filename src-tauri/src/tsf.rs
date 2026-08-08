@@ -473,11 +473,17 @@ pub fn open_tsf(
         audio_bytes: container.audio.len(),
     };
 
-    let mut open = state
-        .0
-        .lock()
-        .map_err(|error| format!("Cannot take the open-container lock: {error}"))?;
-    *open = Some(container);
+    // Reject queued plays before replacing the audio. `play_span` locks playback
+    // then reads the container, so never retain this mutex while calling arm(),
+    // which takes the playback lock.
+    playback.disarm();
+    {
+        let mut open = state
+            .0
+            .lock()
+            .map_err(|error| format!("Cannot take the open-container lock: {error}"))?;
+        *open = Some(container);
+    }
     // Opening a container is what re-arms playback after a release, and what
     // discards any player still holding the previous recording. Playback owns
     // that state rather than the frontend, because the frontend forgets it

@@ -17,6 +17,7 @@ const TRANSCRIPT = "ALICE: ⟦734.12–736.80⟧So we walked down.";
 
 type HarnessOverrides = {
   containerText?: string;
+  openContainer?: (filePath: string) => Promise<{ transcript: string; meta: Record<string, unknown>; audioBytes: number }>;
   /** What the open dialog returns. Defaults to the container. */
   dialogPath?: string;
   fileSize?: number;
@@ -29,11 +30,11 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
   /** Ordered log of the calls whose relative order matters. */
   const events: string[] = [];
   const showError = vi.fn(async () => {});
-  const openContainer = vi.fn(async () => ({
+  const openContainer = vi.fn(overrides.openContainer ?? (async () => ({
     transcript: overrides.containerText ?? TRANSCRIPT,
     meta: { tsf_version: 1, audio: { file: "audio.m4a", duration: 1709.61 } },
     audioBytes: 10_780_099
-  }));
+  })));
   const closeContainer = vi.fn(async () => {});
   const startSaveFileStream = vi.fn(async (filePath: string) => ({ streamId: "s", filePath }));
   const markersEnabled = vi.fn((enabled: boolean) => {
@@ -169,6 +170,33 @@ describe("opening a container", () => {
     expect(h.document.state.kind).toBe("container");
   });
 
+  it("keeps the open container usable when its replacement cannot open", async () => {
+    const h = createHarness({
+      openContainer: async (path) => {
+        if (path === "/archive/bad.tsf") {
+          throw new Error("bad archive");
+        }
+        return {
+          transcript: TRANSCRIPT,
+          meta: { tsf_version: 1, audio: { file: "audio.m4a", duration: 1709.61 } },
+          audioBytes: 10_780_099
+        };
+      }
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    h.closeContainer.mockClear();
+    h.markersEnabled.mockClear();
+    h.releasePlayback.mockClear();
+
+    await h.lifecycle.openFileAtPath("/archive/bad.tsf");
+
+    expect(h.document.state).toMatchObject({ kind: "container", filePath: CONTAINER });
+    expect(h.editorText.value).toBe(TRANSCRIPT);
+    expect(h.closeContainer).not.toHaveBeenCalled();
+    expect(h.releasePlayback).not.toHaveBeenCalled();
+    expect(h.markersEnabled).not.toHaveBeenCalledWith(false);
+  });
+
   /**
    * The dialog path opening a PLAIN FILE while a container is open.
    *
@@ -236,8 +264,6 @@ describe("marker handling follows the document", () => {
     const h = createHarness();
     await h.lifecycle.openFileAtPath(CONTAINER);
     expect(h.events).toEqual([
-      "markers-off",
-      "playback-released",
       "markers-on",
       "reset",
       "append-text"
@@ -318,6 +344,10 @@ describe("releasing the recording", () => {
     // player pointed at bytes that are on their way out.
     const h = createHarness();
     await h.lifecycle.openFileAtPath(CONTAINER);
+    h.events.length = 0;
+    h.releasePlayback.mockClear();
+    h.closeContainer.mockClear();
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
 
     const released = h.events.indexOf("playback-released");
     expect(released).toBeGreaterThanOrEqual(0);

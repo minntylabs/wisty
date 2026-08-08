@@ -59,8 +59,8 @@ const MAX_MATCH_LENGTH = 2 * EMPHASIS_MAX_LENGTH + 4;
  */
 const INLINE_PATTERN = new RegExp(
   [
-    String.raw`\*\*(?!\s)([^*]{1,${EMPHASIS_MAX_LENGTH}}?)(?<!\s)\*\*`,
-    String.raw`\*(?!\s)([^*\n]{1,${EMPHASIS_MAX_LENGTH}}?)(?<!\s)\*`,
+    String.raw`(?<!\*)\*\*(?![\s*])([^*]{1,${EMPHASIS_MAX_LENGTH}}?)(?<!\s)\*\*(?!\*)`,
+    String.raw`(?<!\*)\*(?![\s*])([^*\n]{1,${EMPHASIS_MAX_LENGTH}}?)(?<!\s)\*(?!\*)`,
     String.raw`(?<![\p{L}\p{N}_])_(?!\s)([^_\n]{1,${EMPHASIS_MAX_LENGTH}}?)(?<!\s)_(?![\p{L}\p{N}_])`
   ].join("|"),
   "gu"
@@ -109,6 +109,11 @@ const collectInline = (text: string, offset: number, ranges: Range<Decoration>[]
   INLINE_PATTERN.lastIndex = 0;
   for (let match = INLINE_PATTERN.exec(text); match; match = INLINE_PATTERN.exec(text)) {
     const [bold, italicStar, italicUnderscore] = [match[1], match[2], match[3]];
+    // A standalone italic pair inside an otherwise unparseable bold span is
+    // still nested syntax. Keep all of it raw rather than half-formatting it.
+    if (italicStar !== undefined && (text.slice(0, match.index).split("**").length - 1) % 2 === 1) {
+      continue;
+    }
     const content = bold ?? italicStar ?? italicUnderscore;
     const delimiter = bold !== undefined ? 2 : 1;
     const mark = bold !== undefined ? boldMark : italicMark;
@@ -207,6 +212,15 @@ const headingPrefix = (lineText: string): { level: number; length: number } => {
 };
 
 type LineSegment = { from: number; to: number };
+
+const isInsideOtherMarker = (state: EditorState, segment: LineSegment, marker: string): boolean => {
+  const otherMarker = marker === "*" ? "**" : "*";
+  const { from, to } = segment;
+  const doc = state.doc.toString();
+  const before = doc.slice(0, from).split(otherMarker).length - 1;
+  const after = doc.slice(to).split(otherMarker).length - 1;
+  return before % 2 === 1 && after % 2 === 1;
+};
 
 /**
  * The per-line pieces of [from, to], each trimmed to its non-whitespace
@@ -311,6 +325,12 @@ const toggleInlineWrap = (view: EditorView, marker: string): boolean => {
     }
 
     const segments = lineSegments(state, range.from, range.to);
+    // This editor deliberately supports a small, non-nesting formatting
+    // grammar. Do not turn a shortcut inside the other style into ambiguous
+    // `***` markup that formatted view would have to partially interpret.
+    if (segments.some((segment) => isInsideOtherMarker(state, segment, marker))) {
+      return { range };
+    }
     const wraps = segments.map((segment) => existingWrap(state, segment, marker));
     const changes: ChangeSpec[] = [];
 
@@ -335,9 +355,14 @@ const toggleInlineWrap = (view: EditorView, marker: string): boolean => {
     }
 
     const changeSet = state.changes(changes);
+    const first = segments[0];
+    const last = segments[segments.length - 1];
     return {
       changes: changeSet,
-      range: EditorSelection.range(changeSet.mapPos(range.from, 1), changeSet.mapPos(range.to, -1))
+      // The original range can include whitespace that was deliberately left
+      // outside the markers. Keep the selection over the actual formatted
+      // content so repeating the command sees the pair it just created.
+      range: EditorSelection.range(changeSet.mapPos(first.from, 1), changeSet.mapPos(last.to, -1))
     };
   });
 

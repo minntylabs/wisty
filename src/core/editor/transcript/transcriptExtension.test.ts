@@ -22,10 +22,12 @@ const createView = (doc = SAMPLE, extra: Extension = []) => {
   });
 
   let pointerPos: number | null = null;
+  let contentRect = new DOMRect(0, 0, 500, 500);
   // posAtCoords is overloaded (one signature never returns null), so the stub
   // is asserted rather than inferred.
   view.posAtCoords = ((): number | null => pointerPos) as typeof view.posAtCoords;
   view.coordsAtPos = () => null;
+  view.contentDOM.getBoundingClientRect = () => contentRect;
 
   const at = (pos: number | null) => {
     pointerPos = pos;
@@ -41,6 +43,13 @@ const createView = (doc = SAMPLE, extra: Extension = []) => {
     hover(pos: number | null) {
       at(pos);
       fire(new MouseEvent("mousemove", { bubbles: true }));
+    },
+    hoverAt(pos: number | null, clientX: number, clientY: number) {
+      at(pos);
+      fire(new MouseEvent("mousemove", { bubbles: true, clientX, clientY }));
+    },
+    setContentRect(rect: DOMRect) {
+      contentRect = rect;
     },
     wheel(deltaY: number) {
       return fire(new WheelEvent("wheel", { deltaY, deltaMode: 0, bubbles: true, cancelable: true }));
@@ -88,6 +97,16 @@ describe("hover anchoring", () => {
     const t = createView();
     t.hover(13);
     t.hover(null);
+    expect(t.selected()).toBe("");
+    t.view.destroy();
+  });
+
+  it("does not anchor when the pointer is in content padding above or left of text", () => {
+    const t = createView();
+    t.setContentRect(new DOMRect(20, 30, 500, 500));
+    t.hoverAt(3, 10, 40);
+    expect(t.selected()).toBe("");
+    t.hoverAt(3, 30, 20);
     expect(t.selected()).toBe("");
     t.view.destroy();
   });

@@ -13,6 +13,7 @@
 
 import { isolateHistory } from "@codemirror/commands";
 import {
+  Annotation,
   ChangeSet,
   EditorSelection,
   EditorState,
@@ -58,6 +59,8 @@ type Anchor =
   | { kind: "label"; from: number; to: number };
 
 const setAnchor = StateEffect.define<Anchor | null>();
+/** Marks the transient selection that follows the pointer in transcript mode. */
+export const transcriptHoverSelection = Annotation.define<boolean>();
 
 const anchorsEqual = (a: Anchor | null, b: Anchor | null): boolean => {
   if (a === null || b === null) {
@@ -253,7 +256,12 @@ const createWheelAccumulator = () => {
  * hovering the empty space right of a short line would select its last word.
  */
 const positionUnderPointer = (view: EditorView, event: MouseEvent): number | null => {
-  if (event.clientY > view.contentDOM.getBoundingClientRect().bottom) {
+  const contentRect = view.contentDOM.getBoundingClientRect();
+  if (
+    event.clientX < contentRect.left
+    || event.clientY < contentRect.top
+    || event.clientY > contentRect.bottom
+  ) {
     return null;
   }
 
@@ -308,7 +316,12 @@ const applyAnchor = (view: EditorView, anchor: Anchor | null): void => {
     ? EditorSelection.single(resolved.from, resolved.to)
     : EditorSelection.cursor(view.state.selection.main.from);
 
-  view.dispatch({ effects: setAnchor.of(anchor), selection, scrollIntoView: false });
+  view.dispatch({
+    effects: setAnchor.of(anchor),
+    selection,
+    scrollIntoView: false,
+    annotations: transcriptHoverSelection.of(true)
+  });
 };
 
 /**

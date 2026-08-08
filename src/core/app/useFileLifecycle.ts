@@ -509,7 +509,10 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    * not, so this must branch before either of them.
    */
   const openContainerAtPath = async (filePath: string) => {
-    await releaseContainer();
+    // `openContainer` reads and validates before Rust replaces its current
+    // container. Do that before changing the frontend, so a bad replacement
+    // leaves the open transcript usable instead of showing it without audio or
+    // marker support.
     const container = await deps.fileIo.openContainer(filePath);
     applySafeMode(false);
     // Before the text, so the markers are tracked from the moment it lands

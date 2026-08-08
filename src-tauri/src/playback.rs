@@ -497,13 +497,13 @@ mod tests {
         // a bug rather than something to honour. open_tsf does the arming.
         assert!(!state.armed(), "nothing to play before a container is opened");
 
-        state.arm();
+        state.arm().expect("a fresh playback state must not have a poisoned lock");
         assert!(state.armed(), "opening a container must accept plays");
 
         state.armed.store(false, Ordering::SeqCst);
         assert!(!state.armed(), "a play after a release must be dropped");
 
-        state.arm();
+        state.arm().expect("a fresh playback state must not have a poisoned lock");
         assert!(state.armed(), "opening the next container must accept plays again");
     }
 

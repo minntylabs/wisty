@@ -14,7 +14,7 @@ import {
 import { createSearchPanelAdapter } from "./searchPanelAdapter";
 import { createSpellService } from "../spellcheck/spellService";
 import { createSpellcheckExtension, requestSpellRescan } from "../spellcheck/spellcheckExtension";
-import { createTranscriptExtension } from "./transcript/transcriptExtension";
+import { createTranscriptExtension, transcriptHoverSelection } from "./transcript/transcriptExtension";
 import { createMarkers, setMarkersVisibleEffect } from "./markers/markerExtension";
 
 type DocChangedPayload = {
@@ -81,6 +81,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   let spellEnabled = false;
   let spellLoadedLanguage: string | undefined;
   let spellDictionaryDirty = false;
+  let spellConfigurationGeneration = 0;
 
   const transcriptExtension = createTranscriptExtension();
   // Markers are installed per document rather than always, because tracking
@@ -285,7 +286,13 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
         EditorView.updateListener.of((update) => {
           if (update.docChanged || update.selectionSet) {
             emitCursorPositionIfChanged(update.state);
-            options.onViewPositionChanged?.();
+            const onlyTranscriptHover =
+              update.selectionSet
+              && !update.docChanged
+              && update.transactions.every((tr) => tr.annotation(transcriptHoverSelection));
+            if (!onlyTranscriptHover) {
+              options.onViewPositionChanged?.();
+            }
           }
 
           const previousMode = update.startState.field(formatting.modeField);
@@ -549,10 +556,18 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   };
 
   const configureSpellcheck = async ({ enabled, language }: { enabled: boolean; language: string }) => {
+    const generation = ++spellConfigurationGeneration;
     if (enabled && language && (language !== spellLoadedLanguage || spellDictionaryDirty)) {
       const loaded = await spellService.loadDictionary(language);
+      if (generation !== spellConfigurationGeneration) {
+        return;
+      }
       spellLoadedLanguage = loaded ? language : undefined;
       spellDictionaryDirty = false;
+    }
+
+    if (generation !== spellConfigurationGeneration) {
+      return;
     }
 
     spellEnabled = enabled && spellLoadedLanguage !== undefined;
@@ -659,12 +674,20 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     if (!view) {
       return false;
     }
-    const copied = await copySelection();
-    if (!copied) {
+    const state = view.state;
+    const ranges = state.selection.ranges.filter((range) => !range.empty);
+    if (ranges.length === 0) {
       return false;
     }
+    const text = ranges.map((range) => state.sliceDoc(range.from, range.to)).join("\n");
+    await writeText(text);
+    // Clipboard access yields to the event loop. Do not turn a cursor move or
+    // edit during that wait into deletion of a different selection.
+    if (view.state !== state) {
+      return true;
+    }
     view.dispatch({
-      ...view.state.replaceSelection(""),
+      ...state.replaceSelection(""),
       userEvent: "delete.cut",
       annotations: [
         Transaction.addToHistory.of(true),

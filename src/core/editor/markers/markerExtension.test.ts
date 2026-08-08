@@ -345,6 +345,9 @@ describe("clicking an icon", () => {
     expect(icon).not.toBeNull();
     const event = new MouseEvent("mousedown", { button: 0, bubbles: true, cancelable: true, ...init });
     icon!.dispatchEvent(event);
+    if (event.button === 0) {
+      icon!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    }
     return event;
   };
 
@@ -359,7 +362,7 @@ describe("clicking an icon", () => {
     const { view, clicks } = createView();
     const icons = view.dom.querySelectorAll(".cm-marker-icon");
     expect(icons).toHaveLength(3);
-    icons[2].dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true, cancelable: true }));
+    icons[2].dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     expect(clicks).toEqual([[742.9, 745.3]]);
     view.destroy();
   });
@@ -379,6 +382,16 @@ describe("clicking an icon", () => {
     view.destroy();
   });
 
+  it("exposes each icon as a labelled button for keyboard and screen-reader users", () => {
+    const { view, clicks } = createView();
+    const icon = view.dom.querySelector<HTMLButtonElement>(".cm-marker-icon");
+    expect(icon?.tagName).toBe("BUTTON");
+    expect(icon?.getAttribute("aria-label")).toBe("Play audio from 734.12 to 736.80 seconds");
+    icon!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(clicks).toEqual([[734.12, 736.8]]);
+    view.destroy();
+  });
+
   // There is deliberately no test for clicking a hidden icon. Hiding markers
   // hides the icons, so there is nothing to click and playback is unavailable
   // by design. A test dispatching mousedown straight at the node passed
@@ -387,8 +400,7 @@ describe("clicking an icon", () => {
 });
 
 /**
- * Keyboard playback. Tabbing between icons was rejected — see playbackKeymap —
- * so these are the whole of the keyboard path and worth covering properly.
+ * Keyboard playback from the caret complements the labelled icon buttons.
  */
 describe("keyboard playback", () => {
   const press = (view: EditorView, key: string) => {

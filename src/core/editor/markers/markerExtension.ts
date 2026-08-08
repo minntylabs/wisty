@@ -56,24 +56,29 @@ class MarkerIconWidget extends WidgetType {
   }
 
   toDOM(): HTMLElement {
-    const wrapper = document.createElement("span");
+    const wrapper = document.createElement("button");
+    wrapper.type = "button";
     wrapper.className = "cm-marker-icon";
-    // Both times, for a tooltip: the icon deliberately shows nothing itself.
+    const label = `Play audio from ${this.start.toFixed(2)} to ${this.end.toFixed(2)} seconds`;
+    // Both times are available to sighted and assistive-technology users.
     wrapper.title = `${this.start.toFixed(2)}–${this.end.toFixed(2)}s`;
-    wrapper.setAttribute("aria-hidden", "true");
+    wrapper.setAttribute("aria-label", label);
     wrapper.innerHTML =
       '<svg viewBox="0 0 16 16" width="11" height="11" fill="currentColor" focusable="false">' +
       '<path d="M8 2.2 4.6 5H2.4A1.4 1.4 0 0 0 1 6.4v3.2A1.4 1.4 0 0 0 2.4 11h2.2L8 13.8Z"/>' +
       '<path d="M10.9 4.6a.7.7 0 0 0-.9 1 3.3 3.3 0 0 1 0 4.8.7.7 0 0 0 .9 1 4.7 4.7 0 0 0 0-6.8Z"/>' +
       "</svg>";
     // On the element rather than delegated from the editor, because
-    // ignoreEvent below stops these reaching the editor at all. mousedown
-    // rather than click: mousedown is what would otherwise start a selection,
-    // so claiming it there means the caret never moves and no text is dragged.
+    // ignoreEvent below stops these reaching the editor at all. Claim mousedown
+    // so a mouse activation never starts a text selection; click also covers
+    // the browser's Enter/Space activation for the semantic button.
     wrapper.addEventListener("mousedown", (event) => {
       if (event.button !== 0) {
         return;
       }
+      event.preventDefault();
+    });
+    wrapper.addEventListener("click", (event) => {
       event.preventDefault();
       this.onClick(this.start, this.end);
     });
@@ -262,6 +267,9 @@ const markersInField = (state: EditorState, markerField: StateField<DecorationSe
 const markerTheme = EditorView.baseTheme({
   ".cm-marker-icon": {
     display: "inline-block",
+    padding: "0",
+    border: "0",
+    background: "none",
     verticalAlign: "baseline",
     lineHeight: "1",
     // Flush against the following word in the document, so the icon supplies
@@ -272,6 +280,10 @@ const markerTheme = EditorView.baseTheme({
   },
   ".cm-marker-icon:hover": {
     opacity: "1"
+  },
+  ".cm-marker-icon:focus-visible": {
+    outline: "2px solid currentColor",
+    outlineOffset: "2px"
   },
   ".cm-markers-hidden .cm-marker-icon": {
     display: "none"
@@ -294,16 +306,9 @@ const markerTheme = EditorView.baseTheme({
  * plainly enough. What hiding removes is the mouse path, because there is
  * nothing left to click.
  *
- * Tabbing to the icons was the obvious idea and does not fit this editor. Tab
- * already inserts indentation (editorAdapter's indentWithTab); the icons are
- * replaced ranges that atomicRanges deliberately keeps the caret out of, so
- * making them focusable means putting tabindex on nodes the editor is actively
- * excluding; and Space on a focused element inside a contenteditable risks
- * typing a space into the document.
- *
- * Playing the sentence the caret is in needs none of that, and fits how the
- * editor is actually used — while tidying, the caret is already in the sentence
- * in question.
+ * The icons are semantic buttons for pointer and assistive-technology users.
+ * F5 remains the efficient editor-native path: while tidying, the caret is
+ * already in the sentence in question.
  *
  * The marker introducing that sentence is the last one at or before the caret
  * on its line. Falling back to the line's first marker covers the caret sitting

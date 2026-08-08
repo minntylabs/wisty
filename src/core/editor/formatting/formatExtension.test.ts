@@ -33,6 +33,22 @@ describe("formatting decorations", () => {
     view.destroy();
   });
 
+  it("leaves nested emphasis markup raw", () => {
+    const { view } = createView("***bold italic***");
+    expect(view.dom.querySelector(".cm-fmt-bold")).toBeNull();
+    expect(view.dom.querySelector(".cm-fmt-italic")).toBeNull();
+    expect(view.dom.textContent).toBe("***bold italic***");
+    view.destroy();
+  });
+
+  it("does not partially format italic syntax inside bold markup", () => {
+    const { view } = createView("**one *two* three**");
+    expect(view.dom.querySelector(".cm-fmt-bold")).toBeNull();
+    expect(view.dom.querySelector(".cm-fmt-italic")).toBeNull();
+    expect(view.dom.textContent).toBe("**one *two* three**");
+    view.destroy();
+  });
+
   it("leaves snake_case alone (underscore italic requires word boundaries)", () => {
     const { view } = createView("snake_case_name stays_put");
     expect(view.dom.querySelector(".cm-fmt-italic")).toBeNull();
@@ -188,6 +204,19 @@ describe("toggleBold", () => {
     view.dispatch({ selection: EditorSelection.range(0, 10) });
     toggleBold(view);
     expect(view.state.doc.toString()).toBe("  **padded**  ");
+    expect(view.state.selection.main).toEqual(EditorSelection.range(4, 10));
+    toggleBold(view);
+    expect(view.state.doc.toString()).toBe("  padded  ");
+  });
+
+  it("round-trips a selection with trailing whitespace", () => {
+    const { view } = createView("one two three");
+    view.dispatch({ selection: EditorSelection.range(0, 4) });
+    toggleBold(view);
+    expect(view.state.doc.toString()).toBe("**one** two three");
+    expect(view.state.selection.main).toEqual(EditorSelection.range(2, 5));
+    toggleBold(view);
+    expect(view.state.doc.toString()).toBe("one two three");
   });
 });
 
@@ -214,12 +243,11 @@ describe("toggleItalic", () => {
     expect(view.state.selection.main.head).toBe(0);
   });
 
-  it("never peels a layer off bold text (ignores adjoining ** delimiters)", () => {
+  it("does not create nested italic markup inside bold text", () => {
     const { view } = createView("**hello**");
     view.dispatch({ selection: EditorSelection.range(2, 7) });
     toggleItalic(view);
-    // Wraps with single '*' markers instead of unwrapping the bold ones.
-    expect(view.state.doc.toString()).toBe("***hello***");
+    expect(view.state.doc.toString()).toBe("**hello**");
   });
 });
 

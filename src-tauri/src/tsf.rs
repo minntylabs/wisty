@@ -615,7 +615,12 @@ pub fn close_tsf(
     Ok(())
 }
 
-fn source_is_unchanged(open: &OpenTsf) -> Result<(), String> {
+const SOURCE_CHANGED: &str = "The transcript container changed on disk after it was opened. Reopen it before saving so no changes are lost.";
+
+/// Length and modification time only — O(1), and wrong in one direction: an
+/// edit that preserves both slips through. Use it to refuse a save early,
+/// never to decide that publishing one is safe.
+fn source_metadata_is_unchanged(open: &OpenTsf) -> Result<(), String> {
     let current = std::fs::metadata(&open.path).map_err(|error| {
         format!(
             "Cannot check {} before saving: {error}",
@@ -625,10 +630,18 @@ fn source_is_unchanged(open: &OpenTsf) -> Result<(), String> {
     if current.len() != open.source_metadata.len()
         || current.modified().ok() != open.source_metadata.modified().ok()
     {
-        return Err("The transcript container changed on disk after it was opened. Reopen it before saving so no changes are lost.".to_string());
+        return Err(SOURCE_CHANGED.to_string());
     }
+    Ok(())
+}
+
+/// The check that decides whether the rename may happen: same metadata *and*
+/// same bytes, because a same-sized edit within a timestamp's resolution is
+/// exactly the case the fingerprint exists to catch. Reads the whole container.
+fn source_is_unchanged(open: &OpenTsf) -> Result<(), String> {
+    source_metadata_is_unchanged(open)?;
     if fingerprint_file(&open.path)? != open.source_fingerprint {
-        return Err("The transcript container changed on disk after it was opened. Reopen it before saving so no changes are lost.".to_string());
+        return Err(SOURCE_CHANGED.to_string());
     }
     Ok(())
 }
@@ -730,7 +743,10 @@ pub fn save_tsf(
             open.unsupported_members.join(", ")
         ));
     }
-    source_is_unchanged(&open)?;
+    // Cheap first: refusing here costs one stat instead of rezipping the whole
+    // recording only to throw the result away. The full fingerprint runs after
+    // the write, where it is what the rename actually depends on.
+    source_metadata_is_unchanged(&open)?;
     let output = PathBuf::from(path);
     let parent = output
         .parent()
@@ -1148,6 +1164,33 @@ mod tests {
         let path = written(&dir, "before", None);
         let open = read_tsf(&path).expect("open");
         std::fs::write(&path, b"replacement").unwrap();
+        assert!(source_is_unchanged(&open).is_err());
+    }
+
+    /// Pins why the save checks twice with different strength: the cheap check
+    /// exists to refuse early, not to decide that publishing is safe.
+    #[test]
+    fn the_cheap_check_misses_what_the_fingerprint_catches() {
+        let dir = temp_dir("same-size-edit");
+        let path = written(&dir, "before", None);
+        let open = read_tsf(&path).expect("open");
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        std::fs::write(&path, &bytes).unwrap();
+        // Restore the timestamp too, so nothing but the bytes themselves
+        // distinguishes this from the container that was opened.
+        let times =
+            std::fs::FileTimes::new().set_modified(open.source_metadata.modified().unwrap());
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+
+        assert!(source_metadata_is_unchanged(&open).is_ok());
         assert!(source_is_unchanged(&open).is_err());
     }
 

@@ -13,7 +13,10 @@
     "package:user-tarball": "bash scripts/package-user-tarball.sh",
     "release:linux": "npm run tauri:bundle && npm run package:user-tarball",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "verify": "npm run test && npm run typecheck && npm run test:rust"
   },
   "license": "GPL-3.0-or-later",
   "dependencies": {

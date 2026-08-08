@@ -176,7 +176,8 @@ fn save_personal_words(personal: &PersonalDictionary) -> Result<(), String> {
         return Ok(());
     };
     let contents = format!("{}\n", personal.words.join("\n"));
-    fs::write(path, contents).map_err(|error| format!("Unable to save personal dictionary: {error}"))
+    fs::write(path, contents)
+        .map_err(|error| format!("Unable to save personal dictionary: {error}"))
 }
 
 #[cfg(test)]
@@ -363,10 +364,7 @@ pub fn spell_remove_word(
 /// personal word) can restore it, since a fresh `Hunspell` instance has no
 /// memory of words added to the previous one.
 #[tauri::command]
-pub fn spell_ignore_word(
-    state: tauri::State<'_, SpellState>,
-    word: String,
-) -> Result<(), String> {
+pub fn spell_ignore_word(state: tauri::State<'_, SpellState>, word: String) -> Result<(), String> {
     {
         let mut guard = state
             .dictionary

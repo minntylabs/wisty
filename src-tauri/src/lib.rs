@@ -687,6 +687,25 @@ fn close_launch_file_stream(
     Ok(())
 }
 
+/// The file a save actually writes to.
+///
+/// A save is published by renaming a temporary file over the target, and rename
+/// replaces the *path*: a symlink would be replaced by an ordinary file, and the
+/// file it pointed at left holding the old text — the edit silently detached
+/// from the file that was opened. A dotfile linked into a repository is the
+/// everyday case, and nothing about it would look wrong afterwards.
+///
+/// Resolving first puts the temporary file beside the real one, on the same
+/// filesystem, and renames over that instead. It also aligns the save with the
+/// version check, which has always followed links: `stat` reports the target's
+/// size, device and inode, so those are the ones the rename should replace.
+///
+/// A path that does not resolve — a file being created, or a dangling link — is
+/// used exactly as given.
+fn resolve_save_target(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn build_save_temp_path(target_path: &Path, stream_id: &str) -> Result<PathBuf, String> {
     let parent = target_path.parent().ok_or_else(|| {
         format!(
@@ -831,7 +850,9 @@ fn start_save_stream(
         return Err("Save path cannot be empty".to_string());
     }
 
-    let target_path = PathBuf::from(&file_path);
+    // The document keeps the path it was opened with; only the write follows
+    // it to the file it names.
+    let target_path = resolve_save_target(&PathBuf::from(&file_path));
 
     let stream_id = {
         let mut counter = state
@@ -1442,5 +1463,60 @@ mod tests {
             before != after,
             "a same-size rewrite is detectable exactly when its millisecond differs"
         );
+    }
+
+    /// A symlinked file — a dotfile linked into a repository, most often — is
+    /// the file that must change, not the link.
+    #[test]
+    fn a_save_through_a_symlink_writes_the_file_it_points_at() {
+        let directory = test_directory("symlink");
+        let real = directory.join("real.txt");
+        std::fs::write(&real, "before").unwrap();
+        let link = directory.join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let expected = expect_present(&link);
+
+        save(&state(), &link, "after", Some(expected)).expect("save should land");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link was replaced by an ordinary file"
+        );
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "after");
+    }
+
+    /// The version check has always followed the link, and now the write does
+    /// too: an edit to the file behind it is the conflict it looks like.
+    #[test]
+    fn a_save_through_a_symlink_still_sees_an_edit_to_the_file_behind_it() {
+        let directory = test_directory("symlink-conflict");
+        let real = directory.join("real.txt");
+        std::fs::write(&real, "before").unwrap();
+        let link = directory.join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let expected = expect_present(&link);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::fs::write(&real, "theirs").unwrap();
+
+        let code = save(&state(), &link, "ours", Some(expected)).unwrap_err();
+
+        assert_eq!(code, SAVE_EXTERNAL_CHANGE);
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "theirs");
+    }
+
+    /// Nothing to resolve, so the path is taken as given and a file appears
+    /// where the link was.
+    #[test]
+    fn a_save_to_a_dangling_symlink_creates_a_file_at_the_link() {
+        let directory = test_directory("symlink-dangling");
+        let link = directory.join("link.txt");
+        std::os::unix::fs::symlink(directory.join("gone.txt"), &link).unwrap();
+
+        save(&state(), &link, "fresh", None).expect("save should land");
+
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "fresh");
     }
 }

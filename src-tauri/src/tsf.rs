@@ -620,13 +620,25 @@ const SOURCE_CHANGED: &str = "The transcript container changed on disk after it 
 /// Length and modification time only — O(1), and wrong in one direction: an
 /// edit that preserves both slips through. Use it to refuse a save early,
 /// never to decide that publishing one is safe.
+/// Whether the container this document was opened from is still as it was.
+///
+/// A source that has been *deleted* is not a conflict and does not stop a save.
+/// The check exists to stop a repack mixing the recording held in memory into a
+/// file some other writer has since changed; a path with no file at it has
+/// nothing to mix into. Refusing there would leave the transcript unsaveable
+/// anywhere — including back where it came from — while everything needed to
+/// write it, the audio included, sits in `OpenTsf`.
 fn source_metadata_is_unchanged(open: &OpenTsf) -> Result<(), String> {
-    let current = std::fs::metadata(&open.path).map_err(|error| {
-        format!(
-            "Cannot check {} before saving: {error}",
-            open.path.display()
-        )
-    })?;
+    let current = match std::fs::metadata(&open.path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "Cannot check {} before saving: {error}",
+                open.path.display()
+            ));
+        }
+    };
     if current.len() != open.source_metadata.len()
         || current.modified().ok() != open.source_metadata.modified().ok()
     {
@@ -640,6 +652,11 @@ fn source_metadata_is_unchanged(open: &OpenTsf) -> Result<(), String> {
 /// exactly the case the fingerprint exists to catch. Reads the whole container.
 fn source_is_unchanged(open: &OpenTsf) -> Result<(), String> {
     source_metadata_is_unchanged(open)?;
+    if !open.path.exists() {
+        // Deleted, as above: nothing to fingerprint and nothing to conflict
+        // with. The metadata check has already accepted it.
+        return Ok(());
+    }
     if fingerprint_file(&open.path)? != open.source_fingerprint {
         return Err(SOURCE_CHANGED.to_string());
     }
@@ -1418,5 +1435,34 @@ mod tests {
 
         assert!(same_file(&roundabout, &audio));
         assert!(!same_file(&dir.join("other.tsf"), &audio));
+    }
+
+    /// A container deleted while it is open must still be saveable.
+    ///
+    /// Everything the repack needs is in memory — the transcript from the
+    /// editor, the recording in `OpenTsf` — so refusing here would strand the
+    /// only copy of a tidied transcript, and its audio with it.
+    #[test]
+    fn a_deleted_source_does_not_stop_the_repack() {
+        let dir = temp_dir("deleted-source-save");
+        let path = written(&dir, "before", None);
+        let open = read_tsf(&path).expect("open");
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(source_is_unchanged(&open).is_ok());
+    }
+
+    /// The distinction the fix rests on: gone is not the same as changed.
+    #[test]
+    fn a_changed_source_still_stops_the_repack_after_one_was_deleted() {
+        let dir = temp_dir("changed-not-deleted");
+        let path = written(&dir, "before", None);
+        let open = read_tsf(&path).expect("open");
+        std::fs::remove_file(&path).unwrap();
+        // Something else takes the name. That is a different file, not the one
+        // this document came from, so publishing over it is refused.
+        std::fs::write(&path, b"someone else's file").unwrap();
+
+        assert!(source_is_unchanged(&open).is_err());
     }
 }

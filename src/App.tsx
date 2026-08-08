@@ -11,6 +11,7 @@ import type { ErrorReporter } from "./core/app/contracts";
 import { CommandsProvider, MenuProvider } from "./core/app/appContexts";
 import { useAppLifecycle } from "./core/app/useAppLifecycle";
 import { useCloseFlow } from "./core/app/useCloseFlow";
+import { useEditorSettingsSync } from "./core/app/useEditorSettingsSync";
 import { createCoalescingTrigger } from "./core/app/coalescingTrigger";
 import { useFileLifecycle } from "./core/app/useFileLifecycle";
 import { useGlobalKeyRouting } from "./core/app/useGlobalKeyRouting";
@@ -509,29 +510,12 @@ function App() {
     handleWindowCloseRequested: closeFlow.handleWindowCloseRequested
   });
 
-  createEffect(() => {
-    document.documentElement.dataset.theme = settingsStore.state.themeMode;
-    settingsStore.state.fontFamily;
-    settingsStore.state.fontSize;
-    settingsStore.state.fontStyle;
-    settingsStore.state.fontWeight;
-    settingsStore.state.textWrapEnabled;
-    settingsStore.state.activeLineHighlightEnabled;
-    // Read so that showing or hiding the status bar reaches the editor: it is
-    // what decides whether the document is worth counting words in.
-    settingsStore.state.statusBarEnabled;
-    editorAdapter.applySettings();
-  });
-
-  createEffect(() => {
-    editorAdapter.setFormatMode(settingsStore.state.formatViewMode);
-  });
-
-  createEffect(() => {
-    void editorAdapter.configureSpellcheck({
-      enabled: settingsStore.state.spellCheckEnabled,
-      language: settingsStore.state.spellCheckLanguage
-    });
+  useEditorSettingsSync({
+    settings: settingsStore,
+    editor: editorAdapter,
+    applyTheme: (mode) => {
+      document.documentElement.dataset.theme = mode;
+    }
   });
 
   useWindowTitleSync({

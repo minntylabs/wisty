@@ -83,6 +83,43 @@ export const openTextFilePath = async (defaultPath?: string): Promise<OpenFilePa
   };
 };
 
+const openFilePathWithFilter = async (
+  name: string,
+  extensions: string[],
+  defaultPath?: string
+): Promise<OpenFilePathResult> => {
+  const selected = normalizeDialogPath(await openDialog({
+    multiple: false,
+    defaultPath: defaultPath || undefined,
+    filters: [{ name, extensions }]
+  }));
+  return selected ? { kind: "opened", filePath: selected } : { kind: "cancelled" };
+};
+
+/**
+ * The timed transcript an import starts from.
+ *
+ * VTT and SRT only: §5.1 of the plan settled the input surface deliberately,
+ * and anything else would be a format Wisty cannot specify or test against
+ * files it did not produce.
+ */
+export const openSubtitleFilePath = (defaultPath?: string) =>
+  openFilePathWithFilter("Timed transcript", ["vtt", "srt"], defaultPath);
+
+/**
+ * The recording the transcript describes.
+ *
+ * Filtered generously, because the input surface is meant to be "any audio
+ * file": what Wisty can actually read is settled by probing the file, which
+ * reports a real reason, rather than by the name it happens to have.
+ */
+export const openAudioFilePath = (defaultPath?: string) =>
+  openFilePathWithFilter(
+    "Audio",
+    ["m4a", "mp4", "aac", "mp3", "wav", "flac", "ogg", "opus", "webm", "mka"],
+    defaultPath
+  );
+
 export const saveTextFileAs = async (text: string, defaultPath?: string): Promise<SaveAsResult> => {
   const selected = await saveTextFilePathAs(defaultPath);
   if (selected.kind === "cancelled") {
@@ -315,3 +352,47 @@ export const closeContainer = async (): Promise<void> => {
 export const saveContainer = async (filePath: string, transcript: string): Promise<void> => {
   await invoke("save_tsf", { path: filePath, transcript });
 };
+
+/** What a recording says about itself, read before a container is built from it. */
+export type AudioFacts = {
+  /** Seconds, read from the file rather than taken on trust. */
+  duration: number;
+  codec: string;
+};
+
+export const probeAudioFile = async (filePath: string): Promise<AudioFacts> =>
+  invoke<AudioFacts>("probe_audio_file", { path: filePath });
+
+export type CreateContainerParams = {
+  outputPath: string;
+  transcript: string;
+  audioPath: string;
+  meta: Record<string, unknown>;
+  /** Word timings, when the transcript came with any. */
+  words?: string;
+};
+
+export type CreateContainerResult = {
+  path: string;
+  duration: number;
+  codec: string;
+  bytes: number;
+};
+
+/**
+ * Builds a container from a transcript and a recording.
+ *
+ * The audio is named by path rather than passed: Rust copies it into the
+ * archive without it ever crossing the bridge, as everywhere else the recording
+ * is involved.
+ */
+export const createContainer = async (
+  params: CreateContainerParams
+): Promise<CreateContainerResult> =>
+  invoke<CreateContainerResult>("create_tsf", {
+    outputPath: params.outputPath,
+    transcript: params.transcript,
+    audioPath: params.audioPath,
+    meta: params.meta,
+    words: params.words
+  });

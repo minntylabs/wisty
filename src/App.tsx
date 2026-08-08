@@ -26,14 +26,18 @@ import { createPlaybackService } from "./core/audio/playbackService";
 import { tauriPlaybackPort } from "./core/audio/playbackPort";
 import {
   closeContainer,
+  createContainer,
   fileExists,
   getDirectoryFromFilePath,
   getFileSize,
   getTextFilePresence,
   isContainerPath,
+  openAudioFilePath,
   openContainer,
+  openSubtitleFilePath,
   openTextFile,
   openTextFilePath,
+  probeAudioFile,
   readTextFileAtPath,
   saveContainer,
   saveContainerPathAs,
@@ -42,6 +46,8 @@ import {
   saveTextFilePathAs,
   streamReadTextFileAtPath
 } from "./core/files/fileService";
+import { describeCueProblems } from "./core/tsf/cueProblems";
+import type { CueProblem } from "./core/tsf/vtt";
 import { createSettingsStore } from "./core/settings/settingsStore";
 import { chooseEditorFont } from "./core/fonts/fontDialog";
 import { toAppError } from "./core/errors/appError";
@@ -77,6 +83,13 @@ type LargeFileDialogState =
       resolve: () => void;
     };
 
+/** An import waiting on an answer about cues that do not fit the recording. */
+type ImportProblemsState = {
+  lines: string[];
+  cueCount: number;
+  resolve: (accepted: boolean) => void;
+};
+
 function App() {
   const appWindow = getCurrentWindow();
   const documentStore = createDocumentStore();
@@ -87,6 +100,7 @@ function App() {
   const [addedWords, setAddedWords] = createSignal<string[]>([]);
   const [appVersion, setAppVersion] = createSignal("2.0.1");
   const [largeFileDialog, setLargeFileDialog] = createSignal<LargeFileDialogState | null>(null);
+  const [importProblems, setImportProblems] = createSignal<ImportProblemsState | null>(null);
   const [cursorPosition, setCursorPosition] = createSignal<CursorPositionPayload>({
     currentLine: 1,
     totalLines: 1,
@@ -173,6 +187,18 @@ function App() {
       });
     });
 
+  const confirmImportProblems = (problems: CueProblem[], cueCount: number): Promise<boolean> =>
+    new Promise((resolve) => {
+      setImportProblems({ lines: describeCueProblems(problems), cueCount, resolve });
+    });
+
+  const closeImportProblems = (accepted: boolean) => {
+    const pending = importProblems();
+    setImportProblems(null);
+    pending?.resolve(accepted);
+    editorAdapter.focus();
+  };
+
   const fileLifecycle = useFileLifecycle({
     editor: editorAdapter,
     document: documentStore,
@@ -181,6 +207,8 @@ function App() {
     fileDialogs: {
       openTextFile,
       openTextFilePath,
+      openSubtitleFilePath,
+      openAudioFilePath,
       saveTextFilePathAs,
       saveContainerPathAs,
       saveTextExportPathAs
@@ -196,7 +224,9 @@ function App() {
       isContainerPath,
       openContainer,
       closeContainer,
-      saveContainer
+      saveContainer,
+      probeAudio: probeAudioFile,
+      createContainer
     },
     playback: { release: playback.release },
     launchFileStream: {
@@ -216,7 +246,9 @@ function App() {
     },
     errors,
     confirmOpenLargeFile,
-    showFileTooLarge
+    showFileTooLarge,
+    confirmImportProblems,
+    appVersion
   });
 
   const closeFlow = useCloseFlow({
@@ -573,6 +605,13 @@ function App() {
               }
               closeLargeFileDialog();
             }
+          }}
+          importProblems={{
+            open: importProblems() !== null,
+            problems: importProblems()?.lines ?? [],
+            cueCount: importProblems()?.cueCount ?? 0,
+            onCancel: () => closeImportProblems(false),
+            onImportAnyway: () => closeImportProblems(true)
           }}
           showTransferHitBlocker={
             (fileLifecycle.loadingState.isLoading() && !fileLifecycle.loadingState.showLoadingOverlay())

@@ -27,6 +27,7 @@ type BuildCommandsDeps = {
     saveFile: () => Promise<void>;
     saveFileAs: () => Promise<void>;
     exportText: () => Promise<void>;
+    importTranscript: () => Promise<void>;
     chooseEditorFont: () => Promise<void>;
     safeModeActive: Accessor<boolean>;
   };
@@ -120,6 +121,13 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
       label: "Export to Text...",
       enabled: deps.isContainerDocument,
       run: deps.fileLifecycle.exportText
+    },
+    {
+      id: "file.importTranscript",
+      label: "Import Transcript...",
+      // Ends by opening the container it builds, so it replaces the open
+      // document and asks about unsaved work first, as Open does.
+      run: () => deps.closeFlow.runOrConfirmDiscard(deps.fileLifecycle.importTranscript)
     },
     {
       id: "file.quit",
@@ -395,6 +403,8 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
         { type: "command", commandId: "file.save" },
         { type: "command", commandId: "file.saveAs" },
         { type: "command", commandId: "file.exportText", visible: deps.isContainerDocument },
+        { type: "separator" },
+        { type: "command", commandId: "file.importTranscript" },
         { type: "separator", visible: () => deps.settings.state.recentFiles.length > 0 },
         { type: "command", commandId: "file.recent.1", visible: () => deps.settings.state.recentFiles.length >= 1 },
         { type: "command", commandId: "file.recent.2", visible: () => deps.settings.state.recentFiles.length >= 2 },

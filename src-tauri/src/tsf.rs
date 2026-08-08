@@ -46,6 +46,7 @@ pub struct CreateTsfResult {
 }
 
 /// What the audio file itself says about itself.
+#[derive(Serialize)]
 struct AudioFacts {
     duration: f64,
     codec: String,
@@ -798,6 +799,20 @@ pub fn save_tsf(
         .map_err(|error| format!("Cannot stat saved container: {error}"))?;
     current.source_fingerprint = fingerprint_file(&current.path)?;
     Ok(())
+}
+
+/// What a recording is, before anything is written.
+///
+/// The importer asks so that it can check the transcript against the audio it
+/// claims to describe — a last cue beyond the end of the recording is how a
+/// mismatched pair of files announces itself — and so that it knows whether
+/// this is audio the player can read.
+///
+/// `async` for the same reason as the rest: probing opens and parses the file.
+#[tauri::command(async)]
+pub fn probe_audio_file(path: String) -> Result<serde_json::Value, String> {
+    let facts = probe_audio(Path::new(&path))?;
+    serde_json::to_value(facts).map_err(|error| format!("Cannot report audio facts: {error}"))
 }
 
 /// `async` for the same reason as `save_tsf`: probing, compressing and syncing

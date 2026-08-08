@@ -97,6 +97,10 @@ export type LaunchFileStreamPort = {
 export type FileDialogsPort = {
   openTextFile: (defaultPath?: string) => Promise<OpenTextFileResult>;
   openTextFilePath: (defaultPath?: string) => Promise<OpenTextFilePathResult>;
+  /** The .vtt or .srt an import starts from. */
+  openSubtitleFilePath: (defaultPath?: string) => Promise<OpenTextFilePathResult>;
+  /** The recording that transcript describes. */
+  openAudioFilePath: (defaultPath?: string) => Promise<OpenTextFilePathResult>;
   saveTextFilePathAs: (defaultPath?: string) => Promise<SaveTextFileAsResult>;
   saveContainerPathAs: (defaultPath?: string) => Promise<SaveTextFileAsResult>;
   saveTextExportPathAs: (defaultPath?: string) => Promise<SaveTextFileAsResult>;
@@ -117,6 +121,14 @@ export type FileIoPort = {
   openContainer: (filePath: string) => Promise<OpenContainerResult>;
   closeContainer: () => Promise<void>;
   saveContainer: (filePath: string, transcript: string) => Promise<void>;
+  /** What a recording is, asked before a container is built from it. */
+  probeAudio: (filePath: string) => Promise<{ duration: number; codec: string }>;
+  createContainer: (params: {
+    outputPath: string;
+    transcript: string;
+    audioPath: string;
+    meta: Record<string, unknown>;
+  }) => Promise<{ path: string }>;
 };
 
 export type AppendTextOptions = {

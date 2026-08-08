@@ -41,6 +41,7 @@ const createDeps = (overrides: {
       saveFile: vi.fn(async () => {}),
       saveFileAs: vi.fn(async () => {}),
       exportText: vi.fn(async () => {}),
+      importTranscript: vi.fn(async () => {}),
       chooseEditorFont: vi.fn(async () => {}),
       safeModeActive: () => false
     },

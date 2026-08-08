@@ -7,6 +7,7 @@ import { ExternalChangeBanner, type ExternalChangeBannerKind } from "./ExternalC
 import { FileLoadingModal } from "./FileLoadingModal";
 import { FileSavingModal } from "./FileSavingModal";
 import { LargeFileOpenModal } from "./LargeFileOpenModal";
+import { ImportProblemsModal } from "./ImportProblemsModal";
 import { MenuBar } from "./MenuBar";
 import type { ErrorModalEntry } from "../core/app/useErrorModalQueue";
 import type { CursorPositionPayload } from "../core/editor/editorAdapter";
@@ -40,6 +41,13 @@ type AppShellProps = {
     onCancel: () => void;
     onOpenAnyway: () => void;
     onAcknowledge: () => void;
+  };
+  importProblems: {
+    open: boolean;
+    problems: string[];
+    cueCount: number;
+    onCancel: () => void;
+    onImportAnyway: () => void;
   };
   showTransferHitBlocker: boolean;
   loading: {
@@ -145,6 +153,14 @@ export const AppShell = (props: AppShellProps) => {
         onCancel={props.largeFileDialog.onCancel}
         onOpenAnyway={props.largeFileDialog.onOpenAnyway}
         onAcknowledge={props.largeFileDialog.onAcknowledge}
+      />
+
+      <ImportProblemsModal
+        open={props.importProblems.open}
+        problems={props.importProblems.problems}
+        cueCount={props.importProblems.cueCount}
+        onCancel={props.importProblems.onCancel}
+        onImportAnyway={props.importProblems.onImportAnyway}
       />
 
       <Show when={props.showTransferHitBlocker}>

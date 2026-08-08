@@ -772,3 +772,15 @@ body {
   padding: 4px 10px;
   color: var(--menu-shortcut);
 }
+
+.import-problems {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  color: var(--status-text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.import-problems li + li {
+  margin-top: 4px;
+}

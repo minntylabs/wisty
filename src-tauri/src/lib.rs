@@ -1165,6 +1165,7 @@ pub fn run() {
             spellcheck::spell_list_added_words,
             spellcheck::spell_remove_word,
             tsf::create_tsf,
+            tsf::probe_audio_file,
             tsf::open_tsf,
             tsf::save_tsf,
             tsf::close_tsf,

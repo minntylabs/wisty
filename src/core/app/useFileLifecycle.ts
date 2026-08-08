@@ -14,6 +14,8 @@ import type { LaunchFileStreamChunkResult } from "../window/launchArgService";
 import { toAppError, type AppErrorCode } from "../errors/appError";
 import { createExternalChangeMonitor, externalChangeKindFromSaveError } from "./externalChangeMonitor";
 import { stripMarkers } from "../tsf/markers";
+import { importTranscript } from "../tsf/importTranscript";
+import type { CueProblem } from "../tsf/vtt";
 
 type UseFileLifecycleDeps = {
   editor: Pick<EditorPort, "focus" | "getText" | "snapshotText" | "setText" | "append" | "reset" | "setLargeLineSafeMode" | "getRevision" | "setMarkersEnabled">;
@@ -51,6 +53,13 @@ type UseFileLifecycleDeps = {
   playback: { release: () => void };
   confirmOpenLargeFile: (filePath: string, sizeBytes: number) => Promise<boolean>;
   showFileTooLarge: (filePath: string, sizeBytes: number) => Promise<void>;
+  /**
+   * Asked when an imported transcript does not sit comfortably against the
+   * recording. None of those problems refuses the import on its own.
+   */
+  confirmImportProblems: (problems: CueProblem[], cueCount: number) => Promise<boolean>;
+  /** For the provenance an imported container records about its maker. */
+  appVersion: () => string;
 };
 
 const SOFT_FILE_LIMIT_BYTES = 50 * 1024 * 1024;
@@ -1009,6 +1018,40 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   /**
+   * Builds a container from a timed transcript and a recording, and opens it.
+   *
+   * The flow itself is `importTranscript`, which owns the order of the
+   * questions and knows nothing of dialogs; this is where it meets the app.
+   * Opening the result is the point — an import that left the new container
+   * closed would be a file operation the user has to go and find.
+   */
+  const importTranscriptFile = async () => {
+    await runWithErrorMessage(async () => {
+      const result = await importTranscript({
+        dialogs: {
+          pickSubtitles: () => deps.fileDialogs.openSubtitleFilePath(deps.settings.state.lastDirectory),
+          pickAudio: (defaultPath) => deps.fileDialogs.openAudioFilePath(defaultPath),
+          pickContainerPath: (defaultPath) => deps.fileDialogs.saveContainerPathAs(defaultPath)
+        },
+        readTextFile: deps.fileIo.readTextFile,
+        probeAudio: deps.fileIo.probeAudio,
+        createContainer: deps.fileIo.createContainer,
+        confirmProblems: deps.confirmImportProblems,
+        appVersion: deps.appVersion
+      });
+
+      if (result.kind === "cancelled") {
+        deps.editor.focus();
+        return;
+      }
+
+      await releaseContainer();
+      await openContainerAtPath(result.filePath);
+      await rememberRecentFile(result.filePath);
+    }, "Unable to import transcript");
+  };
+
+  /**
    * Reloads `filePath`, or the file the standing conflict is about.
    *
    * The path is a parameter because this can run a moment after the click that
@@ -1115,6 +1158,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     saveFile,
     saveFileAs,
     exportText,
+    importTranscript: importTranscriptFile,
     chooseEditorFont,
     requestCancelLoading,
     requestCancelSaving,

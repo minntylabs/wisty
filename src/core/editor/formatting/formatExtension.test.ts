@@ -33,19 +33,27 @@ describe("formatting decorations", () => {
     view.destroy();
   });
 
-  it("leaves nested emphasis markup raw", () => {
+  it("applies only the outer bold style to triple-star markup", () => {
     const { view } = createView("***bold italic***");
-    expect(view.dom.querySelector(".cm-fmt-bold")).toBeNull();
+    expect(view.dom.querySelector(".cm-fmt-bold")?.textContent).toBe("*bold italic*");
     expect(view.dom.querySelector(".cm-fmt-italic")).toBeNull();
-    expect(view.dom.textContent).toBe("***bold italic***");
+    expect(view.dom.textContent).toBe("*bold italic*");
     view.destroy();
   });
 
-  it("does not partially format italic syntax inside bold markup", () => {
+  it("applies only the outer bold style to nested syntax", () => {
     const { view } = createView("**one *two* three**");
-    expect(view.dom.querySelector(".cm-fmt-bold")).toBeNull();
+    expect(view.dom.querySelector(".cm-fmt-bold")?.textContent).toBe("one *two* three");
     expect(view.dom.querySelector(".cm-fmt-italic")).toBeNull();
-    expect(view.dom.textContent).toBe("**one *two* three**");
+    expect(view.dom.textContent).toBe("one *two* three");
+    view.destroy();
+  });
+
+  it("applies only the outer italic style to nested syntax", () => {
+    const { view } = createView("*one **two** three*");
+    expect(view.dom.querySelector(".cm-fmt-bold")).toBeNull();
+    expect(view.dom.querySelector(".cm-fmt-italic")?.textContent).toBe("one **two** three");
+    expect(view.dom.textContent).toBe("one **two** three");
     view.destroy();
   });
 

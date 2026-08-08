@@ -45,7 +45,9 @@ const MAX_MATCH_LENGTH = 2 * EMPHASIS_MAX_LENGTH + 4;
 
 /**
  * Inline emphasis, delimiters kept out of the captured content. Bold is tried
- * before italic so `**x**` is not read as two stray `*`. Bold content may
+ * before italic so `**x**` is not read as two stray `*`. The parser applies
+ * only the outermost style: nested delimiters remain visible literal text.
+ * Bold content may
  * cross line breaks — even blank lines — up to EMPHASIS_MAX_LENGTH
  * characters; italic is confined to a single line, because stray single `*`
  * and `_` characters are common in ordinary text (wildcards, snake_case) and
@@ -59,8 +61,8 @@ const MAX_MATCH_LENGTH = 2 * EMPHASIS_MAX_LENGTH + 4;
  */
 const INLINE_PATTERN = new RegExp(
   [
-    String.raw`(?<!\*)\*\*(?![\s*])([^*]{1,${EMPHASIS_MAX_LENGTH}}?)(?<!\s)\*\*(?!\*)`,
-    String.raw`(?<!\*)\*(?![\s*])([^*\n]{1,${EMPHASIS_MAX_LENGTH}}?)(?<!\s)\*(?!\*)`,
+    String.raw`(?<!\*)\*\*(?!\s)([\s\S]{1,${EMPHASIS_MAX_LENGTH}}?)(?<!\s)\*\*(?!\*)`,
+    String.raw`(?<!\*)\*(?![\s*])((?:[^*\n]|\*{2}){1,${EMPHASIS_MAX_LENGTH}}?)(?<!\s)\*(?!\*)`,
     String.raw`(?<![\p{L}\p{N}_])_(?!\s)([^_\n]{1,${EMPHASIS_MAX_LENGTH}}?)(?<!\s)_(?![\p{L}\p{N}_])`
   ].join("|"),
   "gu"
@@ -109,11 +111,6 @@ const collectInline = (text: string, offset: number, ranges: Range<Decoration>[]
   INLINE_PATTERN.lastIndex = 0;
   for (let match = INLINE_PATTERN.exec(text); match; match = INLINE_PATTERN.exec(text)) {
     const [bold, italicStar, italicUnderscore] = [match[1], match[2], match[3]];
-    // A standalone italic pair inside an otherwise unparseable bold span is
-    // still nested syntax. Keep all of it raw rather than half-formatting it.
-    if (italicStar !== undefined && (text.slice(0, match.index).split("**").length - 1) % 2 === 1) {
-      continue;
-    }
     const content = bold ?? italicStar ?? italicUnderscore;
     const delimiter = bold !== undefined ? 2 : 1;
     const mark = bold !== undefined ? boldMark : italicMark;

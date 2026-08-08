@@ -36,3 +36,50 @@ describe("document kind", () => {
     expect(store.state.filePath).toBe("");
   });
 });
+
+describe("recording a saved revision", () => {
+  it("marks the document clean when nothing changed during the save", () => {
+    const store = createDocumentStore();
+    store.setRevision(4);
+
+    store.markSavedAt(4);
+
+    expect(store.state).toMatchObject({ baselineRevision: 4, currentRevision: 4, isDirty: false });
+  });
+
+  it("stays dirty when the document moved on while the save was in flight", () => {
+    // The revision passed in is the one written to disk, not the one in the
+    // editor now. Marking it clean would hide the edit made during the save.
+    const store = createDocumentStore();
+    store.setRevision(4);
+
+    store.setRevision(5);
+    store.markSavedAt(4);
+
+    expect(store.state).toMatchObject({ baselineRevision: 4, currentRevision: 5, isDirty: true });
+  });
+
+  it("leaves the current revision alone, unlike markCleanAt", () => {
+    // markCleanAt asserts both revisions; markSavedAt only knows what was
+    // written, so moving currentRevision would lose the editor's position.
+    const store = createDocumentStore();
+    store.setRevision(9);
+
+    store.markSavedAt(2);
+    expect(store.state.currentRevision).toBe(9);
+
+    store.markCleanAt(2);
+    expect(store.state.currentRevision).toBe(2);
+  });
+
+  it("goes clean again once the edits made during the save are themselves saved", () => {
+    const store = createDocumentStore();
+    store.setRevision(4);
+    store.setRevision(5);
+    store.markSavedAt(4);
+
+    store.markSavedAt(5);
+
+    expect(store.state.isDirty).toBe(false);
+  });
+});

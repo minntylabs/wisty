@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::FormatOptions;
@@ -175,6 +176,157 @@ fn same_file(output: &Path, existing: &Path) -> bool {
 ///
 /// The extension is kept because the audio is stored exactly as it arrived — there is
 /// no transcode — so calling an m4a anything else would be a lie to whoever unzips it.
+/// Whether the player could actually decode this recording, not merely read its
+/// headers.
+///
+/// The distinction is the whole of §5.6. Probing a HE-AAC file succeeds and
+/// reports its duration and codec quite happily; constructing a decoder for it
+/// is what fails, because symphonia 0.6 refuses AAC with SBR. Nothing noticed
+/// for a while precisely because this file only ever probed, and the first code
+/// to build a decoder was playback — months after the container was written.
+fn audio_is_playable(path: &Path) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+        hint.with_extension(extension);
+    }
+    let Ok(reader) = symphonia::default::get_probe().probe(
+        &hint,
+        mss,
+        FormatOptions::default(),
+        MetadataOptions::default(),
+    ) else {
+        return false;
+    };
+    let Some(track) = reader.tracks().iter().find(|track| {
+        track
+            .codec_params
+            .as_ref()
+            .is_some_and(CodecParameters::is_audio)
+    }) else {
+        return false;
+    };
+    let Some(CodecParameters::Audio(params)) = track.codec_params.as_ref() else {
+        return false;
+    };
+    let decoder: Result<Box<dyn AudioDecoder>, _> = symphonia::default::get_codecs()
+        .make_audio_decoder(params, &AudioDecoderOptions::default());
+    decoder.is_ok()
+}
+
+/// The recording as it will be stored, and whether it had to be made first.
+///
+/// The conversion's output is deleted when this goes out of scope, on every
+/// path out of the write including the failures.
+struct PreparedAudio {
+    path: PathBuf,
+    temporary: bool,
+}
+
+impl PreparedAudio {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for PreparedAudio {
+    fn drop(&mut self) {
+        if self.temporary {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Converts to something the player can read, when it has to.
+///
+/// §5.6 decided the conversion belongs at import time rather than at playback:
+/// it moves the compatibility question to a moment where the user is choosing
+/// files and can see it fail, instead of to a dialog months later in the middle
+/// of a sentence. It also decouples what may be imported from what one Rust
+/// decoder happens to accept, which is the difference between an input surface
+/// that can be explained — "any audio file" — and one that cannot.
+///
+/// Anything symphonia can already decode is stored untouched, so the common
+/// case needs no ffmpeg and loses nothing to a second lossy encode.
+fn prepare_audio_for_container(source: &Path) -> Result<PreparedAudio, String> {
+    if audio_is_playable(source) {
+        return Ok(PreparedAudio {
+            path: source.to_path_buf(),
+            temporary: false,
+        });
+    }
+    Ok(PreparedAudio {
+        path: convert_to_playable_audio(source)?,
+        temporary: true,
+    })
+}
+
+/// AAC-LC, mono, in m4a — symphonia's existing features exactly, no more.
+///
+/// ffmpeg because Wisty cannot do this itself: the reason a file needs
+/// converting is that Wisty's decoder cannot read it, so whatever converts it
+/// needs a decoder Wisty does not have.
+fn convert_to_playable_audio(source: &Path) -> Result<PathBuf, String> {
+    let output = std::env::temp_dir().join(format!(
+        "wisty-import-{}-{}.m4a",
+        std::process::id(),
+        SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let result = std::process::Command::new("ffmpeg")
+        .arg("-nostdin")
+        .arg("-y")
+        .arg("-i")
+        .arg(source)
+        // No video, no cover art: an attached picture would otherwise become a
+        // stream the encoder is asked to handle.
+        .arg("-vn")
+        .args(["-ac", "1"])
+        .args(["-c:a", "aac"])
+        .args(["-profile:a", "aac_low"])
+        .args(["-b:a", "64k"])
+        .arg(&output)
+        .output();
+
+    let finished = match result {
+        Ok(finished) => finished,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(format!(
+                "This recording is in a format Wisty cannot play ({}), so it has to be \
+                 converted when it is imported — and that needs ffmpeg, which was not found. \
+                 Install ffmpeg, or choose a recording in WAV, FLAC or AAC-LC.",
+                source.display()
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "Cannot run ffmpeg to convert the recording: {error}"
+            ))
+        }
+    };
+
+    if !finished.status.success() {
+        let _ = std::fs::remove_file(&output);
+        // ffmpeg's own last line says more about why than anything invented here.
+        let reason = String::from_utf8_lossy(&finished.stderr);
+        let detail = reason.lines().last().unwrap_or("no output").trim();
+        return Err(format!("ffmpeg could not convert the recording: {detail}"));
+    }
+
+    if !audio_is_playable(&output) {
+        let _ = std::fs::remove_file(&output);
+        return Err(
+            "The converted recording still cannot be played, so it has not been stored."
+                .to_string(),
+        );
+    }
+
+    Ok(output)
+}
+
 fn audio_member_name(audio_path: &Path) -> String {
     match audio_path.extension().and_then(|value| value.to_str()) {
         Some(extension) => format!("audio.{extension}"),
@@ -203,6 +355,12 @@ pub fn write_tsf(
                 .to_string(),
         );
     }
+
+    // Converted here if it has to be, so that everything below — the member
+    // name, the metadata, the bytes copied in — describes what is actually
+    // stored rather than what was chosen.
+    let prepared = prepare_audio_for_container(audio_path)?;
+    let audio_path = prepared.path();
 
     let facts = probe_audio(audio_path)?;
     let audio_member = audio_member_name(audio_path);
@@ -1479,5 +1637,101 @@ mod tests {
         std::fs::write(&path, b"someone else's file").unwrap();
 
         assert!(source_is_unchanged(&open).is_err());
+    }
+
+    #[test]
+    fn a_playable_recording_is_stored_untouched() {
+        let dir = temp_dir("no-conversion");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+
+        let prepared = prepare_audio_for_container(&audio).expect("prepare");
+
+        // The file itself, not a copy of it: nothing to convert, nothing to
+        // re-encode, and nothing to delete afterwards.
+        assert_eq!(prepared.path(), audio);
+        assert!(!prepared.temporary);
+    }
+
+    #[test]
+    fn a_recording_the_player_can_read_is_recognised() {
+        let dir = temp_dir("playable");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+
+        assert!(audio_is_playable(&audio));
+        assert!(!audio_is_playable(&dir.join("nothing-here.wav")));
+    }
+
+    /// Whether ffmpeg is on this machine at all. The conversion cannot be
+    /// tested without it, and a machine that lacks it should not fail the
+    /// suite over a dependency the common import path does not need.
+    fn ffmpeg_present() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_ok()
+    }
+
+    /// The whole of §5.6 end to end: a recording the player refuses becomes one
+    /// it accepts, stored under a name that says what it now is.
+    #[test]
+    fn an_unplayable_recording_is_converted_into_the_container() {
+        if !ffmpeg_present() {
+            eprintln!("skipping: ffmpeg is not installed");
+            return;
+        }
+        let dir = temp_dir("conversion");
+        let source = dir.join("rec.opus");
+        // Opus in ogg: a real file, and one symphonia is not built to decode,
+        // so it stands in for the HE-AAC recordings this exists for.
+        let made = std::process::Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+            ])
+            .args(["-c:a", "libopus"])
+            .arg(&source)
+            .output()
+            .expect("run ffmpeg");
+        if !made.status.success() {
+            eprintln!("skipping: this ffmpeg cannot write opus");
+            return;
+        }
+        assert!(!audio_is_playable(&source), "the premise of this test");
+
+        let before = converted_files_in_temp();
+        let output = dir.join("out.tsf");
+        let result = write_tsf(&output, "hello", &source, draft(), None).expect("write");
+
+        assert_eq!(result.codec, "aac");
+        let open = read_tsf(&output).expect("open");
+        assert_eq!(open.audio_member, "audio.m4a");
+        assert_eq!(open.meta["audio"]["file"], "audio.m4a");
+        // The conversion's output belongs to the import and to nothing after
+        // it. Counted here rather than in a test of its own: the count is by
+        // process, and two conversions running at once in the same test binary
+        // would each see the other's file.
+        assert_eq!(
+            converted_files_in_temp(),
+            before,
+            "a converted file was left behind"
+        );
+    }
+
+    fn converted_files_in_temp() -> usize {
+        let prefix = format!("wisty-import-{}-", std::process::id());
+        std::fs::read_dir(std::env::temp_dir())
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+                    .count()
+            })
+            .unwrap_or(0)
     }
 }

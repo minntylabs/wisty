@@ -38,8 +38,11 @@ const directoryFromPath = (filePath: string): string => {
 
 const DEFAULT_STREAM_CHUNK_BYTES = 256 * 1024;
 const MIN_STREAM_CHUNK_BYTES = 4 * 1024;
+// Matches Rust's launch-stream clamp. Keep this bound here so direct file reads
+// and launch reads have the same maximum allocation policy.
+const MAX_STREAM_CHUNK_BYTES = 1024 * 1024;
 
-const normalizeChunkSizeBytes = (chunkSizeBytes?: number): number => {
+export const normalizeStreamChunkSizeBytes = (chunkSizeBytes?: number): number => {
   if (typeof chunkSizeBytes !== "number" || !Number.isFinite(chunkSizeBytes)) {
     return DEFAULT_STREAM_CHUNK_BYTES;
   }
@@ -47,7 +50,7 @@ const normalizeChunkSizeBytes = (chunkSizeBytes?: number): number => {
   if (normalized < MIN_STREAM_CHUNK_BYTES) {
     return MIN_STREAM_CHUNK_BYTES;
   }
-  return normalized;
+  return Math.min(normalized, MAX_STREAM_CHUNK_BYTES);
 };
 
 export const openTextFile = async (defaultPath?: string): Promise<OpenFileResult> => {
@@ -131,7 +134,7 @@ export const streamReadTextFileAtPath = async function* (
 ): AsyncGenerator<{ text: string; bytesReadTotal: number; fileSizeBytes?: number }, void, void> {
   const fileInfo = await stat(filePath);
   const fileSizeBytes = fileInfo.size;
-  const chunkSizeBytes = normalizeChunkSizeBytes(options?.chunkSizeBytes);
+  const chunkSizeBytes = normalizeStreamChunkSizeBytes(options?.chunkSizeBytes);
   const buffer = new Uint8Array(chunkSizeBytes);
   // Fatal mode refuses non-UTF-8 input instead of silently substituting
   // replacement characters, which would corrupt the file on the next save.

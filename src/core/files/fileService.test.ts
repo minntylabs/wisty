@@ -7,7 +7,12 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: dialogSave
 }));
 
-import { isContainerPath, saveContainerPathAs, saveTextExportPathAs } from "./fileService";
+import {
+  isContainerPath,
+  normalizeStreamChunkSizeBytes,
+  saveContainerPathAs,
+  saveTextExportPathAs
+} from "./fileService";
 
 describe("isContainerPath", () => {
   it("recognises a container", () => {
@@ -38,5 +43,13 @@ describe("Save As extensions", () => {
 
     dialogSave.mockResolvedValueOnce("C:\\exports\\export");
     await expect(saveTextExportPathAs()).resolves.toEqual({ kind: "saved", filePath: "C:\\exports\\export.txt" });
+  });
+});
+
+describe("stream chunk limits", () => {
+  it("stays within the backend launch-stream allocation bounds", () => {
+    expect(normalizeStreamChunkSizeBytes()).toBe(256 * 1024);
+    expect(normalizeStreamChunkSizeBytes(1)).toBe(4 * 1024);
+    expect(normalizeStreamChunkSizeBytes(2 * 1024 * 1024)).toBe(1024 * 1024);
   });
 });

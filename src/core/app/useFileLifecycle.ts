@@ -16,7 +16,10 @@ import { stripMarkers } from "../tsf/markers";
 
 type UseFileLifecycleDeps = {
   editor: Pick<EditorPort, "focus" | "getText" | "snapshotText" | "setText" | "append" | "reset" | "setLargeLineSafeMode" | "getRevision" | "setMarkersEnabled">;
-  document: Pick<DocumentPort, "state" | "setRevision" | "markCleanAt" | "markSavedAt" | "setFilePath" | "setUntitled">;
+  document: Pick<
+    DocumentPort,
+    "state" | "setRevision" | "markCleanAt" | "markSavedAt" | "markDirty" | "setFilePath" | "setUntitled"
+  >;
   settings: Pick<SettingsPort, "state" | "actions">;
   fileDialogs: FileDialogsPort;
   fileIo: FileIoPort;
@@ -137,25 +140,38 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     setExternalChangeDismissed(false);
   };
 
+  /**
+   * Never throws. A baseline is taken after the file is already open or already
+   * written, so a failure here says nothing about whether that succeeded and
+   * must not be reported as though it did. It is recorded instead, and Save is
+   * what acts on it — the one operation the missing baseline would endanger.
+   */
   const captureTextFileVersion = async (filePath: string) => {
+    textFileVersionGeneration += 1;
+    observedExternalVersion = null;
+    setExternalChange(null);
+    setExternalChangeDismissed(false);
     try {
       textFileVersion = await deps.fileIo.getTextFileVersion(filePath);
       textFileVersionError = null;
     } catch (error) {
       textFileVersion = null;
-      textFileVersionError = error instanceof Error ? error : new Error("Cannot check the file on disk");
-      throw textFileVersionError;
+      textFileVersionError = new Error(
+        `Wisty cannot check this file on disk: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
-    textFileVersionGeneration += 1;
-    observedExternalVersion = null;
-    setExternalChange(null);
-    setExternalChangeDismissed(false);
   };
 
+  /**
+   * Whether the document a save started from is still the open one. Opening a
+   * file does not cancel a save already streaming, so what a save learned about
+   * its own document — its saved revision, its baseline — must not be written
+   * over a different document that arrived while it ran.
+   */
+  const documentStillOpenAt = (filePath: string) =>
+    deps.document.state.kind === "text" && deps.document.state.filePath === filePath;
+
   const checkForExternalChange = async (): Promise<boolean> => {
-    if (textFileVersionError) {
-      throw textFileVersionError;
-    }
     if (deps.document.state.kind !== "text" || !deps.document.state.filePath || !textFileVersion) {
       return false;
     }
@@ -176,6 +192,9 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         // A version seen before the deletion says nothing about what comes
         // back, so forget it and judge the replacement on its own.
         observedExternalVersion = null;
+        // The editor now holds the only copy of this text. Saying so keeps the
+        // close prompt in the way of losing it, whether or not it was edited.
+        deps.document.markDirty();
         setExternalChange({ filePath, kind: "deleted" });
         setExternalChangeDismissed(false);
       }
@@ -889,6 +908,9 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
       const previousPath = deps.document.state.filePath;
       const savedRevision = await saveDocumentToPathViaStream(result.filePath);
+      if (!documentStillOpenAt(previousPath)) {
+        return;
+      }
       await deps.rememberedPosition.migrate(previousPath, result.filePath);
       deps.document.setFilePath(result.filePath);
       deps.document.markSavedAt(savedRevision);
@@ -909,28 +931,37 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       return;
     }
 
+    const filePath = deps.document.state.filePath;
     await runWithErrorMessage(async () => {
+      if (textFileVersionError) {
+        // Try once more before refusing: a baseline that could not be taken
+        // leaves nothing to validate this save against, but one unlucky moment
+        // should not lock the document until it is closed and reopened.
+        await captureTextFileVersion(filePath);
+        if (textFileVersionError) {
+          throw textFileVersionError;
+        }
+      }
       if (await checkForExternalChange()) {
         setExternalChangeDismissed(false);
         return;
       }
       let savedRevision: number;
       try {
-        savedRevision = await saveDocumentToPathViaStream(
-          deps.document.state.filePath,
-          undefined,
-          textFileVersion ?? undefined
-        );
+        savedRevision = await saveDocumentToPathViaStream(filePath, undefined, textFileVersion ?? undefined);
       } catch (error) {
         if (isExternalChangeSaveError(error)) {
-          setExternalChange({ filePath: deps.document.state.filePath, kind: "changed" });
+          setExternalChange({ filePath, kind: "changed" });
           return;
         }
         throw error;
       }
+      if (!documentStillOpenAt(filePath)) {
+        return;
+      }
       deps.document.markSavedAt(savedRevision);
-      await captureTextFileVersion(deps.document.state.filePath);
-      await rememberLastDirectory(deps.document.state.filePath);
+      await captureTextFileVersion(filePath);
+      await rememberLastDirectory(filePath);
       deps.editor.focus();
     }, "Unable to save file");
   };
@@ -972,6 +1003,9 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     }
     await runWithErrorMessage(async () => {
       const savedRevision = await saveDocumentToPathViaStream(change.filePath);
+      if (!documentStillOpenAt(change.filePath)) {
+        return;
+      }
       deps.document.markSavedAt(savedRevision);
       await captureTextFileVersion(change.filePath);
       await rememberLastDirectory(change.filePath);

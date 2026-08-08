@@ -20,18 +20,36 @@ FIXES
    the banner, and a file that returns after a deletion is judged afresh
    rather than against the version seen before it went away.
 
-4. Metadata lookup failures are no longer treated as a missing file. They
-   leave the document unsaveable through ordinary Save, rather than silently
-   omitting the backend's expected-source validation. A missing path is the
-   exception: Tauri's stat rejects for a deleted file exactly as it does for
-   a permission fault, so the two are told apart by asking whether the path
-   is still there. Deletion continues to report null, as the "deleted"
-   conflict requires; only genuine faults propagate. Losing this distinction
-   made deletion undetectable in the app while the tests, whose fake returns
-   null directly, went on passing.
+4. Metadata lookup failures are no longer treated as a missing file, so a
+   fault cannot silently omit the backend's expected-source validation. A
+   missing path is the exception: Tauri's stat rejects for a deleted file
+   exactly as it does for a permission fault, so the two are told apart by
+   asking whether the path is still there — which needs fs:allow-exists in
+   the capability, as neither fs:read-all nor the explicit fs:allow-stat
+   covers it. Deletion continues to report null, as the "deleted" conflict
+   requires; only genuine faults propagate. Losing this distinction made
+   deletion undetectable in the app while the tests, whose fake returns null
+   directly, went on passing.
 
 5. Reload from Disk now runs through the existing discard confirmation flow,
    so it cannot silently throw away dirty editor content.
+
+6. Taking a baseline never throws. It happens after the file is already open
+   or already written, so its failure says nothing about whether that
+   succeeded, and reporting it as one told the user a save had failed when it
+   had not. The failure is recorded instead, and Save acts on it: it retakes
+   the baseline, and only refuses if that fails again. A single unlucky stat
+   no longer locks the document until it is closed and reopened.
+
+7. A deleted file marks its document unsaved. The editor then holds the only
+   copy of the text, and leaving the document clean let it be closed away
+   without a prompt — the one case where detecting the conflict and doing
+   nothing about it was worse than not detecting it.
+
+8. Saving guards what it writes back to the document. Opening a file does not
+   cancel a save already streaming, so a save that lands after the document
+   was replaced would have marked the new document saved at the old one's
+   revision.
 
 RESIDUAL LIMITS
 

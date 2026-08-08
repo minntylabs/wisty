@@ -224,7 +224,8 @@ function App() {
   onMount(() => {
     const checkForExternalChange = () => {
       void fileLifecycle.checkForExternalChange().catch(() => {
-        // Save reports a version-check failure; focus must not interrupt typing.
+        // Save is where an unreadable file matters, and it says so there.
+        // Returning to the window is not the moment to interrupt typing with it.
       });
     };
     window.addEventListener("focus", checkForExternalChange);

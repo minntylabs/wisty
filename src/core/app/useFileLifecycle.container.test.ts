@@ -624,6 +624,90 @@ describe("external text-file changes", () => {
     expect(h.lifecycle.externalChangeState.isVisible()).toBe(true);
   });
 
+  it("marks a deleted file's document unsaved, so closing it has to ask", async () => {
+    let version: typeof original | null = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    expect(h.document.state.isDirty).toBe(false);
+
+    version = null;
+    await h.lifecycle.checkForExternalChange();
+
+    expect(h.document.state.isDirty).toBe(true);
+  });
+
+  it("reports a save that succeeded as a save, even when the baseline cannot be retaken", async () => {
+    let versionCalls = 0;
+    const h = createHarness({
+      getTextFileVersion: async () => {
+        versionCalls += 1;
+        // The version taken after the write lands, and only that one, fails.
+        if (versionCalls === 3) {
+          throw new Error("Permission denied (os error 13)");
+        }
+        return original;
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    await h.lifecycle.saveFile();
+
+    expect(h.finishSaveFileStream).toHaveBeenCalled();
+    expect(h.showError).not.toHaveBeenCalled();
+    expect(h.document.state.isDirty).toBe(false);
+  });
+
+  it("retakes a failed baseline on the next save rather than locking the document", async () => {
+    let failVersion = true;
+    const h = createHarness({
+      getTextFileVersion: async () => {
+        if (failVersion) {
+          throw new Error("Permission denied (os error 13)");
+        }
+        return original;
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    await h.lifecycle.saveFile();
+    expect(h.startSaveFileStream).not.toHaveBeenCalled();
+    expect(h.showError).toHaveBeenCalledWith(
+      "Unable to save file",
+      expect.objectContaining({ message: expect.stringContaining("cannot check this file on disk") })
+    );
+
+    failVersion = false;
+    await h.lifecycle.saveFile();
+
+    expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/notes.txt", original);
+  });
+
+  it("leaves a document opened during a save alone when the save lands", async () => {
+    let opened = false;
+    const h: ReturnType<typeof createHarness> = createHarness({
+      getTextFileVersion: async () => original,
+      onWriteChunk: async () => {
+        if (opened) {
+          return;
+        }
+        opened = true;
+        // A save does not cancel an open, so what this save learned about its
+        // own document — its saved revision — must not land on the document
+        // that replaced it. The open finishes first, so the only thing that can
+        // mark the new document clean at the old one's revision is the save.
+        h.revision.value = 5;
+        await h.lifecycle.openFileAtPath("/tmp/other.txt");
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    h.editorText.value = "edited";
+
+    await h.lifecycle.saveFile();
+
+    expect(h.document.state.filePath).toBe("/tmp/other.txt");
+    expect(h.document.state.isDirty).toBe(false);
+  });
+
   it("retains a deleted file's text instead of reloading it as empty", async () => {
     let version: typeof original | null = original;
     const h = createHarness({ getTextFileVersion: async () => version });

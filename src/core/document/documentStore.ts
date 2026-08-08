@@ -65,6 +65,16 @@ export const createDocumentStore = () => {
   };
 
   /**
+   * Declares the document unsaved without touching a revision. What is on
+   * screen can stop matching the disk without anyone editing it — a file
+   * deleted underneath Wisty holds the only remaining copy of its text, and
+   * closing it must ask rather than assume it is safely stored.
+   */
+  const markDirty = () => {
+    setState({ isDirty: true });
+  };
+
+  /**
    * `kind` defaults to "text", so every existing caller keeps marking the
    * document a plain text file — which is what saving to a path through the
    * text stream means. Only opening a container passes anything else, and it
@@ -87,6 +97,7 @@ export const createDocumentStore = () => {
     setRevision,
     markCleanAt,
     markSavedAt,
+    markDirty,
     setFilePath,
     setUntitled
   };

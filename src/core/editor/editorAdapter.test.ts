@@ -264,6 +264,36 @@ describe("word count", () => {
     expect(onWordCountChanged).toHaveBeenLastCalledWith(3);
   });
 
+  /**
+   * The scan is the expensive part, so it may not be set off by settings that
+   * cannot change a word — a theme change must not rescan a large document.
+   */
+  it("does not recount when a setting unrelated to it changes", async () => {
+    const { adapter, onWordCountChanged } = createAdapter();
+    adapter.setText("one two three");
+    await vi.runAllTimersAsync();
+    const countsSoFar = onWordCountChanged.mock.calls.length;
+
+    adapter.applySettings();
+    await vi.runAllTimersAsync();
+
+    expect(onWordCountChanged.mock.calls.length).toBe(countsSoFar);
+  });
+
+  /** Hidden, the count goes stale, so it is dropped rather than kept. */
+  it("forgets the count while the status bar is hidden", async () => {
+    const shown = { statusBarEnabled: true };
+    const { adapter, onWordCountChanged } = createAdapter(shown);
+    adapter.setText("one two three");
+    await vi.runAllTimersAsync();
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(3);
+
+    shown.statusBarEnabled = false;
+    adapter.applySettings();
+
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(null);
+  });
+
   it("stops counting once the editor is torn down", async () => {
     const { adapter, onWordCountChanged } = createAdapter();
 

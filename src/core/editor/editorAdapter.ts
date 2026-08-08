@@ -87,15 +87,36 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     onCount: (words) => options.onWordCountChanged?.(words)
   });
 
+  /** Whether the last decision about counting was taken with it on show. */
+  let countingForStatusBar = false;
+
   /**
-   * Counting is for the status bar, so a hidden status bar is not worth
-   * scanning a large document for. Turning it back on asks for a count then —
-   * see `applySettings`.
+   * Counting is for the status bar, so a hidden one is not worth scanning a
+   * large document for. While it is hidden the count is not merely left
+   * uncounted but forgotten, so that showing the bar again cannot display a
+   * total belonging to the document as it was before it was hidden.
    */
   const countWordsIfShown = () => {
-    if (options.getSettings().statusBarEnabled) {
+    countingForStatusBar = options.getSettings().statusBarEnabled;
+    if (countingForStatusBar) {
       wordCounter.schedule();
+      return;
     }
+    wordCounter.invalidate();
+  };
+
+  /**
+   * Reacts to the status bar being shown or hidden, and to nothing else.
+   *
+   * `applySettings` runs for every setting the editor cares about — theme,
+   * font, wrapping — none of which changes a word. Counting on each of them
+   * would rescan the whole document because the theme changed.
+   */
+  const syncWordCountToStatusBar = () => {
+    if (options.getSettings().statusBarEnabled === countingForStatusBar) {
+      return;
+    }
+    countWordsIfShown();
   };
   let suppressDocEvents = 0;
   let largeLineSafeModeEnabled = false;
@@ -580,8 +601,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
       return;
     }
     const settings = options.getSettings();
-    // A status bar that has just been switched on has no count yet.
-    countWordsIfShown();
+    syncWordCountToStatusBar();
     editorView.dispatch({
       effects: [
         wrapCompartment.reconfigure(!largeLineSafeModeEnabled && settings.textWrapEnabled ? EditorView.lineWrapping : []),

@@ -517,6 +517,9 @@ function App() {
     settingsStore.state.fontWeight;
     settingsStore.state.textWrapEnabled;
     settingsStore.state.activeLineHighlightEnabled;
+    // Read so that showing or hiding the status bar reaches the editor: it is
+    // what decides whether the document is worth counting words in.
+    settingsStore.state.statusBarEnabled;
     editorAdapter.applySettings();
   });
 

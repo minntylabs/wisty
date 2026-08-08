@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { exists, open as openFile, readTextFile, stat, writeTextFile } from "@tauri-apps/plugin-fs";
-import type { TextFileVersion } from "../app/contracts";
+import type { TextFilePresence } from "../app/contracts";
 
 export type OpenFileResult =
   | { kind: "cancelled" }
@@ -213,12 +213,29 @@ const pathStillExists = async (filePath: string): Promise<boolean> => {
 };
 
 /**
- * A missing path is a state the caller must act on — it becomes the "deleted"
- * conflict — so it returns null. Every other `stat` failure is a genuine fault
- * and propagates, rather than being mistaken for a deletion. `stat` rejects for
- * both, so the two are told apart by asking whether the path is still there.
+ * The modification time, unless it cannot be compared.
+ *
+ * An invalid `Date` yields `NaN`, and `NaN` never equals itself: recorded as a
+ * version it would make the file differ from itself on every check, standing a
+ * conflict up that nothing could clear and refusing every save. Dropping it
+ * leaves the comparison to size and identity, which is the safe direction.
  */
-export const getTextFileVersion = async (filePath: string): Promise<TextFileVersion | null> => {
+const comparableModifiedMs = (value: Date | null | undefined): number | null => {
+  const milliseconds = value?.getTime();
+  return typeof milliseconds === "number" && Number.isFinite(milliseconds) ? milliseconds : null;
+};
+
+/**
+ * What is at `filePath` now.
+ *
+ * A path with no file, and a path holding something that is not a file, are
+ * both states the caller has to act on rather than faults, so they are
+ * reported rather than thrown. Every other `stat` failure is a genuine fault
+ * and propagates instead of being mistaken for a deletion. `stat` rejects for a
+ * missing path and for a permissions fault alike, so the two are told apart by
+ * asking whether the path is still there.
+ */
+export const getTextFilePresence = async (filePath: string): Promise<TextFilePresence> => {
   let metadata: Awaited<ReturnType<typeof stat>>;
   try {
     metadata = await stat(filePath);
@@ -226,16 +243,19 @@ export const getTextFileVersion = async (filePath: string): Promise<TextFileVers
     if (await pathStillExists(filePath)) {
       throw error;
     }
-    return null;
+    return { kind: "missing" };
   }
   if (!metadata.isFile) {
-    return null;
+    return { kind: "not-a-file" };
   }
   return {
-    size: metadata.size,
-    modifiedMs: metadata.mtime?.getTime() ?? null,
-    device: safeFileIdentityNumber(metadata.dev),
-    inode: safeFileIdentityNumber(metadata.ino)
+    kind: "present",
+    version: {
+      size: metadata.size,
+      modifiedMs: comparableModifiedMs(metadata.mtime),
+      device: safeFileIdentityNumber(metadata.dev),
+      inode: safeFileIdentityNumber(metadata.ino)
+    }
   };
 };
 

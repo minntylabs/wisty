@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
 }));
 
 import {
-  getTextFileVersion,
+  getTextFilePresence,
   isContainerPath,
   normalizeStreamChunkSizeBytes,
   saveContainerPathAs,
@@ -68,7 +68,7 @@ describe("Save As extensions", () => {
   });
 });
 
-describe("getTextFileVersion", () => {
+describe("getTextFilePresence", () => {
   beforeEach(() => {
     fsStat.mockReset();
     fsExists.mockReset();
@@ -77,11 +77,9 @@ describe("getTextFileVersion", () => {
   it("reads size, mtime and identity from a file", async () => {
     fsStat.mockResolvedValueOnce({ isFile: true, size: 12, mtime: new Date(1_000), dev: 3, ino: 7 });
 
-    await expect(getTextFileVersion("/tmp/notes.txt")).resolves.toEqual({
-      size: 12,
-      modifiedMs: 1_000,
-      device: 3,
-      inode: 7
+    await expect(getTextFilePresence("/tmp/notes.txt")).resolves.toEqual({
+      kind: "present",
+      version: { size: 12, modifiedMs: 1_000, device: 3, inode: 7 }
     });
   });
 
@@ -91,27 +89,52 @@ describe("getTextFileVersion", () => {
     fsStat.mockRejectedValueOnce(new Error("No such file or directory (os error 2)"));
     fsExists.mockResolvedValueOnce(false);
 
-    await expect(getTextFileVersion("/tmp/notes.txt")).resolves.toBeNull();
+    await expect(getTextFilePresence("/tmp/notes.txt")).resolves.toEqual({ kind: "missing" });
   });
 
   it("propagates a failure on a path that is still there", async () => {
     fsStat.mockRejectedValueOnce(new Error("Permission denied (os error 13)"));
     fsExists.mockResolvedValueOnce(true);
 
-    await expect(getTextFileVersion("/tmp/notes.txt")).rejects.toThrow("Permission denied");
+    await expect(getTextFilePresence("/tmp/notes.txt")).rejects.toThrow("Permission denied");
   });
 
   it("propagates the original failure when the path cannot be checked either", async () => {
     fsStat.mockRejectedValueOnce(new Error("Permission denied (os error 13)"));
     fsExists.mockRejectedValueOnce(new Error("forbidden"));
 
-    await expect(getTextFileVersion("/tmp/notes.txt")).rejects.toThrow("Permission denied");
+    await expect(getTextFilePresence("/tmp/notes.txt")).rejects.toThrow("Permission denied");
   });
 
-  it("treats a path replaced by a directory as missing", async () => {
+  /**
+   * Kept apart from a missing path: a file that has gone can be recreated
+   * where it was, and a directory standing in its place cannot be written over
+   * at all, so the two cannot share a description or a way out.
+   */
+  it("reports a path replaced by a directory as its own state", async () => {
     fsStat.mockResolvedValueOnce({ isFile: false, size: 0, mtime: null, dev: null, ino: null });
 
-    await expect(getTextFileVersion("/tmp/notes.txt")).resolves.toBeNull();
+    await expect(getTextFilePresence("/tmp/notes.txt")).resolves.toEqual({ kind: "not-a-file" });
+  });
+
+  /**
+   * `NaN` never equals itself, so a version carrying one would differ from
+   * itself on every check: a conflict nothing could clear, and a save that
+   * could never proceed. Dropping it leaves size and identity to compare.
+   */
+  it("drops a modification time that cannot be compared", async () => {
+    fsStat.mockResolvedValueOnce({
+      isFile: true,
+      size: 12,
+      mtime: new Date(Number.NaN),
+      dev: 3,
+      ino: 7
+    });
+
+    await expect(getTextFilePresence("/tmp/notes.txt")).resolves.toEqual({
+      kind: "present",
+      version: { size: 12, modifiedMs: null, device: 3, inode: 7 }
+    });
   });
 });
 

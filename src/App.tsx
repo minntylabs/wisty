@@ -11,6 +11,7 @@ import type { ErrorReporter } from "./core/app/contracts";
 import { CommandsProvider, MenuProvider } from "./core/app/appContexts";
 import { useAppLifecycle } from "./core/app/useAppLifecycle";
 import { useCloseFlow } from "./core/app/useCloseFlow";
+import { createCoalescingTrigger } from "./core/app/coalescingTrigger";
 import { useFileLifecycle } from "./core/app/useFileLifecycle";
 import { useGlobalKeyRouting } from "./core/app/useGlobalKeyRouting";
 import { useMenuCommandPipeline } from "./core/app/useMenuCommandPipeline";
@@ -27,7 +28,7 @@ import {
   fileExists,
   getDirectoryFromFilePath,
   getFileSize,
-  getTextFileVersion,
+  getTextFilePresence,
   isContainerPath,
   openContainer,
   openTextFile,
@@ -182,7 +183,7 @@ function App() {
     },
     fileIo: {
       getFileSize,
-      getTextFileVersion,
+      getTextFilePresence,
       fileExists,
       readTextFile: readTextFileAtPath,
       streamReadTextFile: streamReadTextFileAtPath,
@@ -222,23 +223,17 @@ function App() {
   });
 
   onMount(() => {
-    let checkInFlight = false;
-    const checkForExternalChange = () => {
-      // Both triggers below can arrive for one activation. The check is
-      // idempotent, so collapsing them is only to save the second stat.
-      if (checkInFlight) {
-        return;
-      }
-      checkInFlight = true;
-      void fileLifecycle.checkForExternalChange()
-        .catch(() => {
-          // Save is where an unreadable file matters, and it says so there.
-          // Returning to the window is not the moment to interrupt typing with it.
-        })
-        .finally(() => {
-          checkInFlight = false;
-        });
-    };
+    // Both triggers below can arrive for one activation, and a check can still
+    // be running when the next activation arrives. Coalescing rather than
+    // ignoring keeps the duplicate cheap without losing the one that came too
+    // late to join the run in flight — which is the one after the window was
+    // away long enough for the file to change.
+    const checkForExternalChange = createCoalescingTrigger(() =>
+      fileLifecycle.checkForExternalChange().catch(() => {
+        // Save is where an unreadable file matters, and it says so there.
+        // Returning to the window is not the moment to interrupt typing with it.
+      })
+    );
 
     // Two triggers, because neither covers the other. The DOM event does not
     // fire on window re-activation in every webview — WebKitGTK is the one this

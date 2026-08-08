@@ -128,6 +128,7 @@ const SAVE_FAILED: &str = "SAVE_FAILED";
 const SAVE_EXTERNAL_CHANGE: &str = "SAVE_EXTERNAL_CHANGE";
 const SAVE_EXTERNAL_DELETE: &str = "SAVE_EXTERNAL_DELETE";
 const SAVE_EXTERNAL_APPEARED: &str = "SAVE_EXTERNAL_APPEARED";
+const SAVE_EXTERNAL_NOT_A_FILE: &str = "SAVE_EXTERNAL_NOT_A_FILE";
 
 impl SaveStreamError {
     fn failed(message: String) -> Self {
@@ -769,6 +770,8 @@ const DELETED_MESSAGE: &str =
     "The file was deleted on disk after it was opened. Save a copy, or recreate it.";
 const APPEARED_MESSAGE: &str =
     "Another file has appeared at this path since Wisty last looked. Save a copy, or explicitly overwrite it.";
+const NOT_A_FILE_MESSAGE: &str =
+    "This path is no longer a file, so it cannot be saved over. Save a copy somewhere else.";
 
 /// Refuses to publish a stream save whose target no longer matches what the
 /// document asserts about it.
@@ -781,6 +784,12 @@ fn ensure_expected_source(path: &Path, expected: &ExpectedSource) -> Result<(), 
     let version = match expected {
         ExpectedSource::Absent => {
             return match std::fs::metadata(path) {
+                // A directory cannot be renamed over at all, so saying "another
+                // file appeared" would be both wrong and unhelpful advice.
+                Ok(metadata) if !metadata.is_file() => Err(SaveStreamError::conflict(
+                    SAVE_EXTERNAL_NOT_A_FILE,
+                    NOT_A_FILE_MESSAGE,
+                )),
                 Ok(_) => Err(SaveStreamError::conflict(
                     SAVE_EXTERNAL_APPEARED,
                     APPEARED_MESSAGE,
@@ -812,6 +821,13 @@ fn ensure_expected_source(path: &Path, expected: &ExpectedSource) -> Result<(), 
             )));
         }
     };
+
+    if !metadata.is_file() {
+        return Err(SaveStreamError::conflict(
+            SAVE_EXTERNAL_NOT_A_FILE,
+            NOT_A_FILE_MESSAGE,
+        ));
+    }
 
     let changed = metadata.len() != version.size
         || version
@@ -1170,6 +1186,7 @@ mod tests {
         atspi_bus_override, cancel_save_stream, ensure_expected_source, finish_save_stream,
         modified_ms, start_save_stream, write_save_chunk, ExpectedSource, LaunchArgState,
         TextFileVersion, SAVE_EXTERNAL_APPEARED, SAVE_EXTERNAL_CHANGE, SAVE_EXTERNAL_DELETE,
+        SAVE_EXTERNAL_NOT_A_FILE,
     };
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::Path;
@@ -1518,5 +1535,32 @@ mod tests {
         save(&state(), &link, "fresh", None).expect("save should land");
 
         assert_eq!(std::fs::read_to_string(&link).unwrap(), "fresh");
+    }
+
+    /// A directory cannot be renamed over, so "the file changed" would be both
+    /// the wrong description and the wrong advice.
+    #[test]
+    fn save_reports_a_target_that_is_no_longer_a_file() {
+        let directory = test_directory("not-a-file");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "before").unwrap();
+        let expected = expect_present(&path);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        let error = ensure_expected_source(&path, &expected).unwrap_err();
+
+        assert_eq!(error.code, SAVE_EXTERNAL_NOT_A_FILE);
+    }
+
+    #[test]
+    fn save_reports_a_directory_where_a_new_file_was_going() {
+        let directory = test_directory("not-a-file-absent");
+        let path = directory.join("new.txt");
+        std::fs::create_dir(&path).unwrap();
+
+        let error = ensure_expected_source(&path, &ExpectedSource::Absent).unwrap_err();
+
+        assert_eq!(error.code, SAVE_EXTERNAL_NOT_A_FILE);
     }
 }

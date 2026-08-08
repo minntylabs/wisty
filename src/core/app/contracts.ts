@@ -56,6 +56,19 @@ export type ExpectedSaveSource =
   | { kind: "present"; version: TextFileVersion }
   | { kind: "absent" };
 
+/**
+ * What is at a path now.
+ *
+ * `not-a-file` is kept apart from `missing` because they are different
+ * situations to be told about and offer different ways out: a file that has
+ * gone can be recreated where it was, while a directory standing in its place
+ * cannot be written over at all.
+ */
+export type TextFilePresence =
+  | { kind: "present"; version: TextFileVersion }
+  | { kind: "missing" }
+  | { kind: "not-a-file" };
+
 export type FileLoadPhase = "idle" | "loading" | "cancelling" | "error";
 
 export type FileLoadProgress = {
@@ -91,7 +104,7 @@ export type FileDialogsPort = {
 
 export type FileIoPort = {
   getFileSize: (filePath: string) => Promise<number>;
-  getTextFileVersion: (filePath: string) => Promise<TextFileVersion | null>;
+  getTextFilePresence: (filePath: string) => Promise<TextFilePresence>;
   fileExists: (filePath: string) => Promise<boolean>;
   readTextFile: (filePath: string) => Promise<string>;
   streamReadTextFile: (

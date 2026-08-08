@@ -67,9 +67,12 @@ const SAVING_OVERLAY_DELAY_MS = 500;
  * How the file on disk disagrees with the document.
  *
  * `appeared` is the counterpart of `deleted` for a document being created: it
- * expected no file at its path, and something else put one there.
+ * expected no file at its path, and something else put one there. `not-a-file`
+ * is a directory, or anything else that is not a regular file, standing where
+ * the document's file should be — which neither a reload nor an overwrite can
+ * do anything with.
  */
-type ExternalChangeKind = "changed" | "deleted" | "appeared";
+type ExternalChangeKind = "changed" | "deleted" | "appeared" | "not-a-file";
 
 type ExternalChange = {
   filePath: string;
@@ -108,6 +111,8 @@ const externalChangeKindFromSaveError = (error: unknown): ExternalChangeKind | n
       return "deleted";
     case "SAVE_EXTERNAL_APPEARED":
       return "appeared";
+    case "SAVE_EXTERNAL_NOT_A_FILE":
+      return "not-a-file";
     default:
       return null;
   }
@@ -207,9 +212,10 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     observed: TextFileVersion | null = null
   ) => {
     observedExternalVersion = observed;
-    if (kind === "deleted") {
-      // The editor now holds the only copy of this text. Saying so keeps the
-      // close prompt in the way of losing it, whether or not it was edited.
+    if (kind === "deleted" || kind === "not-a-file") {
+      // The editor now holds the only copy of this text — there is nothing at
+      // the path to go back to. Saying so keeps the close prompt in the way of
+      // losing it, whether or not it was edited.
       deps.document.markDirty();
     }
     setExternalChange({ filePath, kind });
@@ -256,13 +262,18 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     setExternalChange(null);
     setExternalChangeDismissed(false);
     try {
-      const version = await deps.fileIo.getTextFileVersion(filePath);
+      const presence = await deps.fileIo.getTextFilePresence(filePath);
       if (!baselineIsCurrent(generation)) {
         return generation;
       }
       textFileBaselineError = null;
-      textFileBaseline = version ? { kind: "present", version } : { kind: "absent" };
-      if (!version && !options?.missingIsExpected) {
+      textFileBaseline =
+        presence.kind === "present" ? { kind: "present", version: presence.version } : { kind: "absent" };
+      if (presence.kind === "not-a-file") {
+        // Whatever this document was going to do with the path, it cannot:
+        // this is worth saying even when an empty path was expected.
+        raiseExternalChange(filePath, "not-a-file");
+      } else if (presence.kind === "missing" && !options?.missingIsExpected) {
         raiseExternalChange(filePath, "deleted");
       }
     } catch (error) {
@@ -315,7 +326,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     const filePath = deps.document.state.filePath;
     const baseline = textFileBaseline;
     const generation = textFileBaselineGeneration;
-    const current = await deps.fileIo.getTextFileVersion(filePath);
+    const current = await deps.fileIo.getTextFilePresence(filePath);
     if (
       generation !== textFileBaselineGeneration
       || deps.document.state.kind !== "text"
@@ -325,7 +336,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       return false;
     }
 
-    if (!current) {
+    if (current.kind === "not-a-file") {
+      if (externalChange()?.kind !== "not-a-file") {
+        raiseExternalChange(filePath, "not-a-file");
+      }
+      return true;
+    }
+
+    if (current.kind === "missing") {
       if (baseline.kind === "absent") {
         // Still empty, which is what a document being created here expects.
         retractExternalChange();
@@ -340,10 +358,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       return true;
     }
 
-    const differs = baseline.kind === "absent" || !sameTextFileVersion(baseline.version, current);
+    const version = current.version;
+    const differs = baseline.kind === "absent" || !sameTextFileVersion(baseline.version, version);
     if (differs) {
-      if (!observedExternalVersion || !sameTextFileVersion(observedExternalVersion, current)) {
-        raiseExternalChange(filePath, baseline.kind === "absent" ? "appeared" : "changed", current);
+      if (!observedExternalVersion || !sameTextFileVersion(observedExternalVersion, version)) {
+        raiseExternalChange(filePath, baseline.kind === "absent" ? "appeared" : "changed", version);
       }
       return true;
     }
@@ -360,9 +379,10 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    */
   const raiseExternalChangeFromSaveRace = async (filePath: string, kind: ExternalChangeKind) => {
     let observed: TextFileVersion | null = null;
-    if (kind !== "deleted") {
+    if (kind === "changed" || kind === "appeared") {
       try {
-        observed = await deps.fileIo.getTextFileVersion(filePath);
+        const presence = await deps.fileIo.getTextFilePresence(filePath);
+        observed = presence.kind === "present" ? presence.version : null;
       } catch {
         // Best effort: without it the next check raises the conflict again,
         // which is the safe direction to fail in.
@@ -1216,8 +1236,12 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    */
   const reloadExternalChange = async (filePath?: string) => {
     const standing = externalChange();
-    // Without a path given, a deletion has nothing to reload from.
-    const target = filePath ?? (standing?.kind === "deleted" ? undefined : standing?.filePath);
+    // A conflict whose whole point is that there is no file at the path has
+    // nothing to reload from, whichever way this was asked for.
+    if (standing?.kind === "deleted" || standing?.kind === "not-a-file") {
+      return;
+    }
+    const target = filePath ?? standing?.filePath;
     if (!target || !documentStillOpenAt(target) || fileOperationInProgress()) {
       return;
     }

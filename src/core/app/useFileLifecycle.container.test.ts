@@ -20,7 +20,13 @@ type HarnessOverrides = {
   openContainer?: (filePath: string) => Promise<{ transcript: string; meta: Record<string, unknown>; audioBytes: number }>;
   saveContainer?: (filePath: string, transcript: string) => Promise<void>;
   setLastDirectory?: () => Promise<void>;
+  /**
+   * The version on disk, or null for a path with no file. Mapped to the
+   * presence the port actually reports, so a test says only what it means.
+   */
   getTextFileVersion?: (filePath: string) => Promise<{ size: number; modifiedMs: number | null; device: number | null; inode: number | null } | null>;
+  /** For the one state a version cannot describe: something that is not a file. */
+  pathIsNotAFile?: () => boolean;
   finishSaveFileStream?: () => Promise<{ bytesWrittenTotal: number }>;
   /** Runs after each streamed chunk is written, so a test can edit mid-save. */
   onWriteChunk?: (chunkNumber: number) => void | Promise<void>;
@@ -107,7 +113,13 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     },
     fileIo: {
       getFileSize: async () => overrides.fileSize ?? 10,
-      getTextFileVersion: overrides.getTextFileVersion ?? (async () => null),
+      getTextFilePresence: async (filePath: string) => {
+        if (overrides.pathIsNotAFile?.()) {
+          return { kind: "not-a-file" as const };
+        }
+        const version = await (overrides.getTextFileVersion ?? (async () => null))(filePath);
+        return version ? { kind: "present" as const, version } : { kind: "missing" as const };
+      },
       fileExists: async () => true,
       readTextFile: async () => "plain text",
       streamReadTextFile,
@@ -1146,5 +1158,108 @@ describe("banner actions while a file operation runs", () => {
     await reloadDuringSave;
 
     expect(h.streamReadTextFile.mock.calls.length).toBe(readsAfterOpen);
+  });
+});
+
+/**
+ * A path that holds something other than a regular file — a directory left
+ * where the document's file was. It is neither a deletion nor a change: there
+ * is nothing to read back and nothing a rename can replace, so it has to be
+ * described as itself rather than borrow either of their descriptions.
+ */
+describe("a path that is no longer a file", () => {
+  const original = { size: 10, modifiedMs: 1_000, device: 1, inode: 2 };
+
+  it("is reported as its own conflict, not as a deletion", async () => {
+    let notAFile = false;
+    const h = createHarness({
+      getTextFileVersion: async () => original,
+      pathIsNotAFile: () => notAFile
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    notAFile = true;
+    await expect(h.lifecycle.checkForExternalChange()).resolves.toBe(true);
+
+    expect(h.lifecycle.externalChangeState.change()).toEqual({
+      filePath: "/tmp/notes.txt",
+      kind: "not-a-file"
+    });
+  });
+
+  it("marks the document unsaved, since the editor holds the only copy", async () => {
+    let notAFile = false;
+    const h = createHarness({
+      getTextFileVersion: async () => original,
+      pathIsNotAFile: () => notAFile
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    expect(h.document.state.isDirty).toBe(false);
+
+    notAFile = true;
+    await h.lifecycle.checkForExternalChange();
+
+    expect(h.document.state.isDirty).toBe(true);
+  });
+
+  it("blocks an ordinary save rather than writing into it", async () => {
+    let notAFile = false;
+    const h = createHarness({
+      getTextFileVersion: async () => original,
+      pathIsNotAFile: () => notAFile
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    notAFile = true;
+    await h.lifecycle.saveFile();
+
+    expect(h.startSaveFileStream).not.toHaveBeenCalled();
+    expect(h.lifecycle.externalChangeState.change()?.kind).toBe("not-a-file");
+  });
+
+  /**
+   * Even for a document creating a file: an empty path was expected, and a
+   * directory is not an empty path.
+   */
+  it("is reported for a document created where a directory now stands", async () => {
+    const h = createHarness({ pathIsNotAFile: () => true });
+
+    await h.lifecycle.openMissingFileAtPath("/tmp/new.txt");
+
+    expect(h.lifecycle.externalChangeState.change()).toEqual({
+      filePath: "/tmp/new.txt",
+      kind: "not-a-file"
+    });
+  });
+
+  it("does not offer to reload from it", async () => {
+    let notAFile = false;
+    const h = createHarness({
+      getTextFileVersion: async () => original,
+      pathIsNotAFile: () => notAFile
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    notAFile = true;
+    await h.lifecycle.checkForExternalChange();
+    const readsBefore = h.streamReadTextFile.mock.calls.length;
+
+    await h.lifecycle.reloadExternalChange();
+
+    expect(h.streamReadTextFile.mock.calls.length).toBe(readsBefore);
+  });
+
+  it("takes the conflict the backend reports when it catches one at the rename", async () => {
+    const h = createHarness({
+      getTextFileVersion: async () => original,
+      finishSaveFileStream: async () => {
+        throw { code: "SAVE_EXTERNAL_NOT_A_FILE", message: "This path is no longer a file." };
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    await h.lifecycle.saveFile();
+
+    expect(h.lifecycle.externalChangeState.change()?.kind).toBe("not-a-file");
+    expect(h.showError).not.toHaveBeenCalled();
   });
 });

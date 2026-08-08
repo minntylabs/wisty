@@ -93,7 +93,7 @@ function App() {
     currentCharacter: 0,
     totalCharacters: 0
   });
-  const [wordCount, setWordCount] = createSignal(0);
+  const [wordCount, setWordCount] = createSignal<number | null>(null);
   const [spellDictionaries, setSpellDictionaries] = createSignal<DictionaryInfo[]>([]);
   // Deliberately not persisted: transcript mode is a per-session tidying tool,
   // and its clicks are destructive enough that it should never be on at startup.

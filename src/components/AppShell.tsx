@@ -60,8 +60,11 @@ type AppShellProps = {
   statusBar: {
     enabled: boolean;
     formatViewMode: "formatted" | "plain";
-    /** The whole document's count, which arrives after typing stops. */
-    words: number;
+    /**
+     * The whole document's count, which arrives after typing stops. `null`
+     * until the document open now has been counted — never the last one's.
+     */
+    words: number | null;
   } & CursorPositionPayload;
   errorModal: {
     open: boolean;
@@ -104,7 +107,9 @@ export const AppShell = (props: AppShellProps) => {
             Character {props.statusBar.currentCharacter.toLocaleString()} of {props.statusBar.totalCharacters.toLocaleString()}
           </span>
           <span class="status-bar-words">
-            {props.statusBar.words.toLocaleString()} {props.statusBar.words === 1 ? "word" : "words"}
+            {props.statusBar.words === null
+              ? "counting\u2026"
+              : `${props.statusBar.words.toLocaleString()} ${props.statusBar.words === 1 ? "word" : "words"}`}
           </span>
           <span class="status-bar-mode">
             {props.statusBar.formatViewMode === "formatted" ? "Formatted view" : "Plain text view"}

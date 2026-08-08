@@ -17,15 +17,6 @@
  * closed.
  */
 
-/** A scan in progress, which may have stopped in the middle of a word. */
-export type WordScan = {
-  words: number;
-  /** Whether the previous chunk ended inside a word rather than after one. */
-  inWord: boolean;
-};
-
-export const EMPTY_SCAN: WordScan = { words: 0, inWord: false };
-
 const isWhitespace = (code: number) =>
   code === 32 // space
   || code === 9 // tab
@@ -39,17 +30,18 @@ const isWhitespace = (code: number) =>
   || code === 0x3000; // ideographic space
 
 /**
- * Counts the words in one line, continuing a scan.
+ * Counts the words in one line.
  *
  * A word is a run of non-whitespace, which is what makes this cheap enough to
  * run over a very large document. It counts a hyphenated word once and "don't"
  * once, and any punctuation standing alone — an em dash between spaces — once
  * too, which is the usual bargain for a status-bar count.
+ *
+ * A line is counted on its own because a line break is whitespace: no word
+ * carries from one line into the next, so there is no state between them.
  */
-export const scanLine = (line: string, scan: WordScan): WordScan => {
-  let { words } = scan;
-  // Lines arrive separated, and a line break is whitespace: a word can never
-  // continue across one, whatever the previous line ended with.
+export const countWordsInLine = (line: string): number => {
+  let words = 0;
   let inWord = false;
   for (let index = 0; index < line.length; index += 1) {
     if (isWhitespace(line.charCodeAt(index))) {
@@ -61,22 +53,23 @@ export const scanLine = (line: string, scan: WordScan): WordScan => {
       words += 1;
     }
   }
-  return { words, inWord };
+  return words;
 };
 
-/** Counts a whole document held in memory. Used by tests and small documents. */
+/** Counts a whole document that is already to hand. Used by the tests. */
 export const countWordsInLines = (lines: Iterable<string>): number => {
-  let scan = EMPTY_SCAN;
+  let words = 0;
   for (const line of lines) {
-    scan = scanLine(line, scan);
+    words += countWordsInLine(line);
   }
-  return scan.words;
+  return words;
 };
 
 export type WordCounterDeps = {
   /** A fresh reader over the whole document, one line at a time. */
   readLines: () => Iterable<string>;
-  onCount: (words: number) => void;
+  /** `null` when the count is not known: the document has been replaced. */
+  onCount: (words: number | null) => void;
   /** Characters to scan before handing control back. */
   sliceChars?: number;
   /** How long typing must stop before a scan starts. */
@@ -95,7 +88,9 @@ const IDLE_COST_RATIO = 5;
 const MAX_QUIET_MS = 30_000;
 
 export const createWordCounter = (deps: WordCounterDeps) => {
-  const sliceChars = deps.sliceChars ?? DEFAULT_SLICE_CHARS;
+  // At least one character per slice, or a slice would consume no lines and
+  // reschedule itself for ever.
+  const sliceChars = Math.max(1, deps.sliceChars ?? DEFAULT_SLICE_CHARS);
   const quietMs = deps.quietMs ?? DEFAULT_QUIET_MS;
 
   /** Invalidates a scan and any timer belonging to an earlier document. */
@@ -117,7 +112,7 @@ export const createWordCounter = (deps: WordCounterDeps) => {
 
   const runScan = (scanGeneration: number) => {
     const lines = deps.readLines()[Symbol.iterator]();
-    let scan = EMPTY_SCAN;
+    let words = 0;
     let elapsedMs = 0;
 
     const runSlice = () => {
@@ -132,10 +127,10 @@ export const createWordCounter = (deps: WordCounterDeps) => {
         if (next.done) {
           elapsedMs += Date.now() - startedAt;
           lastScanMs = elapsedMs;
-          deps.onCount(scan.words);
+          deps.onCount(words);
           return;
         }
-        scan = scanLine(next.value, scan);
+        words += countWordsInLine(next.value);
         scanned += next.value.length + 1;
       }
       elapsedMs += Date.now() - startedAt;
@@ -166,5 +161,18 @@ export const createWordCounter = (deps: WordCounterDeps) => {
     clearTimers();
   };
 
-  return { schedule, cancel };
+  /**
+   * Forgets the count because the document it described is gone.
+   *
+   * Without this the last document's total stays on screen until the new one
+   * has been counted — which for a large file is seconds of a confidently
+   * displayed wrong number, and for a document replaced by an empty one is
+   * indefinite, since replacing the state outright produces no edit to count.
+   */
+  const invalidate = () => {
+    cancel();
+    deps.onCount(null);
+  };
+
+  return { schedule, cancel, invalidate };
 };

@@ -42,8 +42,10 @@ type EditorAdapterOptions = {
   /**
    * The document's word count, which arrives after typing stops rather than
    * with each edit — see `wordCount` for why it cannot be counted inline.
+   * `null` while it is unknown, which is the case from the moment a document
+   * is replaced until its own count has been taken.
    */
-  onWordCountChanged?: (words: number) => void;
+  onWordCountChanged?: (words: number | null) => void;
   onFormatModeChanged: (mode: FormatViewMode) => void;
   /** Fired when the viewport or caret moves, so a remembered position can be re-captured. */
   onViewPositionChanged?: () => void;
@@ -500,6 +502,10 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     if (!editorView) {
       return;
     }
+    // Invalidate and ask again: text identical to what is already there
+    // produces no transaction, so the listener would never ask.
+    wordCounter.invalidate();
+    wordCounter.schedule();
     dispatchTextChange({
       from: 0,
       to: editorView.state.doc.length,
@@ -544,6 +550,10 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
 
     const nextState = createEditorState("");
     editorView.setState(nextState);
+    // Replacing the state outright is not a transaction, so the update
+    // listener never sees this and the count has to be asked for here.
+    wordCounter.invalidate();
+    wordCounter.schedule();
     revision = 0;
     editorView.scrollDOM.scrollTop = 0;
     editorView.scrollDOM.scrollLeft = 0;

@@ -165,11 +165,42 @@ describe("word count", () => {
     const { adapter, onWordCountChanged } = createAdapter();
 
     adapter.setText("one two three\nfour five");
-    expect(onWordCountChanged).not.toHaveBeenCalled();
+    // Not counted yet, and said so rather than showing a number for it.
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(null);
 
     await vi.runAllTimersAsync();
 
     expect(onWordCountChanged).toHaveBeenLastCalledWith(5);
+  });
+
+  /**
+   * The count on screen belongs to the document on screen. A new document has
+   * none until it has been counted, and must never wear the last one's.
+   */
+  it("forgets the last document's count the moment it is replaced", async () => {
+    const { adapter, onWordCountChanged } = createAdapter();
+    adapter.setText("one two three");
+    await vi.runAllTimersAsync();
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(3);
+
+    adapter.reset();
+
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(null);
+  });
+
+  /**
+   * Resetting replaces the state outright, which is not an edit, so nothing
+   * would ask for a count if the reset did not ask itself.
+   */
+  it("counts the empty document a reset leaves behind", async () => {
+    const { adapter, onWordCountChanged } = createAdapter();
+    adapter.setText("one two three");
+    await vi.runAllTimersAsync();
+
+    adapter.reset();
+    await vi.runAllTimersAsync();
+
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(0);
   });
 
   /**
@@ -217,6 +248,6 @@ describe("word count", () => {
     adapter.destroy();
     await vi.runAllTimersAsync();
 
-    expect(onWordCountChanged).not.toHaveBeenCalled();
+    expect(onWordCountChanged).not.toHaveBeenCalledWith(3);
   });
 });

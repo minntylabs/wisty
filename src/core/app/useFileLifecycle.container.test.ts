@@ -1057,3 +1057,44 @@ describe("a document replaced while the last one was still being measured", () =
     expect(h.lifecycle.externalChangeState.change()).toBeNull();
   });
 });
+
+/**
+ * Reload from Disk does not run at the moment it is clicked: a dirty document
+ * sends it through the discard confirmation first, and the world can move while
+ * that prompt is open.
+ */
+describe("reloading after the discard prompt", () => {
+  const original = { size: 10, modifiedMs: 1_000, device: 1, inode: 2 };
+
+  it("reloads the file it was asked for, even once the conflict has gone", async () => {
+    let version = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    version = { ...original, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+
+    // The file is put back as it was while the prompt is open, so the banner
+    // is retracted. The reload the user confirmed still has to happen.
+    version = original;
+    await h.lifecycle.checkForExternalChange();
+    expect(h.lifecycle.externalChangeState.change()).toBeNull();
+
+    await h.lifecycle.reloadExternalChange("/tmp/notes.txt");
+
+    expect(h.streamReadTextFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not reload over the document that replaced it", async () => {
+    let version = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    version = { ...original, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+
+    await h.lifecycle.openFileAtPath("/tmp/other.txt");
+    await h.lifecycle.reloadExternalChange("/tmp/notes.txt");
+
+    expect(h.streamReadTextFile).toHaveBeenCalledTimes(2);
+    expect(h.document.state.filePath).toBe("/tmp/other.txt");
+  });
+});

@@ -1193,24 +1193,35 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     }, "Unable to export text");
   };
 
-  const reloadExternalChange = async () => {
-    const change = externalChange();
-    if (!change || change.kind === "deleted") {
+  /**
+   * Reloads `filePath`, or the file the standing conflict is about.
+   *
+   * The path is a parameter because this can run a moment after the click that
+   * asked for it: a dirty document sends it through the discard confirmation
+   * first, and a conflict retracted while that prompt is open — the file put
+   * back as it was — would otherwise turn a confirmed reload into silence.
+   * What still has to hold is that it is this document's own file.
+   */
+  const reloadExternalChange = async (filePath?: string) => {
+    const standing = externalChange();
+    // Without a path given, a deletion has nothing to reload from.
+    const target = filePath ?? (standing?.kind === "deleted" ? undefined : standing?.filePath);
+    if (!target || !documentStillOpenAt(target)) {
       return;
     }
     await runWithErrorMessage(async () => {
       // The file on disk is by definition not the one whose size was checked
       // when this document was opened, so it goes through the limits again.
-      const size = await checkFileSizeLimits(change.filePath);
+      const size = await checkFileSizeLimits(target);
       if (size.kind === "refused") {
         deps.editor.focus();
         return;
       }
       await loadTextDocumentWithBaseline(
-        change.filePath,
-        () => loadEditorFileAsCleanFromFsStream(change.filePath, size.fileSize)
+        target,
+        () => loadEditorFileAsCleanFromFsStream(target, size.fileSize)
       );
-      deps.rememberedPosition.restore(change.filePath);
+      deps.rememberedPosition.restore(target);
       deps.editor.focus();
     }, "Unable to reload file");
   };

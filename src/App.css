@@ -254,11 +254,21 @@ body {
   cursor: pointer;
 }
 
+.button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .button.subtle {
   background: transparent;
 }
 
-:root[data-theme="dark"] .button.subtle {
+:root[data-theme="dark"] .button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.button.subtle {
   color: #ffffff;
 }
 

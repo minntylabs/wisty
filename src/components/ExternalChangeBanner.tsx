@@ -11,6 +11,15 @@ type ExternalChangeBannerProps = {
   visible: boolean;
   kind: ExternalChangeBannerKind | undefined;
   filePath: string;
+  /**
+   * Whether something that reads or writes the document is already running.
+   *
+   * These buttons sit outside the command pipeline, which is what stops the
+   * menus and shortcuts firing during a load or a save. Without this they are
+   * the one way to start a second one — overwriting a file with a half-loaded
+   * editor, or reloading over a save that is still streaming.
+   */
+  busy: boolean;
   onReload: () => void;
   onSaveAs: () => void;
   onOverwrite: () => void;
@@ -33,12 +42,13 @@ export const ExternalChangeBanner = (props: ExternalChangeBannerProps) => (
       <div class="external-change-actions">
         {/* There is nothing to reload from a file that is not there. */}
         <Show when={props.kind !== "deleted"}>
-          <button class="button subtle" onClick={props.onReload}>Reload from Disk</button>
+          <button class="button subtle" disabled={props.busy} onClick={props.onReload}>Reload from Disk</button>
         </Show>
-        <button class="button subtle" onClick={props.onSaveAs}>Save As</button>
-        <button class="button danger" onClick={props.onOverwrite}>
+        <button class="button subtle" disabled={props.busy} onClick={props.onSaveAs}>Save As</button>
+        <button class="button danger" disabled={props.busy} onClick={props.onOverwrite}>
           {props.kind === "deleted" ? "Recreate File" : "Overwrite"}
         </button>
+        {/* Dismiss only hides the banner, so it is safe whatever else runs. */}
         <button class="button subtle" onClick={props.onDismiss}>Dismiss</button>
       </div>
     </section>

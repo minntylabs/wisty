@@ -622,7 +622,17 @@ function App() {
             visible: fileLifecycle.externalChangeState.isVisible(),
             kind: fileLifecycle.externalChangeState.change()?.kind,
             filePath: fileLifecycle.externalChangeState.change()?.filePath ?? "",
-            onReload: () => void closeFlow.runOrConfirmDiscard(fileLifecycle.reloadExternalChange),
+            busy: isInteractionBlocked(),
+            // The path is taken at the click, not when the reload runs: a dirty
+            // document goes through the discard prompt first, and the conflict
+            // can be retracted while it is open.
+            onReload: () => {
+              const filePath = fileLifecycle.externalChangeState.change()?.filePath;
+              if (!filePath) {
+                return;
+              }
+              void closeFlow.runOrConfirmDiscard(() => fileLifecycle.reloadExternalChange(filePath));
+            },
             onSaveAs: () => void fileLifecycle.saveFileAs(),
             onOverwrite: () => void fileLifecycle.overwriteExternalChange(),
             onDismiss: fileLifecycle.dismissExternalChange

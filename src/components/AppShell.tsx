@@ -70,6 +70,7 @@ type AppShellProps = {
     visible: boolean;
     kind: ExternalChangeBannerKind | undefined;
     filePath: string;
+    busy: boolean;
     onReload: () => void;
     onSaveAs: () => void;
     onOverwrite: () => void;

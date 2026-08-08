@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { TextFileVersion } from "../app/contracts";
 
 export type SaveFileStreamStartResult = {
   streamId: string;
@@ -13,8 +14,13 @@ export type SaveFileStreamFinishResult = {
   bytesWrittenTotal: number;
 };
 
-export const startSaveFileStream = async (filePath: string): Promise<SaveFileStreamStartResult> => {
-  return invoke<SaveFileStreamStartResult>("start_save_file_stream", { filePath });
+export const startSaveFileStream = async (
+  filePath: string,
+  expectedSource?: TextFileVersion
+): Promise<SaveFileStreamStartResult> => {
+  return invoke<SaveFileStreamStartResult>("start_save_file_stream", expectedSource
+    ? { filePath, expectedSource }
+    : { filePath });
 };
 
 export const writeSaveFileChunk = async (

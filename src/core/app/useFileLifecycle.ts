@@ -6,7 +6,8 @@ import type {
   FileIoPort,
   FontPickerPort,
   SettingsPort,
-  TextSnapshot
+  TextSnapshot,
+  TextFileVersion
 } from "./contracts";
 import { createSignal } from "solid-js";
 import type { LaunchFileStreamChunkResult } from "../window/launchArgService";
@@ -26,7 +27,7 @@ type UseFileLifecycleDeps = {
     closeLaunchFileStream: (streamId: string) => Promise<void>;
   };
   saveFileStream: {
-    startSaveFileStream: (filePath: string) => Promise<{ streamId: string; filePath: string }>;
+    startSaveFileStream: (filePath: string, expectedSource?: TextFileVersion) => Promise<{ streamId: string; filePath: string }>;
     writeSaveFileChunk: (streamId: string, textChunk: string) => Promise<{ bytesWrittenTotal: number }>;
     finishSaveFileStream: (streamId: string) => Promise<{ bytesWrittenTotal: number }>;
     cancelSaveFileStream: (streamId: string) => Promise<void>;
@@ -57,6 +58,20 @@ const SAFE_MODE_PROBE_BYTES = 8 * 1024 * 1024;
 const LAUNCH_STREAM_READ_BYTES = 256 * 1024;
 const SAVE_STREAM_CHUNK_CHARS = 256 * 1024;
 const SAVING_OVERLAY_DELAY_MS = 500;
+
+type ExternalChange = {
+  filePath: string;
+  kind: "changed" | "deleted";
+};
+
+const sameTextFileVersion = (left: TextFileVersion, right: TextFileVersion) =>
+  left.size === right.size
+  && left.modifiedMs === right.modifiedMs
+  && left.device === right.device
+  && left.inode === right.inode;
+
+const isExternalChangeSaveError = (error: unknown) =>
+  toAppError(error, "SAVE_FAILED", "Unable to save file").message.includes("changed on disk after it was opened");
 
 class FileLoadCancelledError extends Error {
   constructor() {
@@ -101,11 +116,47 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   const [savingCharsWritten, setSavingCharsWritten] = createSignal(0);
   const [savingTotalChars, setSavingTotalChars] = createSignal<number | undefined>(undefined);
   const [saveCancelRequested, setSaveCancelRequested] = createSignal(false);
+  const [externalChange, setExternalChange] = createSignal<ExternalChange | null>(null);
+  const [externalChangeDismissed, setExternalChangeDismissed] = createSignal(false);
 
   let activeLoadId = 0;
   let loadingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
   let activeSaveId = 0;
   let savingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
+  let textFileVersion: TextFileVersion | null = null;
+
+  const clearTextFileVersion = () => {
+    textFileVersion = null;
+    setExternalChange(null);
+    setExternalChangeDismissed(false);
+  };
+
+  const captureTextFileVersion = async (filePath: string) => {
+    textFileVersion = await deps.fileIo.getTextFileVersion(filePath);
+    setExternalChange(null);
+    setExternalChangeDismissed(false);
+  };
+
+  const checkForExternalChange = async (): Promise<boolean> => {
+    if (deps.document.state.kind !== "text" || !deps.document.state.filePath || !textFileVersion) {
+      return false;
+    }
+    if (externalChange()) {
+      return true;
+    }
+    const current = await deps.fileIo.getTextFileVersion(deps.document.state.filePath);
+    if (!current) {
+      setExternalChange({ filePath: deps.document.state.filePath, kind: "deleted" });
+      setExternalChangeDismissed(false);
+      return true;
+    }
+    if (!sameTextFileVersion(textFileVersion, current)) {
+      setExternalChange({ filePath: deps.document.state.filePath, kind: "changed" });
+      setExternalChangeDismissed(false);
+      return true;
+    }
+    return false;
+  };
 
   const beginLoadingState = (filePath: string) => {
     activeLoadId += 1;
@@ -468,6 +519,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
   const newFile = async () => {
     await releaseContainer();
+    clearTextFileVersion();
     applySafeMode(false);
     loadEditorTextAsClean("");
     deps.document.setUntitled();
@@ -516,6 +568,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // leaves the open transcript usable instead of showing it without audio or
     // marker support.
     const container = await deps.fileIo.openContainer(filePath);
+    clearTextFileVersion();
     applySafeMode(false);
     // Before the text, so the markers are tracked from the moment it lands
     // rather than being discovered by a later edit.
@@ -561,6 +614,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await releaseContainer();
       await loadEditorFileAsCleanFromFsStream(selected.filePath, fileSize);
       deps.document.setFilePath(selected.filePath);
+      await captureTextFileVersion(selected.filePath);
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(selected.filePath));
       await deps.settings.actions.addRecentFile(selected.filePath);
       deps.rememberedPosition.restore(selected.filePath);
@@ -578,6 +632,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         await releaseContainer();
         await loadEditorFileAsCleanFromFsStream(filePath);
         deps.document.setFilePath(filePath);
+        await captureTextFileVersion(filePath);
         await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
         await deps.settings.actions.addRecentFile(filePath);
         deps.rememberedPosition.restore(filePath);
@@ -600,6 +655,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await releaseContainer();
       await loadEditorFileAsCleanFromLaunchStream(filePath, fileSizeBytes);
       deps.document.setFilePath(filePath);
+      await captureTextFileVersion(filePath);
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
       await deps.settings.actions.addRecentFile(filePath);
       deps.rememberedPosition.restore(filePath);
@@ -609,6 +665,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
   const openFileFromTextAtPath = async (filePath: string, text: string) => {
     await releaseContainer();
+    clearTextFileVersion();
     const useLargeLineSafeMode = text.length >= SAFE_MODE_PROBE_BYTES && !text.includes("\n");
     applySafeMode(useLargeLineSafeMode);
     loadEditorTextAsClean(text);
@@ -623,6 +680,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // yet — but this is a public method, and every other entry point releases.
     // Being the one exception is how the openFile bug survived.
     await releaseContainer();
+    clearTextFileVersion();
     applySafeMode(false);
     loadEditorTextAsClean("");
     deps.document.setFilePath(filePath);
@@ -641,7 +699,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    * returned revision is what the caller marks saved — it is the one on disk,
    * which is not necessarily the one in the editor by the time this resolves.
    */
-  const saveDocumentToPathViaStream = async (filePath: string, text?: string): Promise<number> => {
+  const saveDocumentToPathViaStream = async (
+    filePath: string,
+    text?: string,
+    expectedSource?: TextFileVersion
+  ): Promise<number> => {
     const source: TextSnapshot =
       text === undefined
         ? deps.editor.snapshotText()
@@ -653,7 +715,9 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     let charsWritten = 0;
 
     try {
-      const started = await deps.saveFileStream.startSaveFileStream(filePath);
+      const started = expectedSource
+        ? await deps.saveFileStream.startSaveFileStream(filePath, expectedSource)
+        : await deps.saveFileStream.startSaveFileStream(filePath);
       streamId = started.streamId;
 
       let from = 0;
@@ -784,6 +848,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await deps.rememberedPosition.migrate(previousPath, result.filePath);
       deps.document.setFilePath(result.filePath);
       deps.document.markSavedAt(savedRevision);
+      await captureTextFileVersion(result.filePath);
       await rememberLastDirectory(result.filePath);
       await rememberRecentFile(result.filePath);
       deps.editor.focus();
@@ -801,8 +866,26 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     }
 
     await runWithErrorMessage(async () => {
-      const savedRevision = await saveDocumentToPathViaStream(deps.document.state.filePath);
+      if (await checkForExternalChange()) {
+        setExternalChangeDismissed(false);
+        return;
+      }
+      let savedRevision: number;
+      try {
+        savedRevision = await saveDocumentToPathViaStream(
+          deps.document.state.filePath,
+          undefined,
+          textFileVersion ?? undefined
+        );
+      } catch (error) {
+        if (isExternalChangeSaveError(error)) {
+          setExternalChange({ filePath: deps.document.state.filePath, kind: "changed" });
+          return;
+        }
+        throw error;
+      }
       deps.document.markSavedAt(savedRevision);
+      await captureTextFileVersion(deps.document.state.filePath);
       await rememberLastDirectory(deps.document.state.filePath);
       deps.editor.focus();
     }, "Unable to save file");
@@ -822,6 +905,39 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await rememberLastDirectory(result.filePath);
       deps.editor.focus();
     }, "Unable to export text");
+  };
+
+  const reloadExternalChange = async () => {
+    const change = externalChange();
+    if (!change || change.kind === "deleted") {
+      return;
+    }
+    await runWithErrorMessage(async () => {
+      await loadEditorFileAsCleanFromFsStream(change.filePath);
+      deps.document.setFilePath(change.filePath);
+      await captureTextFileVersion(change.filePath);
+      deps.rememberedPosition.restore(change.filePath);
+      deps.editor.focus();
+    }, "Unable to reload file");
+  };
+
+  const overwriteExternalChange = async () => {
+    const change = externalChange();
+    if (!change) {
+      return;
+    }
+    await runWithErrorMessage(async () => {
+      const savedRevision = await saveDocumentToPathViaStream(change.filePath);
+      deps.document.markSavedAt(savedRevision);
+      await captureTextFileVersion(change.filePath);
+      await rememberLastDirectory(change.filePath);
+      deps.editor.focus();
+    }, "Unable to save file");
+  };
+
+  const dismissExternalChange = () => {
+    setExternalChangeDismissed(true);
+    deps.editor.focus();
   };
 
   const chooseEditorFont = async () => {
@@ -859,6 +975,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     chooseEditorFont,
     requestCancelLoading,
     requestCancelSaving,
+    checkForExternalChange,
+    reloadExternalChange,
+    overwriteExternalChange,
+    dismissExternalChange,
+    externalChangeState: {
+      change: externalChange,
+      isVisible: () => externalChange() !== null && !externalChangeDismissed()
+    },
     loadingState: {
       isLoading,
       showLoadingOverlay,

@@ -70,6 +70,43 @@ body {
   border: 1px solid var(--panel-border);
 }
 
+.external-change-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 12px;
+  background: #fff4d6;
+  border-bottom: 1px solid #d79b26;
+  color: #5e3d00;
+  font-size: 13px;
+}
+
+.external-change-banner strong,
+.external-change-banner span {
+  display: block;
+}
+
+.external-change-banner span {
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.external-change-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+:root[data-theme="dark"] .external-change-banner {
+  background: #402d08;
+  border-color: #9a6b12;
+  color: #f6d797;
+}
+
 .menu-bar {
   display: flex;
   align-items: center;

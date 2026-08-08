@@ -33,4 +33,16 @@ describe("save stream service", () => {
     expect(invoke).toHaveBeenNthCalledWith(3, "finish_save_file_stream", { streamId: "save-1" });
     expect(invoke).toHaveBeenNthCalledWith(4, "cancel_save_file_stream", { streamId: "save-1" });
   });
+
+  it("forwards an expected source version for a protected overwrite", async () => {
+    invoke.mockResolvedValueOnce({ streamId: "save-1", filePath: "/tmp/a.txt" });
+    const expectedSource = { size: 4, modifiedMs: 1_000, device: 1, inode: 2 };
+
+    await startSaveFileStream("/tmp/a.txt", expectedSource);
+
+    expect(invoke).toHaveBeenCalledWith("start_save_file_stream", {
+      filePath: "/tmp/a.txt",
+      expectedSource
+    });
+  });
 });

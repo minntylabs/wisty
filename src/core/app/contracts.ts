@@ -36,6 +36,14 @@ export type StreamReadTextFileOptions = {
   chunkSizeBytes?: number;
 };
 
+/** Metadata used to notice a text file replaced or edited outside Wisty. */
+export type TextFileVersion = {
+  size: number;
+  modifiedMs: number | null;
+  device: number | null;
+  inode: number | null;
+};
+
 export type FileLoadPhase = "idle" | "loading" | "cancelling" | "error";
 
 export type FileLoadProgress = {
@@ -71,6 +79,7 @@ export type FileDialogsPort = {
 
 export type FileIoPort = {
   getFileSize: (filePath: string) => Promise<number>;
+  getTextFileVersion: (filePath: string) => Promise<TextFileVersion | null>;
   fileExists: (filePath: string) => Promise<boolean>;
   readTextFile: (filePath: string) => Promise<string>;
   streamReadTextFile: (

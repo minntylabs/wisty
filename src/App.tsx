@@ -1,4 +1,4 @@
-import { createEffect, createSignal } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
@@ -27,6 +27,7 @@ import {
   fileExists,
   getDirectoryFromFilePath,
   getFileSize,
+  getTextFileVersion,
   isContainerPath,
   openContainer,
   openTextFile,
@@ -181,6 +182,7 @@ function App() {
     },
     fileIo: {
       getFileSize,
+      getTextFileVersion,
       fileExists,
       readTextFile: readTextFileAtPath,
       streamReadTextFile: streamReadTextFileAtPath,
@@ -217,6 +219,14 @@ function App() {
     closeWindow: () => appWindow.close(),
     focusEditor: () => editorAdapter.focus(),
     errors
+  });
+
+  onMount(() => {
+    const checkForExternalChange = () => {
+      void fileLifecycle.checkForExternalChange();
+    };
+    window.addEventListener("focus", checkForExternalChange);
+    onCleanup(() => window.removeEventListener("focus", checkForExternalChange));
   });
 
   const openAboutDialog = async () => {
@@ -578,6 +588,15 @@ function App() {
             open: errorModalQueue.open(),
             entry: errorModalQueue.current(),
             onDismiss: dismissErrorModalAndRefocus
+          }}
+          externalChange={{
+            visible: fileLifecycle.externalChangeState.isVisible(),
+            kind: fileLifecycle.externalChangeState.change()?.kind,
+            filePath: fileLifecycle.externalChangeState.change()?.filePath ?? "",
+            onReload: () => void fileLifecycle.reloadExternalChange(),
+            onSaveAs: () => void fileLifecycle.saveFileAs(),
+            onOverwrite: () => void fileLifecycle.overwriteExternalChange(),
+            onDismiss: fileLifecycle.dismissExternalChange
           }}
         />
       </MenuProvider>

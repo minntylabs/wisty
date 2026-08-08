@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { open as openFile, readTextFile, stat, writeTextFile } from "@tauri-apps/plugin-fs";
+import type { TextFileVersion } from "../app/contracts";
 
 export type OpenFileResult =
   | { kind: "cancelled" }
@@ -189,6 +190,26 @@ export const streamReadTextFileAtPath = async function* (
 export const getFileSize = async (filePath: string): Promise<number> => {
   const metadata = await stat(filePath);
   return metadata.size;
+};
+
+const safeFileIdentityNumber = (value: number | null): number | null =>
+  typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+
+export const getTextFileVersion = async (filePath: string): Promise<TextFileVersion | null> => {
+  try {
+    const metadata = await stat(filePath);
+    if (!metadata.isFile) {
+      return null;
+    }
+    return {
+      size: metadata.size,
+      modifiedMs: metadata.mtime?.getTime() ?? null,
+      device: safeFileIdentityNumber(metadata.dev),
+      inode: safeFileIdentityNumber(metadata.ino)
+    };
+  } catch {
+    return null;
+  }
 };
 
 export const fileExists = async (filePath: string): Promise<boolean> => {

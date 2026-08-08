@@ -20,6 +20,8 @@ type HarnessOverrides = {
   openContainer?: (filePath: string) => Promise<{ transcript: string; meta: Record<string, unknown>; audioBytes: number }>;
   saveContainer?: (filePath: string, transcript: string) => Promise<void>;
   setLastDirectory?: () => Promise<void>;
+  getTextFileVersion?: () => Promise<{ size: number; modifiedMs: number | null; device: number | null; inode: number | null } | null>;
+  finishSaveFileStream?: () => Promise<{ bytesWrittenTotal: number }>;
   /** Runs after each streamed chunk is written, so a test can edit mid-save. */
   onWriteChunk?: (chunkNumber: number) => void | Promise<void>;
   /** What the open dialog returns. Defaults to the container. */
@@ -44,6 +46,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
   const saveContainer = vi.fn(overrides.saveContainer ?? (async () => {}));
   const savedChunks: string[] = [];
   const startSaveFileStream = vi.fn(async (filePath: string) => ({ streamId: "s", filePath }));
+  const finishSaveFileStream = vi.fn(overrides.finishSaveFileStream ?? (async () => ({ bytesWrittenTotal: 1 })));
   const markersEnabled = vi.fn((enabled: boolean) => {
     events.push(enabled ? "markers-on" : "markers-off");
   });
@@ -100,6 +103,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     },
     fileIo: {
       getFileSize: async () => overrides.fileSize ?? 10,
+      getTextFileVersion: overrides.getTextFileVersion ?? (async () => null),
       fileExists: async () => true,
       readTextFile: async () => "plain text",
       streamReadTextFile,
@@ -123,7 +127,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
         await overrides.onWriteChunk?.(savedChunks.length);
         return { bytesWrittenTotal: savedChunks.join("").length };
       },
-      finishSaveFileStream: async () => ({ bytesWrittenTotal: 1 }),
+      finishSaveFileStream,
       cancelSaveFileStream: async () => {}
     },
     fontPicker: { chooseEditorFont: async () => null },
@@ -149,6 +153,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     saveContainer,
     savedChunks,
     startSaveFileStream,
+    finishSaveFileStream,
     streamReadTextFile,
     markersEnabled,
     releasePlayback,
@@ -547,6 +552,66 @@ describe("saving a text document while it is being edited", () => {
     await h.lifecycle.saveFile();
 
     expect(h.savedChunks.join("")).toBe("hello");
+    expect(h.showError).not.toHaveBeenCalled();
+  });
+});
+
+describe("external text-file changes", () => {
+  const original = { size: 10, modifiedMs: 1_000, device: 1, inode: 2 };
+
+  it("shows a conflict and blocks an ordinary save when the file changed", async () => {
+    let version = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    version = { ...original, modifiedMs: 2_000 };
+
+    await h.lifecycle.checkForExternalChange();
+    h.lifecycle.dismissExternalChange();
+    expect(h.lifecycle.externalChangeState.isVisible()).toBe(false);
+    await h.lifecycle.saveFile();
+
+    expect(h.lifecycle.externalChangeState.change()).toEqual({ filePath: "/tmp/notes.txt", kind: "changed" });
+    expect(h.lifecycle.externalChangeState.isVisible()).toBe(true);
+    expect(h.startSaveFileStream).not.toHaveBeenCalled();
+  });
+
+  it("allows an explicit overwrite after an external change", async () => {
+    let version = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    version = { ...original, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+
+    await h.lifecycle.overwriteExternalChange();
+
+    expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/notes.txt");
+    expect(h.lifecycle.externalChangeState.change()).toBeNull();
+  });
+
+  it("retains a deleted file's text instead of reloading it as empty", async () => {
+    let version: typeof original | null = original;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    version = null;
+
+    await h.lifecycle.checkForExternalChange();
+
+    expect(h.lifecycle.externalChangeState.change()).toEqual({ filePath: "/tmp/notes.txt", kind: "deleted" });
+    expect(h.editorText.value).toBe("plain text");
+  });
+
+  it("shows a conflict instead of an error when the backend catches a final save race", async () => {
+    const h = createHarness({
+      getTextFileVersion: async () => original,
+      finishSaveFileStream: async () => {
+        throw new Error("The file changed on disk after it was opened. Reload it, save a copy, or explicitly overwrite it.");
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    await h.lifecycle.saveFile();
+
+    expect(h.lifecycle.externalChangeState.isVisible()).toBe(true);
     expect(h.showError).not.toHaveBeenCalled();
   });
 });

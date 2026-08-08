@@ -3,6 +3,7 @@ import { AboutDialog } from "./AboutDialog";
 import { AddedWordsDialog } from "./AddedWordsDialog";
 import { ConfirmDiscardModal } from "./ConfirmDiscardModal";
 import { ErrorModal } from "./ErrorModal";
+import { ExternalChangeBanner } from "./ExternalChangeBanner";
 import { FileLoadingModal } from "./FileLoadingModal";
 import { FileSavingModal } from "./FileSavingModal";
 import { LargeFileOpenModal } from "./LargeFileOpenModal";
@@ -65,6 +66,15 @@ type AppShellProps = {
     entry: ErrorModalEntry | null;
     onDismiss: () => void;
   };
+  externalChange: {
+    visible: boolean;
+    kind: "changed" | "deleted" | undefined;
+    filePath: string;
+    onReload: () => void;
+    onSaveAs: () => void;
+    onOverwrite: () => void;
+    onDismiss: () => void;
+  };
 };
 
 export const AppShell = (props: AppShellProps) => {
@@ -79,6 +89,8 @@ export const AppShell = (props: AppShellProps) => {
       <Show when={props.safeModeActive}>
         <div class="large-line-safe-banner">Opened in large-line safe mode for stability.</div>
       </Show>
+
+      <ExternalChangeBanner {...props.externalChange} />
 
       <Show when={props.statusBar.enabled}>
         <div class="status-bar">

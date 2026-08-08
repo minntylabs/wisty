@@ -1,13 +1,13 @@
 use log::LevelFilter;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::File;
 use std::fs::OpenOptions;
+use std::fs::{File, Metadata};
 use std::io::BufWriter;
 use std::io::ErrorKind;
 use std::io::{IsTerminal, Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -92,6 +92,16 @@ struct SaveFileStream {
     temp_path: PathBuf,
     writer: BufWriter<File>,
     bytes_written_total: u64,
+    expected_source: Option<TextFileVersion>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TextFileVersion {
+    size: u64,
+    modified_ms: Option<i64>,
+    device: Option<u64>,
+    inode: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -692,10 +702,50 @@ fn build_save_temp_path(target_path: &Path, stream_id: &str) -> Result<PathBuf, 
     Ok(parent.join(temp_name))
 }
 
+fn modified_ms(metadata: &Metadata) -> Option<i64> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .try_into()
+        .ok()
+}
+
+/// Refuses to publish a stream save over a text file that changed after Wisty
+/// opened it. The check happens immediately before rename; an external writer
+/// can still race that final syscall, because portable rename is not conditional.
+fn ensure_text_file_is_unchanged(path: &Path, expected: &TextFileVersion) -> Result<(), String> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        format!(
+            "The file changed on disk after it was opened and cannot be saved safely: {} ({error})",
+            path.display()
+        )
+    })?;
+    if metadata.len() != expected.size
+        || expected
+            .modified_ms
+            .is_some_and(|modified| modified_ms(&metadata) != Some(modified))
+    {
+        return Err("The file changed on disk after it was opened. Reload it, save a copy, or explicitly overwrite it.".to_string());
+    }
+    #[cfg(unix)]
+    if expected
+        .device
+        .is_some_and(|device| device != metadata.dev())
+        || expected.inode.is_some_and(|inode| inode != metadata.ino())
+    {
+        return Err("The file changed on disk after it was opened. Reload it, save a copy, or explicitly overwrite it.".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn start_save_file_stream(
     state: tauri::State<'_, LaunchArgState>,
     file_path: String,
+    expected_source: Option<TextFileVersion>,
 ) -> Result<SaveFileStreamStartResult, String> {
     if file_path.trim().is_empty() {
         return Err("Save path cannot be empty".to_string());
@@ -754,6 +804,7 @@ fn start_save_file_stream(
         temp_path,
         writer: BufWriter::new(file),
         bytes_written_total: 0,
+        expected_source,
     };
 
     {
@@ -834,6 +885,13 @@ fn finish_save_file_stream(
     }
 
     drop(stream.writer);
+
+    if let Some(expected) = &stream.expected_source {
+        if let Err(error) = ensure_text_file_is_unchanged(&stream.target_path, expected) {
+            let _ = std::fs::remove_file(&stream.temp_path);
+            return Err(error);
+        }
+    }
 
     if let Err(error) = std::fs::rename(&stream.temp_path, &stream.target_path) {
         let _ = std::fs::remove_file(&stream.temp_path);
@@ -993,7 +1051,18 @@ mod window_title;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::atspi_bus_override;
+    use super::{atspi_bus_override, ensure_text_file_is_unchanged, modified_ms, TextFileVersion};
+    use std::os::unix::fs::MetadataExt;
+
+    fn version(path: &std::path::Path) -> TextFileVersion {
+        let metadata = std::fs::metadata(path).unwrap();
+        TextFileVersion {
+            size: metadata.len(),
+            modified_ms: modified_ms(&metadata),
+            device: Some(metadata.dev()),
+            inode: Some(metadata.ino()),
+        }
+    }
 
     #[test]
     fn disables_the_bus_by_default() {
@@ -1003,5 +1072,21 @@ mod tests {
     #[test]
     fn leaves_the_bus_alone_when_accessibility_is_asked_for() {
         assert_eq!(atspi_bus_override(true), None);
+    }
+
+    #[test]
+    fn save_refuses_a_replaced_text_file() {
+        let directory =
+            std::env::temp_dir().join(format!("wisty-save-version-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "before").unwrap();
+        let expected = version(&path);
+
+        let replacement = directory.join("replacement.txt");
+        std::fs::write(&replacement, "after!").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        assert!(ensure_text_file_is_unchanged(&path, &expected).is_err());
     }
 }

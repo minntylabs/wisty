@@ -48,12 +48,23 @@ describe("isContainerPath", () => {
 });
 
 describe("Save As extensions", () => {
-  it("appends the requested extension to Windows paths without one", async () => {
-    dialogSave.mockResolvedValueOnce("C:\\exports\\transcript");
-    await expect(saveContainerPathAs()).resolves.toEqual({ kind: "saved", filePath: "C:\\exports\\transcript.tsf" });
+  /**
+   * The dot that matters is the one in the file name. A dotted directory —
+   * `~/my.exports/transcript` — has a dot after no extension at all, and
+   * mistaking it for one would refuse a perfectly good path.
+   */
+  it("appends the requested extension when only a directory carries a dot", async () => {
+    dialogSave.mockResolvedValueOnce("/home/dan/my.exports/transcript");
+    await expect(saveContainerPathAs()).resolves.toEqual({
+      kind: "saved",
+      filePath: "/home/dan/my.exports/transcript.tsf"
+    });
 
-    dialogSave.mockResolvedValueOnce("C:\\exports\\export");
-    await expect(saveTextExportPathAs()).resolves.toEqual({ kind: "saved", filePath: "C:\\exports\\export.txt" });
+    dialogSave.mockResolvedValueOnce("/home/dan/my.exports/export");
+    await expect(saveTextExportPathAs()).resolves.toEqual({
+      kind: "saved",
+      filePath: "/home/dan/my.exports/export.txt"
+    });
   });
 });
 

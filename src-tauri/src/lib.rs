@@ -6,7 +6,6 @@ use std::fs::{File, Metadata};
 use std::io::BufWriter;
 use std::io::ErrorKind;
 use std::io::{IsTerminal, Read, Write};
-#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -165,7 +164,7 @@ struct SaveFileStreamWriteResult {
     bytes_written_total: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct SaveFileStreamFinishResult {
     bytes_written_total: u64,
@@ -249,16 +248,7 @@ fn normalize_cli_path(raw: &str) -> Result<PathBuf, String> {
         if uri_path.is_empty() {
             return Err("Invalid file:// path argument".to_string());
         }
-        let decoded = percent_decode(uri_path)?;
-        #[cfg(windows)]
-        {
-            let normalized = decoded.strip_prefix('/').unwrap_or(&decoded);
-            PathBuf::from(normalized)
-        }
-        #[cfg(not(windows))]
-        {
-            PathBuf::from(decoded)
-        }
+        PathBuf::from(percent_decode(uri_path)?)
     } else {
         PathBuf::from(raw)
     };
@@ -449,7 +439,6 @@ fn choose_editor_font(
     app: tauri::AppHandle,
     current: Option<EditorFontInput>,
 ) -> Result<Option<EditorFontSelection>, String> {
-    #[cfg(target_os = "linux")]
     {
         use gtk::glib::translate::IntoGlib;
         use gtk::prelude::*;
@@ -520,12 +509,6 @@ fn choose_editor_font(
         .map_err(|error| error.to_string())?;
 
         rx.recv().map_err(|error| error.to_string())
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = app;
-        Ok(None)
     }
 }
 
@@ -811,22 +794,15 @@ fn ensure_expected_source(path: &Path, expected: &ExpectedSource) -> Result<(), 
         }
     };
 
-    if metadata.len() != version.size
+    let changed = metadata.len() != version.size
         || version
             .modified_ms
             .is_some_and(|modified| modified_ms(&metadata) != Some(modified))
-    {
-        return Err(SaveStreamError::conflict(
-            SAVE_EXTERNAL_CHANGE,
-            CHANGED_MESSAGE,
-        ));
-    }
-    #[cfg(unix)]
-    if version
-        .device
-        .is_some_and(|device| device != metadata.dev())
-        || version.inode.is_some_and(|inode| inode != metadata.ino())
-    {
+        || version
+            .device
+            .is_some_and(|device| device != metadata.dev())
+        || version.inode.is_some_and(|inode| inode != metadata.ino());
+    if changed {
         return Err(SaveStreamError::conflict(
             SAVE_EXTERNAL_CHANGE,
             CHANGED_MESSAGE,
@@ -838,6 +814,16 @@ fn ensure_expected_source(path: &Path, expected: &ExpectedSource) -> Result<(), 
 #[tauri::command]
 fn start_save_file_stream(
     state: tauri::State<'_, LaunchArgState>,
+    file_path: String,
+    expected_source: Option<ExpectedSource>,
+) -> Result<SaveFileStreamStartResult, String> {
+    start_save_stream(&state, file_path, expected_source)
+}
+
+/// The body of the command, over the state rather than Tauri's handle to it, so
+/// the save protocol can be exercised against real files in tests.
+fn start_save_stream(
+    state: &LaunchArgState,
     file_path: String,
     expected_source: Option<ExpectedSource>,
 ) -> Result<SaveFileStreamStartResult, String> {
@@ -857,7 +843,6 @@ fn start_save_file_stream(
     };
 
     let temp_path = build_save_temp_path(&target_path, &stream_id)?;
-    #[cfg(unix)]
     let existing_mode = match std::fs::metadata(&target_path) {
         Ok(metadata) => Some(metadata.permissions().mode()),
         Err(error) if error.kind() == ErrorKind::NotFound => None,
@@ -880,7 +865,6 @@ fn start_save_file_stream(
             )
         })?;
 
-    #[cfg(unix)]
     if let Some(mode) = existing_mode {
         if let Err(error) =
             std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode))
@@ -921,6 +905,14 @@ fn write_save_file_chunk(
     stream_id: String,
     text_chunk: String,
 ) -> Result<SaveFileStreamWriteResult, String> {
+    write_save_chunk(&state, stream_id, text_chunk)
+}
+
+fn write_save_chunk(
+    state: &LaunchArgState,
+    stream_id: String,
+    text_chunk: String,
+) -> Result<SaveFileStreamWriteResult, String> {
     let mut streams = state
         .active_save_streams
         .lock()
@@ -948,6 +940,13 @@ fn write_save_file_chunk(
 #[tauri::command]
 fn finish_save_file_stream(
     state: tauri::State<'_, LaunchArgState>,
+    stream_id: String,
+) -> Result<SaveFileStreamFinishResult, SaveStreamError> {
+    finish_save_stream(&state, stream_id)
+}
+
+fn finish_save_stream(
+    state: &LaunchArgState,
     stream_id: String,
 ) -> Result<SaveFileStreamFinishResult, SaveStreamError> {
     let mut stream = {
@@ -1005,6 +1004,10 @@ fn cancel_save_file_stream(
     state: tauri::State<'_, LaunchArgState>,
     stream_id: String,
 ) -> Result<(), String> {
+    cancel_save_stream(&state, stream_id)
+}
+
+fn cancel_save_stream(state: &LaunchArgState, stream_id: String) -> Result<(), String> {
     let maybe_stream = {
         let mut streams = state
             .active_save_streams
@@ -1050,7 +1053,6 @@ fn cancel_save_file_stream(
 /// `WISTY_ENABLE_A11Y` turns it off for anyone who needs the accessibility tree
 /// more than they need the editor not to crash. Drop the whole thing once a
 /// fixed WebKitGTK is widely shipped.
-#[cfg(target_os = "linux")]
 fn atspi_bus_override(a11y_requested: bool) -> Option<&'static str> {
     if a11y_requested {
         None
@@ -1060,7 +1062,6 @@ fn atspi_bus_override(a11y_requested: bool) -> Option<&'static str> {
 }
 
 /// Must run before GTK is initialised, since the web process inherits it.
-#[cfg(target_os = "linux")]
 fn disable_atspi_bridge() {
     if let Some(address) = atspi_bus_override(std::env::var_os("WISTY_ENABLE_A11Y").is_some()) {
         std::env::set_var("AT_SPI_BUS_ADDRESS", address);
@@ -1068,7 +1069,6 @@ fn disable_atspi_bridge() {
 }
 
 pub fn run() {
-    #[cfg(target_os = "linux")]
     disable_atspi_bridge();
 
     let launch_file = match resolve_launch_file_arg() {
@@ -1143,13 +1143,15 @@ mod spellcheck;
 mod tsf;
 mod window_title;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::{
-        atspi_bus_override, ensure_expected_source, modified_ms, ExpectedSource, TextFileVersion,
-        SAVE_EXTERNAL_APPEARED, SAVE_EXTERNAL_CHANGE, SAVE_EXTERNAL_DELETE,
+        atspi_bus_override, cancel_save_stream, ensure_expected_source, finish_save_stream,
+        modified_ms, start_save_stream, write_save_chunk, ExpectedSource, LaunchArgState,
+        TextFileVersion, SAVE_EXTERNAL_APPEARED, SAVE_EXTERNAL_CHANGE, SAVE_EXTERNAL_DELETE,
     };
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::Path;
 
     fn expect_present(path: &std::path::Path) -> ExpectedSource {
         let metadata = std::fs::metadata(path).unwrap();
@@ -1228,5 +1230,217 @@ mod tests {
 
         let error = ensure_expected_source(&path, &ExpectedSource::Absent).unwrap_err();
         assert_eq!(error.code, SAVE_EXTERNAL_APPEARED);
+    }
+
+    /// Drives the whole save protocol the frontend drives, against a real file.
+    ///
+    /// Everything below this point tests the save as it actually runs: real
+    /// temporary files, a real rename, a real `stat` for the assertion. The
+    /// interleavings are exact rather than timed — the test writes to the file
+    /// between the steps of the save, which is precisely the window an external
+    /// writer gets.
+    fn save(
+        state: &LaunchArgState,
+        path: &Path,
+        text: &str,
+        expected: Option<ExpectedSource>,
+    ) -> Result<(), &'static str> {
+        let started = start_save_stream(state, path.to_string_lossy().to_string(), expected)
+            .expect("save stream should start");
+        write_save_chunk(state, started.stream_id.clone(), text.to_string())
+            .expect("chunk should be written");
+        finish_save_stream(state, started.stream_id)
+            .map(|_| ())
+            .map_err(|error| error.code)
+    }
+
+    fn state() -> LaunchArgState {
+        LaunchArgState::new(None)
+    }
+
+    /// Nothing of the save may be left behind, whether it landed or not.
+    fn only_file_in(directory: &Path) -> Option<std::path::PathBuf> {
+        let mut entries: Vec<_> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert!(
+            entries.len() <= 1,
+            "save left extra files behind: {entries:?}"
+        );
+        entries.pop()
+    }
+
+    #[test]
+    fn a_save_over_an_unchanged_file_lands() {
+        // The ordinary case, and the one that runs on every Ctrl+S: the
+        // assertion has to *pass* against a file nothing else has touched.
+        let directory = test_directory("unchanged");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "before").unwrap();
+        let expected = expect_present(&path);
+
+        save(&state(), &path, "after", Some(expected)).expect("save should land");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after");
+        assert_eq!(only_file_in(&directory), Some(path));
+    }
+
+    #[test]
+    fn a_save_refuses_a_file_rewritten_while_it_was_writing() {
+        let directory = test_directory("rewritten-midsave");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "before").unwrap();
+        let expected = expect_present(&path);
+        let state = state();
+
+        let started =
+            start_save_stream(&state, path.to_string_lossy().to_string(), Some(expected)).unwrap();
+        write_save_chunk(&state, started.stream_id.clone(), "after".to_string()).unwrap();
+        // The writer lands between the last chunk and the rename.
+        std::fs::write(&path, "theirs, not ours").unwrap();
+
+        let error = finish_save_stream(&state, started.stream_id).unwrap_err();
+
+        assert_eq!(error.code, SAVE_EXTERNAL_CHANGE);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs, not ours");
+        assert_eq!(only_file_in(&directory), Some(path));
+    }
+
+    #[test]
+    fn a_save_reports_a_file_deleted_while_it_was_writing() {
+        let directory = test_directory("deleted-midsave");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "before").unwrap();
+        let expected = expect_present(&path);
+        let state = state();
+
+        let started =
+            start_save_stream(&state, path.to_string_lossy().to_string(), Some(expected)).unwrap();
+        write_save_chunk(&state, started.stream_id.clone(), "after".to_string()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let error = finish_save_stream(&state, started.stream_id).unwrap_err();
+
+        assert_eq!(error.code, SAVE_EXTERNAL_DELETE);
+        // Refused, so the file stays deleted rather than quietly reappearing.
+        assert!(!path.exists());
+        assert_eq!(only_file_in(&directory), None);
+    }
+
+    #[test]
+    fn a_save_creating_a_file_lands_when_the_path_is_still_empty() {
+        let directory = test_directory("creating");
+        let path = directory.join("new.txt");
+
+        save(&state(), &path, "fresh", Some(ExpectedSource::Absent)).expect("save should land");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
+        assert_eq!(only_file_in(&directory), Some(path));
+    }
+
+    #[test]
+    fn a_save_creating_a_file_refuses_one_that_appeared_under_it() {
+        let directory = test_directory("appeared-midsave");
+        let path = directory.join("new.txt");
+        let state = state();
+
+        let started = start_save_stream(
+            &state,
+            path.to_string_lossy().to_string(),
+            Some(ExpectedSource::Absent),
+        )
+        .unwrap();
+        write_save_chunk(&state, started.stream_id.clone(), "ours".to_string()).unwrap();
+        std::fs::write(&path, "someone else's").unwrap();
+
+        let error = finish_save_stream(&state, started.stream_id).unwrap_err();
+
+        assert_eq!(error.code, SAVE_EXTERNAL_APPEARED);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "someone else's");
+        assert_eq!(only_file_in(&directory), Some(path));
+    }
+
+    #[test]
+    fn a_cancelled_save_leaves_the_file_and_the_directory_alone() {
+        let directory = test_directory("cancelled");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "before").unwrap();
+        let state = state();
+
+        let started = start_save_stream(&state, path.to_string_lossy().to_string(), None).unwrap();
+        write_save_chunk(&state, started.stream_id.clone(), "abandoned".to_string()).unwrap();
+        cancel_save_stream(&state, started.stream_id).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before");
+        assert_eq!(only_file_in(&directory), Some(path));
+    }
+
+    /// The rename replaces the file, so the mode has to be carried across or
+    /// every save would reset it to the process umask.
+    #[test]
+    fn a_save_keeps_the_file_mode_it_replaced() {
+        let directory = test_directory("mode");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "before").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let expected = expect_present(&path);
+
+        save(&state(), &path, "after", Some(expected)).expect("save should land");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+    }
+
+    /// Characterises what mtime can and cannot separate, rather than Wisty.
+    ///
+    /// A version carries mtime in whole milliseconds, because that is what a
+    /// JavaScript `Date` holds and the baseline is taken on that side. ext4
+    /// timestamps in nanoseconds, so the resolution Wisty actually gets is the
+    /// millisecond, and this is where that lands.
+    #[test]
+    fn a_same_size_rewrite_a_millisecond_later_is_visible() {
+        let directory = test_directory("mtime-resolution");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "aaaa").unwrap();
+        let before = modified_ms(&std::fs::metadata(&path).unwrap());
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::fs::write(&path, "bbbb").unwrap();
+        let after = modified_ms(&std::fs::metadata(&path).unwrap());
+
+        assert_ne!(
+            before, after,
+            "mtime cannot separate writes a millisecond apart"
+        );
+    }
+
+    /// The documented blind spot, demonstrated rather than assumed.
+    ///
+    /// Detection is exactly as fine as the millisecond it records: two writes
+    /// that leave the size and the inode alone are one version if they share a
+    /// millisecond, and two if they do not. In practice the baseline is taken
+    /// when a file is opened and the external write comes later, so the window
+    /// is a millisecond wide — a script rewriting a file the instant Wisty
+    /// reads it is what falls into it. Closing it would mean carrying the
+    /// nanoseconds `stat` already returns, which a JavaScript `Date` cannot
+    /// hold, so the baseline would have to move to the Rust side.
+    #[test]
+    fn a_same_size_rewrite_is_seen_only_if_the_millisecond_moved() {
+        let directory = test_directory("mtime-blind-spot");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "aaaa").unwrap();
+        let expected = expect_present(&path);
+        let before = modified_ms(&std::fs::metadata(&path).unwrap());
+
+        std::fs::write(&path, "bbbb").unwrap();
+        let after = modified_ms(&std::fs::metadata(&path).unwrap());
+
+        let detected = ensure_expected_source(&path, &expected).is_err();
+        assert_eq!(
+            detected,
+            before != after,
+            "a same-size rewrite is detectable exactly when its millisecond differs"
+        );
     }
 }

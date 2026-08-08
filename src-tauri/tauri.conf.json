@@ -23,7 +23,11 @@
   },
   "bundle": {
     "active": false,
-    "targets": "all",
+    "targets": [
+      "deb",
+      "rpm",
+      "appimage"
+    ],
     "category": "Utility",
     "shortDescription": "Plain text editor",
     "fileAssociations": [

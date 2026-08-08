@@ -14,7 +14,6 @@ pub async fn set_window_title(
         .set_title(&title)
         .map_err(|error| format!("Unable to set window title: {error}"))?;
 
-    #[cfg(target_os = "linux")]
     {
         if is_wayland_session() {
             // Wayland workaround for upstream issue where set_title updates taskbar metadata
@@ -31,7 +30,6 @@ pub async fn set_window_title(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 fn is_wayland_session() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
         || std::env::var("XDG_SESSION_TYPE")
@@ -39,7 +37,6 @@ fn is_wayland_session() -> bool {
             .unwrap_or(false)
 }
 
-#[cfg(target_os = "linux")]
 fn apply_wayland_headerbar_title(
     app: &tauri::AppHandle,
     label: &str,

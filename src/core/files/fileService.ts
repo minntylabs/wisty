@@ -26,15 +26,14 @@ const normalizeDialogPath = (value: string | string[] | null): string | null => 
 };
 
 const directoryFromPath = (filePath: string): string => {
-  const normalized = filePath.replace(/\\/g, "/");
-  const lastSlash = normalized.lastIndexOf("/");
+  const lastSlash = filePath.lastIndexOf("/");
   if (lastSlash < 0) {
     return "";
   }
   if (lastSlash === 0) {
     return "/";
   }
-  return normalized.slice(0, lastSlash);
+  return filePath.slice(0, lastSlash);
 };
 
 const DEFAULT_STREAM_CHUNK_BYTES = 256 * 1024;
@@ -112,7 +111,7 @@ const savePathWithExtension = async (defaultPath: string | undefined, name: stri
   if (!selected) return { kind: "cancelled" };
   const suffix = `.${extension}`;
   const lastDot = selected.lastIndexOf(".");
-  const lastSeparator = Math.max(selected.lastIndexOf("/"), selected.lastIndexOf("\\"));
+  const lastSeparator = selected.lastIndexOf("/");
   if (lastDot < lastSeparator) return { kind: "saved", filePath: `${selected}${suffix}` };
   if (!selected.toLowerCase().endsWith(suffix)) throw new Error(`Choose a ${suffix} file`);
   return { kind: "saved", filePath: selected };
@@ -192,6 +191,15 @@ export const getFileSize = async (filePath: string): Promise<number> => {
   return metadata.size;
 };
 
+/**
+ * Device and inode, unless the value cannot survive the trip.
+ *
+ * `stat` always reports both on Linux, but they arrive as JavaScript numbers,
+ * and an inode past 2^53 — XFS on a large filesystem can produce one — would be
+ * rounded on the way here and again on the way back to Rust. Comparing a
+ * rounded identity is worse than not comparing one, so it is dropped and the
+ * check stands on size and mtime.
+ */
 const safeFileIdentityNumber = (value: number | null): number | null =>
   typeof value === "number" && Number.isSafeInteger(value) ? value : null;
 

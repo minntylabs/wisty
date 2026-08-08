@@ -23,19 +23,6 @@ type UseGlobalKeyRoutingOptions = {
 
 export const useGlobalKeyRouting = (options: UseGlobalKeyRoutingOptions) => {
   const handleGlobalKeydown = (event: KeyboardEvent) => {
-    // F5 belongs to transcript playback (markerExtension), but only the editor
-    // sees that binding. Everywhere else — a dialog, the menu bar, any control
-    // — an unclaimed F5 reaches the webview, and WebView2 enables browser
-    // accelerator keys by default, where it reloads the page and takes unsaved
-    // edits with it. bundle.targets is "all", so Windows is in scope.
-    //
-    // Suppressed here for every focus. This runs after the editor's own
-    // handler, so a caret in a transcript still plays its sentence first; the
-    // only effect is that the browser never acts on the key.
-    if (event.key === "F5") {
-      event.preventDefault();
-    }
-
     if (options.errorModalOpen()) {
       if (event.key === "Escape") {
         event.preventDefault();

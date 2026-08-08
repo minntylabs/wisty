@@ -324,11 +324,8 @@ const playbackKeymap = (
   keymap.of([
     {
       key: "F5",
-      // Every path returns true, including the ones that play nothing. An
-      // unconsumed F5 reaches the webview, and WebView2 has browser accelerator
-      // keys on by default, where F5 reloads the page and takes unsaved edits
-      // with it. bundle.targets is "all", so Windows is in scope. There is no
-      // other meaning of F5 to fall through to in any case.
+      // Every path returns true, including the ones that play nothing: F5 is
+      // this editor's key and there is no other meaning to fall through to.
       run: (view) => {
         const markers = view.state.field(markerField, false);
         if (!markers) {

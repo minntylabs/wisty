@@ -15,6 +15,7 @@ import {
 import { createSearchPanelAdapter } from "./searchPanelAdapter";
 import { createSpellService } from "../spellcheck/spellService";
 import { createSpellcheckExtension, requestSpellRescan } from "../spellcheck/spellcheckExtension";
+import { createWordCounter } from "./wordCount";
 import { createTranscriptExtension, transcriptHoverSelection } from "./transcript/transcriptExtension";
 import { createMarkers, setMarkersVisibleEffect } from "./markers/markerExtension";
 
@@ -38,6 +39,11 @@ const clampLine = (lineNumber: number, totalLines: number): number =>
 type EditorAdapterOptions = {
   onDocChanged: (payload: DocChangedPayload) => void;
   onCursorPositionChanged: (payload: CursorPositionPayload) => void;
+  /**
+   * The document's word count, which arrives after typing stops rather than
+   * with each edit — see `wordCount` for why it cannot be counted inline.
+   */
+  onWordCountChanged?: (words: number) => void;
   onFormatModeChanged: (mode: FormatViewMode) => void;
   /** Fired when the viewport or caret moves, so a remembered position can be re-captured. */
   onViewPositionChanged?: () => void;
@@ -72,6 +78,12 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   let editorHost: HTMLDivElement | undefined;
   let editorView: EditorView | undefined;
   let revision = 0;
+  const wordCounter = createWordCounter({
+    // Read afresh each time: whichever document is open when the scan runs is
+    // the one it should be counting.
+    readLines: () => editorView?.state.doc.iterLines() ?? [],
+    onCount: (words) => options.onWordCountChanged?.(words)
+  });
   let suppressDocEvents = 0;
   let largeLineSafeModeEnabled = false;
   let lastReportedPosition: CursorPositionPayload | undefined;
@@ -305,6 +317,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
           if (!update.docChanged) {
             return;
           }
+          wordCounter.schedule();
           revision += 1;
           if (suppressDocEvents > 0) {
             return;
@@ -434,6 +447,8 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     editorView.scrollDOM.addEventListener("scroll", handleScroll, { passive: true });
 
     emitCursorPositionIfChanged(editorView.state);
+    // An empty document still has a count to report.
+    wordCounter.schedule();
   };
 
   const destroy = () => {
@@ -441,6 +456,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
       return;
     }
     editorView.scrollDOM.removeEventListener("scroll", handleScroll);
+    wordCounter.cancel();
     editorView.destroy();
     editorView = undefined;
   };

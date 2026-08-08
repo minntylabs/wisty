@@ -93,6 +93,7 @@ function App() {
     currentCharacter: 0,
     totalCharacters: 0
   });
+  const [wordCount, setWordCount] = createSignal(0);
   const [spellDictionaries, setSpellDictionaries] = createSignal<DictionaryInfo[]>([]);
   // Deliberately not persisted: transcript mode is a per-session tidying tool,
   // and its clicks are destructive enough that it should never be on at startup.
@@ -131,6 +132,7 @@ function App() {
       documentStore.setRevision(revision);
     },
     onCursorPositionChanged: setCursorPosition,
+    onWordCountChanged: setWordCount,
     onFormatModeChanged: (mode) => {
       void settingsStore.actions.setFormatViewMode(mode);
     },
@@ -607,6 +609,7 @@ function App() {
           statusBar={{
             enabled: settingsStore.state.statusBarEnabled,
             ...cursorPosition(),
+            words: wordCount(),
             formatViewMode: settingsStore.state.formatViewMode
           }}
           errorModal={{

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const writeText = vi.hoisted(() => vi.fn());
 const readText = vi.hoisted(() => vi.fn());
@@ -40,18 +40,20 @@ const createAdapter = () => {
   const onDocChanged = vi.fn();
   const onCursorPositionChanged = vi.fn();
   const onFormatModeChanged = vi.fn();
+  const onWordCountChanged = vi.fn();
   const adapter = createEditorAdapter({
     getSettings: () => settings,
     onDocChanged,
     onCursorPositionChanged,
-    onFormatModeChanged
+    onFormatModeChanged,
+    onWordCountChanged
   });
   adapters.push(adapter);
   const host = document.createElement("div");
   document.body.append(host);
   adapter.setHost(host);
   adapter.init();
-  return { adapter, host, onDocChanged, onCursorPositionChanged, onFormatModeChanged };
+  return { adapter, host, onDocChanged, onCursorPositionChanged, onFormatModeChanged, onWordCountChanged };
 };
 
 describe("editor adapter", () => {
@@ -90,8 +92,10 @@ describe("editor adapter", () => {
  * `setText` leaves the caret before the text, and a paste leaves it after.
  */
 describe("cursor position", () => {
-  const lastPosition = (onCursorPositionChanged: ReturnType<typeof vi.fn>) =>
-    onCursorPositionChanged.mock.calls.at(-1)?.[0];
+  const lastPosition = (onCursorPositionChanged: ReturnType<typeof vi.fn>) => {
+    const { calls } = onCursorPositionChanged.mock;
+    return calls[calls.length - 1]?.[0];
+  };
 
   it("counts no characters behind a caret in front of the only one on the line", () => {
     const { adapter, onCursorPositionChanged } = createAdapter();
@@ -141,5 +145,78 @@ describe("cursor position", () => {
       currentCharacter: 0,
       totalCharacters: 5
     });
+  });
+});
+
+/**
+ * The count is taken from the document CodeMirror is holding, after typing
+ * stops. These use fake timers so the wait is not really waited for.
+ */
+describe("word count", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("counts the document once typing stops", async () => {
+    const { adapter, onWordCountChanged } = createAdapter();
+
+    adapter.setText("one two three\nfour five");
+    expect(onWordCountChanged).not.toHaveBeenCalled();
+
+    await vi.runAllTimersAsync();
+
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(5);
+  });
+
+  /**
+   * A scan reads the document as it is when it runs, so a count that lands
+   * after several edits is right whether or not each edit asked for one. This
+   * is the case that proves each edit does: the first count has already
+   * settled before the document changes again.
+   */
+  it("counts again after an edit that follows a settled count", async () => {
+    const { adapter, onWordCountChanged } = createAdapter();
+
+    adapter.setText("one two");
+    await vi.runAllTimersAsync();
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(2);
+
+    adapter.setText("one two three four");
+    await vi.runAllTimersAsync();
+
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(4);
+  });
+
+  it("reports the count of the document that is open now", async () => {
+    const { adapter, onWordCountChanged } = createAdapter();
+
+    adapter.setText("one two three");
+    adapter.setText("only");
+    await vi.runAllTimersAsync();
+
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(1);
+  });
+
+  it("counts an empty document as no words", async () => {
+    const { adapter, onWordCountChanged } = createAdapter();
+
+    adapter.setText("");
+    await vi.runAllTimersAsync();
+
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(0);
+  });
+
+  it("stops counting once the editor is torn down", async () => {
+    const { adapter, onWordCountChanged } = createAdapter();
+
+    adapter.setText("one two three");
+    adapter.destroy();
+    await vi.runAllTimersAsync();
+
+    expect(onWordCountChanged).not.toHaveBeenCalled();
   });
 });

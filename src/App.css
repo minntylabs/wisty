@@ -709,6 +709,11 @@ body {
   margin-left: 2em;
 }
 
+.status-bar-words {
+  /* The same separation the character indicator takes from the line one. */
+  margin-left: 2em;
+}
+
 .status-bar-mode {
   margin-left: auto;
 }

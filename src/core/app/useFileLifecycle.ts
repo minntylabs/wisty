@@ -2,6 +2,7 @@ import type {
   DocumentPort,
   EditorPort,
   ErrorReporter,
+  ExpectedSaveSource,
   FileDialogsPort,
   FileIoPort,
   FontPickerPort,
@@ -30,7 +31,7 @@ type UseFileLifecycleDeps = {
     closeLaunchFileStream: (streamId: string) => Promise<void>;
   };
   saveFileStream: {
-    startSaveFileStream: (filePath: string, expectedSource?: TextFileVersion) => Promise<{ streamId: string; filePath: string }>;
+    startSaveFileStream: (filePath: string, expectedSource?: ExpectedSaveSource) => Promise<{ streamId: string; filePath: string }>;
     writeSaveFileChunk: (streamId: string, textChunk: string) => Promise<{ bytesWrittenTotal: number }>;
     finishSaveFileStream: (streamId: string) => Promise<{ bytesWrittenTotal: number }>;
     cancelSaveFileStream: (streamId: string) => Promise<void>;
@@ -62,10 +63,29 @@ const LAUNCH_STREAM_READ_BYTES = 256 * 1024;
 const SAVE_STREAM_CHUNK_CHARS = 256 * 1024;
 const SAVING_OVERLAY_DELAY_MS = 500;
 
+/**
+ * How the file on disk disagrees with the document.
+ *
+ * `appeared` is the counterpart of `deleted` for a document being created: it
+ * expected no file at its path, and something else put one there.
+ */
+type ExternalChangeKind = "changed" | "deleted" | "appeared";
+
 type ExternalChange = {
   filePath: string;
-  kind: "changed" | "deleted";
+  kind: ExternalChangeKind;
 };
+
+/**
+ * What the document is measured against.
+ *
+ * `absent` is a baseline in its own right, not the lack of one: a document
+ * created at an empty path asserts that the path is still empty when it saves.
+ * Only `null` means nothing is known, and then a save asserts nothing.
+ */
+type TextFileBaseline =
+  | { kind: "present"; version: TextFileVersion }
+  | { kind: "absent" };
 
 const sameTextFileVersion = (left: TextFileVersion, right: TextFileVersion) =>
   left.size === right.size
@@ -73,8 +93,25 @@ const sameTextFileVersion = (left: TextFileVersion, right: TextFileVersion) =>
   && left.device === right.device
   && left.inode === right.inode;
 
-const isExternalChangeSaveError = (error: unknown) =>
-  toAppError(error, "SAVE_FAILED", "Unable to save file").message.includes("changed on disk after it was opened");
+/**
+ * Which conflict, if any, the backend refused a save over.
+ *
+ * By code rather than by message: the wording lives in Rust, and matching it
+ * from here would silently degrade every conflict into a generic save failure
+ * the next time someone reworded it.
+ */
+const externalChangeKindFromSaveError = (error: unknown): ExternalChangeKind | null => {
+  switch (toAppError(error, "SAVE_FAILED", "Unable to save file").code) {
+    case "SAVE_EXTERNAL_CHANGE":
+      return "changed";
+    case "SAVE_EXTERNAL_DELETE":
+      return "deleted";
+    case "SAVE_EXTERNAL_APPEARED":
+      return "appeared";
+    default:
+      return null;
+  }
+};
 
 class FileLoadCancelledError extends Error {
   constructor() {
@@ -126,40 +163,96 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   let loadingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
   let activeSaveId = 0;
   let savingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
-  let textFileVersion: TextFileVersion | null = null;
-  let textFileVersionGeneration = 0;
+  let textFileBaseline: TextFileBaseline | null = null;
+  let textFileBaselineGeneration = 0;
   let observedExternalVersion: TextFileVersion | null = null;
-  let textFileVersionError: Error | null = null;
+  let textFileBaselineError: Error | null = null;
 
-  const clearTextFileVersion = () => {
-    textFileVersionGeneration += 1;
-    textFileVersion = null;
+  const clearTextFileBaseline = () => {
+    textFileBaselineGeneration += 1;
+    textFileBaseline = null;
     observedExternalVersion = null;
-    textFileVersionError = null;
+    textFileBaselineError = null;
     setExternalChange(null);
     setExternalChangeDismissed(false);
   };
 
   /**
-   * Never throws. A baseline is taken after the file is already open or already
-   * written, so a failure here says nothing about whether that succeeded and
-   * must not be reported as though it did. It is recorded instead, and Save is
-   * what acts on it — the one operation the missing baseline would endanger.
+   * Raises a conflict, recording the on-disk version it was raised for.
+   *
+   * That version is what a dismissal is a dismissal *of*: without it the next
+   * check has nothing to recognise and raises the same conflict again.
    */
-  const captureTextFileVersion = async (filePath: string) => {
-    textFileVersionGeneration += 1;
+  const raiseExternalChange = (
+    filePath: string,
+    kind: ExternalChangeKind,
+    observed: TextFileVersion | null = null
+  ) => {
+    observedExternalVersion = observed;
+    if (kind === "deleted") {
+      // The editor now holds the only copy of this text. Saying so keeps the
+      // close prompt in the way of losing it, whether or not it was edited.
+      deps.document.markDirty();
+    }
+    setExternalChange({ filePath, kind });
+    setExternalChangeDismissed(false);
+  };
+
+  /** Drops a conflict whose difference no longer exists. */
+  const retractExternalChange = () => {
+    if (!externalChange()) {
+      return;
+    }
+    observedExternalVersion = null;
+    setExternalChange(null);
+    setExternalChangeDismissed(false);
+  };
+
+  /**
+   * Records what is on disk at `filePath` as what this document is measured
+   * against.
+   *
+   * Never throws. A baseline is taken around operations that have already
+   * succeeded, so a failure here says nothing about whether they did and must
+   * not be reported as though it did. It is recorded instead, and Save is what
+   * acts on it — the one operation the missing baseline would endanger.
+   *
+   * `missingIsExpected` separates the two reasons a path can hold no file: a
+   * document being created there, and a file that has gone since Wisty last
+   * looked. The second is a deletion the user has to be told about, and saying
+   * nothing would let a save recreate it silently.
+   */
+  const captureTextFileBaseline = async (
+    filePath: string,
+    options?: { missingIsExpected?: boolean }
+  ) => {
+    textFileBaselineGeneration += 1;
     observedExternalVersion = null;
     setExternalChange(null);
     setExternalChangeDismissed(false);
     try {
-      textFileVersion = await deps.fileIo.getTextFileVersion(filePath);
-      textFileVersionError = null;
+      const version = await deps.fileIo.getTextFileVersion(filePath);
+      textFileBaselineError = null;
+      textFileBaseline = version ? { kind: "present", version } : { kind: "absent" };
+      if (!version && !options?.missingIsExpected) {
+        raiseExternalChange(filePath, "deleted");
+      }
     } catch (error) {
-      textFileVersion = null;
-      textFileVersionError = new Error(
+      textFileBaseline = null;
+      textFileBaselineError = new Error(
         `Wisty cannot check this file on disk: ${error instanceof Error ? error.message : String(error)}`
       );
     }
+  };
+
+  /** What a save asserts about the target, or nothing when no baseline is held. */
+  const expectedSaveSource = (): ExpectedSaveSource | undefined => {
+    if (!textFileBaseline) {
+      return undefined;
+    }
+    return textFileBaseline.kind === "present"
+      ? { kind: "present", version: textFileBaseline.version }
+      : { kind: "absent" };
   };
 
   /**
@@ -172,50 +265,66 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     deps.document.state.kind === "text" && deps.document.state.filePath === filePath;
 
   const checkForExternalChange = async (): Promise<boolean> => {
-    if (deps.document.state.kind !== "text" || !deps.document.state.filePath || !textFileVersion) {
+    if (deps.document.state.kind !== "text" || !deps.document.state.filePath || !textFileBaseline) {
       return false;
     }
     const filePath = deps.document.state.filePath;
-    const baseline = textFileVersion;
-    const generation = textFileVersionGeneration;
+    const baseline = textFileBaseline;
+    const generation = textFileBaselineGeneration;
     const current = await deps.fileIo.getTextFileVersion(filePath);
     if (
-      generation !== textFileVersionGeneration
+      generation !== textFileBaselineGeneration
       || deps.document.state.kind !== "text"
       || deps.document.state.filePath !== filePath
-      || textFileVersion !== baseline
+      || textFileBaseline !== baseline
     ) {
       return false;
     }
+
     if (!current) {
+      if (baseline.kind === "absent") {
+        // Still empty, which is what a document being created here expects.
+        retractExternalChange();
+        return false;
+      }
       if (externalChange()?.kind !== "deleted") {
-        // A version seen before the deletion says nothing about what comes
-        // back, so forget it and judge the replacement on its own.
-        observedExternalVersion = null;
-        // The editor now holds the only copy of this text. Saying so keeps the
-        // close prompt in the way of losing it, whether or not it was edited.
-        deps.document.markDirty();
-        setExternalChange({ filePath, kind: "deleted" });
-        setExternalChangeDismissed(false);
+        // Raised with no observed version: what comes back after a deletion is
+        // judged on its own, and a dismissal of what was there before the file
+        // went away is not consent to what replaces it.
+        raiseExternalChange(filePath, "deleted");
       }
       return true;
     }
-    if (!sameTextFileVersion(baseline, current)) {
+
+    const differs = baseline.kind === "absent" || !sameTextFileVersion(baseline.version, current);
+    if (differs) {
       if (!observedExternalVersion || !sameTextFileVersion(observedExternalVersion, current)) {
-        observedExternalVersion = current;
-        setExternalChange({ filePath, kind: "changed" });
-        setExternalChangeDismissed(false);
+        raiseExternalChange(filePath, baseline.kind === "absent" ? "appeared" : "changed", current);
       }
       return true;
     }
     // Back to the version this document was opened at — the conflict the banner
     // reported no longer exists, so retract it rather than leave it standing.
-    if (externalChange()) {
-      observedExternalVersion = null;
-      setExternalChange(null);
-      setExternalChangeDismissed(false);
-    }
+    retractExternalChange();
     return false;
+  };
+
+  /**
+   * Raises a conflict the backend caught in the moment between the last check
+   * and the rename, reading the version that beat it so the banner behaves like
+   * any other — dismissible, and retracted if the file comes back.
+   */
+  const raiseExternalChangeFromSaveRace = async (filePath: string, kind: ExternalChangeKind) => {
+    let observed: TextFileVersion | null = null;
+    if (kind !== "deleted") {
+      try {
+        observed = await deps.fileIo.getTextFileVersion(filePath);
+      } catch {
+        // Best effort: without it the next check raises the conflict again,
+        // which is the safe direction to fail in.
+      }
+    }
+    raiseExternalChange(filePath, kind, observed);
   };
 
   const beginLoadingState = (filePath: string) => {
@@ -579,7 +688,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
   const newFile = async () => {
     await releaseContainer();
-    clearTextFileVersion();
+    clearTextFileBaseline();
     applySafeMode(false);
     loadEditorTextAsClean("");
     deps.document.setUntitled();
@@ -628,7 +737,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // leaves the open transcript usable instead of showing it without audio or
     // marker support.
     const container = await deps.fileIo.openContainer(filePath);
-    clearTextFileVersion();
+    clearTextFileBaseline();
     applySafeMode(false);
     // Before the text, so the markers are tracked from the moment it lands
     // rather than being discovered by a later edit.
@@ -639,6 +748,57 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     await deps.settings.actions.addRecentFile(filePath);
     deps.rememberedPosition.restore(filePath);
     deps.editor.focus();
+  };
+
+  type FileSizeVerdict = { kind: "within-limits"; fileSize: number } | { kind: "refused" };
+
+  /**
+   * The soft prompt and the hard refusal, in one place so that every path that
+   * reads a file whole is subject to them — reloading a file that changed on
+   * disk included, which is the one case where its size is known to have moved.
+   */
+  const checkFileSizeLimits = async (filePath: string): Promise<FileSizeVerdict> => {
+    const fileSize = await deps.fileIo.getFileSize(filePath);
+    if (fileSize >= HARD_FILE_LIMIT_BYTES) {
+      await deps.showFileTooLarge(filePath, fileSize);
+      return { kind: "refused" };
+    }
+    if (fileSize >= SOFT_FILE_LIMIT_BYTES && !await deps.confirmOpenLargeFile(filePath, fileSize)) {
+      return { kind: "refused" };
+    }
+    return { kind: "within-limits", fileSize };
+  };
+
+  /**
+   * Reads a text file into the editor as the open document, with its baseline.
+   *
+   * The baseline is taken *before* the read, not after. These reads stream, and
+   * a large one takes long enough for a writer to land inside it: measuring
+   * afterwards would record the file as it became, call the half-and-half text
+   * in the editor a faithful copy of it, and let the next save write that back
+   * with nothing to notice. Taken beforehand, a change during the read is a
+   * conflict like any other, which the check afterwards raises.
+   *
+   * A failed read leaves the document untitled, so the baseline goes with it:
+   * a banner offering to overwrite a path this document no longer has is worse
+   * than no banner at all.
+   */
+  const loadTextDocumentWithBaseline = async (filePath: string, load: () => Promise<void>) => {
+    // A file that is not there is this open's own failure to report, not a
+    // deletion to raise a banner over: the read is about to say so.
+    await captureTextFileBaseline(filePath, { missingIsExpected: true });
+    try {
+      await load();
+    } catch (error) {
+      clearTextFileBaseline();
+      throw error;
+    }
+    deps.document.setFilePath(filePath);
+    try {
+      await checkForExternalChange();
+    } catch {
+      // Reading metadata can fail; Save is where that matters and says so.
+    }
   };
 
   const openFile = async () => {
@@ -654,28 +814,19 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         return;
       }
 
-      const fileSize = await deps.fileIo.getFileSize(selected.filePath);
-      if (fileSize >= HARD_FILE_LIMIT_BYTES) {
-        await deps.showFileTooLarge(selected.filePath, fileSize);
+      const size = await checkFileSizeLimits(selected.filePath);
+      if (size.kind === "refused") {
         deps.editor.focus();
         return;
       }
 
-      if (fileSize >= SOFT_FILE_LIMIT_BYTES) {
-        const shouldOpen = await deps.confirmOpenLargeFile(selected.filePath, fileSize);
-        if (!shouldOpen) {
-          deps.editor.focus();
-          return;
-        }
-      }
-
       // The container goes here rather than at the branch above, so backing
       // out of a large-file prompt leaves the open transcript untouched.
-      clearTextFileVersion();
       await releaseContainer();
-      await loadEditorFileAsCleanFromFsStream(selected.filePath, fileSize);
-      deps.document.setFilePath(selected.filePath);
-      await captureTextFileVersion(selected.filePath);
+      await loadTextDocumentWithBaseline(
+        selected.filePath,
+        () => loadEditorFileAsCleanFromFsStream(selected.filePath, size.fileSize)
+      );
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(selected.filePath));
       await deps.settings.actions.addRecentFile(selected.filePath);
       deps.rememberedPosition.restore(selected.filePath);
@@ -690,11 +841,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
           await openContainerAtPath(filePath);
           return;
         }
-        clearTextFileVersion();
         await releaseContainer();
-        await loadEditorFileAsCleanFromFsStream(filePath);
-        deps.document.setFilePath(filePath);
-        await captureTextFileVersion(filePath);
+        await loadTextDocumentWithBaseline(
+          filePath,
+          () => loadEditorFileAsCleanFromFsStream(filePath)
+        );
         await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
         await deps.settings.actions.addRecentFile(filePath);
         deps.rememberedPosition.restore(filePath);
@@ -714,11 +865,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         await openContainerAtPath(filePath);
         return;
       }
-      clearTextFileVersion();
       await releaseContainer();
-      await loadEditorFileAsCleanFromLaunchStream(filePath, fileSizeBytes);
-      deps.document.setFilePath(filePath);
-      await captureTextFileVersion(filePath);
+      await loadTextDocumentWithBaseline(
+        filePath,
+        () => loadEditorFileAsCleanFromLaunchStream(filePath, fileSizeBytes)
+      );
       await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
       await deps.settings.actions.addRecentFile(filePath);
       deps.rememberedPosition.restore(filePath);
@@ -728,11 +879,15 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
   const openFileFromTextAtPath = async (filePath: string, text: string) => {
     await releaseContainer();
-    clearTextFileVersion();
+    clearTextFileBaseline();
     const useLargeLineSafeMode = text.length >= SAFE_MODE_PROBE_BYTES && !text.includes("\n");
     applySafeMode(useLargeLineSafeMode);
     loadEditorTextAsClean(text);
     deps.document.setFilePath(filePath);
+    // The text did not come from disk, so whether the path holds a file is not
+    // known here and its absence is no deletion. A baseline is taken all the
+    // same: it is what stops a later save writing over whatever is there.
+    await captureTextFileBaseline(filePath, { missingIsExpected: true });
     await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
     deps.rememberedPosition.restore(filePath);
     deps.editor.focus();
@@ -743,10 +898,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // yet — but this is a public method, and every other entry point releases.
     // Being the one exception is how the openFile bug survived.
     await releaseContainer();
-    clearTextFileVersion();
+    clearTextFileBaseline();
     applySafeMode(false);
     loadEditorTextAsClean("");
     deps.document.setFilePath(filePath);
+    // An empty path is this document's baseline, not the lack of one: the file
+    // it is about to create is not there yet, and a save has to say so rather
+    // than write over whatever arrives at that path in the meantime.
+    await captureTextFileBaseline(filePath, { missingIsExpected: true });
     await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
     deps.editor.focus();
   };
@@ -765,7 +924,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   const saveDocumentToPathViaStream = async (
     filePath: string,
     text?: string,
-    expectedSource?: TextFileVersion
+    expectedSource?: ExpectedSaveSource
   ): Promise<number> => {
     const source: TextSnapshot =
       text === undefined
@@ -914,7 +1073,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await deps.rememberedPosition.migrate(previousPath, result.filePath);
       deps.document.setFilePath(result.filePath);
       deps.document.markSavedAt(savedRevision);
-      await captureTextFileVersion(result.filePath);
+      await captureTextFileBaseline(result.filePath);
       await rememberLastDirectory(result.filePath);
       await rememberRecentFile(result.filePath);
       deps.editor.focus();
@@ -933,25 +1092,28 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
 
     const filePath = deps.document.state.filePath;
     await runWithErrorMessage(async () => {
-      if (textFileVersionError) {
+      if (textFileBaselineError) {
         // Try once more before refusing: a baseline that could not be taken
         // leaves nothing to validate this save against, but one unlucky moment
         // should not lock the document until it is closed and reopened.
-        await captureTextFileVersion(filePath);
-        if (textFileVersionError) {
-          throw textFileVersionError;
+        await captureTextFileBaseline(filePath);
+        if (textFileBaselineError) {
+          throw textFileBaselineError;
         }
       }
-      if (await checkForExternalChange()) {
+      // The retake raises a conflict of its own when the file has gone in the
+      // meantime, and that is not something to save straight over.
+      if (await checkForExternalChange() || externalChange()) {
         setExternalChangeDismissed(false);
         return;
       }
       let savedRevision: number;
       try {
-        savedRevision = await saveDocumentToPathViaStream(filePath, undefined, textFileVersion ?? undefined);
+        savedRevision = await saveDocumentToPathViaStream(filePath, undefined, expectedSaveSource());
       } catch (error) {
-        if (isExternalChangeSaveError(error)) {
-          setExternalChange({ filePath, kind: "changed" });
+        const kind = externalChangeKindFromSaveError(error);
+        if (kind) {
+          await raiseExternalChangeFromSaveRace(filePath, kind);
           return;
         }
         throw error;
@@ -960,7 +1122,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         return;
       }
       deps.document.markSavedAt(savedRevision);
-      await captureTextFileVersion(filePath);
+      await captureTextFileBaseline(filePath);
       await rememberLastDirectory(filePath);
       deps.editor.focus();
     }, "Unable to save file");
@@ -988,9 +1150,17 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       return;
     }
     await runWithErrorMessage(async () => {
-      await loadEditorFileAsCleanFromFsStream(change.filePath);
-      deps.document.setFilePath(change.filePath);
-      await captureTextFileVersion(change.filePath);
+      // The file on disk is by definition not the one whose size was checked
+      // when this document was opened, so it goes through the limits again.
+      const size = await checkFileSizeLimits(change.filePath);
+      if (size.kind === "refused") {
+        deps.editor.focus();
+        return;
+      }
+      await loadTextDocumentWithBaseline(
+        change.filePath,
+        () => loadEditorFileAsCleanFromFsStream(change.filePath, size.fileSize)
+      );
       deps.rememberedPosition.restore(change.filePath);
       deps.editor.focus();
     }, "Unable to reload file");
@@ -1002,12 +1172,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       return;
     }
     await runWithErrorMessage(async () => {
+      // Deliberately unguarded: this is the user answering the conflict, and
+      // the version they are overwriting is the one they were shown.
       const savedRevision = await saveDocumentToPathViaStream(change.filePath);
       if (!documentStillOpenAt(change.filePath)) {
         return;
       }
       deps.document.markSavedAt(savedRevision);
-      await captureTextFileVersion(change.filePath);
+      await captureTextFileBaseline(change.filePath);
       await rememberLastDirectory(change.filePath);
       deps.editor.focus();
     }, "Unable to save file");

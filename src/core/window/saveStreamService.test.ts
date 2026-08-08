@@ -36,13 +36,27 @@ describe("save stream service", () => {
 
   it("forwards an expected source version for a protected overwrite", async () => {
     invoke.mockResolvedValueOnce({ streamId: "save-1", filePath: "/tmp/a.txt" });
-    const expectedSource = { size: 4, modifiedMs: 1_000, device: 1, inode: 2 };
+    const expectedSource = {
+      kind: "present" as const,
+      version: { size: 4, modifiedMs: 1_000, device: 1, inode: 2 }
+    };
 
     await startSaveFileStream("/tmp/a.txt", expectedSource);
 
     expect(invoke).toHaveBeenCalledWith("start_save_file_stream", {
       filePath: "/tmp/a.txt",
       expectedSource
+    });
+  });
+
+  it("forwards the absent assertion a document being created makes", async () => {
+    invoke.mockResolvedValueOnce({ streamId: "save-1", filePath: "/tmp/a.txt" });
+
+    await startSaveFileStream("/tmp/a.txt", { kind: "absent" });
+
+    expect(invoke).toHaveBeenCalledWith("start_save_file_stream", {
+      filePath: "/tmp/a.txt",
+      expectedSource: { kind: "absent" }
     });
   });
 });

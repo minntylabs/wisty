@@ -1,6 +1,11 @@
 export type AppErrorCode =
   | "OPEN_FAILED"
   | "SAVE_FAILED"
+  // Refusals the save backend reports by code, so the frontend can tell a
+  // conflict from a failure without reading the message it will display.
+  | "SAVE_EXTERNAL_CHANGE"
+  | "SAVE_EXTERNAL_DELETE"
+  | "SAVE_EXTERNAL_APPEARED"
   | "LAUNCH_OPEN_FAILED"
   | "SETTINGS_LOAD_FAILED"
   | "FONT_PICK_FAILED"

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { TextFileVersion } from "../app/contracts";
+import type { ExpectedSaveSource } from "../app/contracts";
 
 export type SaveFileStreamStartResult = {
   streamId: string;
@@ -16,7 +16,7 @@ export type SaveFileStreamFinishResult = {
 
 export const startSaveFileStream = async (
   filePath: string,
-  expectedSource?: TextFileVersion
+  expectedSource?: ExpectedSaveSource
 ): Promise<SaveFileStreamStartResult> => {
   return invoke<SaveFileStreamStartResult>("start_save_file_stream", expectedSource
     ? { filePath, expectedSource }

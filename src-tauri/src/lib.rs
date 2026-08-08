@@ -92,7 +92,7 @@ struct SaveFileStream {
     temp_path: PathBuf,
     writer: BufWriter<File>,
     bytes_written_total: u64,
-    expected_source: Option<TextFileVersion>,
+    expected_source: Option<ExpectedSource>,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +102,54 @@ struct TextFileVersion {
     modified_ms: Option<i64>,
     device: Option<u64>,
     inode: Option<u64>,
+}
+
+/// What the caller asserts about the target path, rechecked before the rename.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum ExpectedSource {
+    /// The file the document was opened from, unchanged since.
+    Present { version: TextFileVersion },
+    /// No file at all: the document is creating one there.
+    Absent,
+}
+
+/// A save failure the frontend has to tell apart, rather than read a message for.
+///
+/// The external-change codes drive the conflict banner; every other failure is
+/// an ordinary save error. Serialized as `{ code, message }`, which the
+/// frontend's `AppError` already understands.
+#[derive(Serialize)]
+struct SaveStreamError {
+    code: &'static str,
+    message: String,
+}
+
+const SAVE_FAILED: &str = "SAVE_FAILED";
+const SAVE_EXTERNAL_CHANGE: &str = "SAVE_EXTERNAL_CHANGE";
+const SAVE_EXTERNAL_DELETE: &str = "SAVE_EXTERNAL_DELETE";
+const SAVE_EXTERNAL_APPEARED: &str = "SAVE_EXTERNAL_APPEARED";
+
+impl SaveStreamError {
+    fn failed(message: String) -> Self {
+        Self {
+            code: SAVE_FAILED,
+            message,
+        }
+    }
+
+    fn conflict(code: &'static str, message: &str) -> Self {
+        Self {
+            code,
+            message: message.to_string(),
+        }
+    }
+}
+
+impl From<String> for SaveStreamError {
+    fn from(message: String) -> Self {
+        Self::failed(message)
+    }
 }
 
 #[derive(Serialize)]
@@ -713,30 +761,76 @@ fn modified_ms(metadata: &Metadata) -> Option<i64> {
         .ok()
 }
 
-/// Refuses to publish a stream save over a text file that changed after Wisty
-/// opened it. The check happens immediately before rename; an external writer
-/// can still race that final syscall, because portable rename is not conditional.
-fn ensure_text_file_is_unchanged(path: &Path, expected: &TextFileVersion) -> Result<(), String> {
-    let metadata = std::fs::metadata(path).map_err(|error| {
-        format!(
-            "The file changed on disk after it was opened and cannot be saved safely: {} ({error})",
-            path.display()
-        )
-    })?;
-    if metadata.len() != expected.size
-        || expected
+const CHANGED_MESSAGE: &str =
+    "The file changed on disk after it was opened. Reload it, save a copy, or explicitly overwrite it.";
+const DELETED_MESSAGE: &str =
+    "The file was deleted on disk after it was opened. Save a copy, or recreate it.";
+const APPEARED_MESSAGE: &str =
+    "Another file has appeared at this path since Wisty last looked. Save a copy, or explicitly overwrite it.";
+
+/// Refuses to publish a stream save whose target no longer matches what the
+/// document asserts about it.
+///
+/// The check happens immediately before rename; an external writer can still
+/// race that final syscall, because portable rename is not conditional. Each
+/// refusal carries the code the banner needs, so a caller never has to read a
+/// message to tell a change from a deletion.
+fn ensure_expected_source(path: &Path, expected: &ExpectedSource) -> Result<(), SaveStreamError> {
+    let version = match expected {
+        ExpectedSource::Absent => {
+            return match std::fs::metadata(path) {
+                Ok(_) => Err(SaveStreamError::conflict(
+                    SAVE_EXTERNAL_APPEARED,
+                    APPEARED_MESSAGE,
+                )),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(SaveStreamError::failed(format!(
+                    "Unable to check '{}' on disk before saving: {error}",
+                    path.display()
+                ))),
+            };
+        }
+        ExpectedSource::Present { version } => version,
+    };
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        // A missing target is a deletion, not a fault, and not a change: it is
+        // its own conflict, and "Reload from Disk" is not among its answers.
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(SaveStreamError::conflict(
+                SAVE_EXTERNAL_DELETE,
+                DELETED_MESSAGE,
+            ));
+        }
+        Err(error) => {
+            return Err(SaveStreamError::failed(format!(
+                "Unable to check '{}' on disk before saving: {error}",
+                path.display()
+            )));
+        }
+    };
+
+    if metadata.len() != version.size
+        || version
             .modified_ms
             .is_some_and(|modified| modified_ms(&metadata) != Some(modified))
     {
-        return Err("The file changed on disk after it was opened. Reload it, save a copy, or explicitly overwrite it.".to_string());
+        return Err(SaveStreamError::conflict(
+            SAVE_EXTERNAL_CHANGE,
+            CHANGED_MESSAGE,
+        ));
     }
     #[cfg(unix)]
-    if expected
+    if version
         .device
         .is_some_and(|device| device != metadata.dev())
-        || expected.inode.is_some_and(|inode| inode != metadata.ino())
+        || version.inode.is_some_and(|inode| inode != metadata.ino())
     {
-        return Err("The file changed on disk after it was opened. Reload it, save a copy, or explicitly overwrite it.".to_string());
+        return Err(SaveStreamError::conflict(
+            SAVE_EXTERNAL_CHANGE,
+            CHANGED_MESSAGE,
+        ));
     }
     Ok(())
 }
@@ -745,7 +839,7 @@ fn ensure_text_file_is_unchanged(path: &Path, expected: &TextFileVersion) -> Res
 fn start_save_file_stream(
     state: tauri::State<'_, LaunchArgState>,
     file_path: String,
-    expected_source: Option<TextFileVersion>,
+    expected_source: Option<ExpectedSource>,
 ) -> Result<SaveFileStreamStartResult, String> {
     if file_path.trim().is_empty() {
         return Err("Save path cannot be empty".to_string());
@@ -855,7 +949,7 @@ fn write_save_file_chunk(
 fn finish_save_file_stream(
     state: tauri::State<'_, LaunchArgState>,
     stream_id: String,
-) -> Result<SaveFileStreamFinishResult, String> {
+) -> Result<SaveFileStreamFinishResult, SaveStreamError> {
     let mut stream = {
         let mut streams = state
             .active_save_streams
@@ -868,26 +962,26 @@ fn finish_save_file_stream(
 
     if let Err(error) = stream.writer.flush() {
         let _ = std::fs::remove_file(&stream.temp_path);
-        return Err(format!(
+        return Err(SaveStreamError::failed(format!(
             "Unable to flush save stream for '{}': {error}",
             stream.target_path.to_string_lossy()
-        ));
+        )));
     }
 
     // Sync before the rename so a crash or power loss right after saving
     // cannot leave the target pointing at unwritten data.
     if let Err(error) = stream.writer.get_ref().sync_all() {
         let _ = std::fs::remove_file(&stream.temp_path);
-        return Err(format!(
+        return Err(SaveStreamError::failed(format!(
             "Unable to sync save stream for '{}': {error}",
             stream.target_path.to_string_lossy()
-        ));
+        )));
     }
 
     drop(stream.writer);
 
     if let Some(expected) = &stream.expected_source {
-        if let Err(error) = ensure_text_file_is_unchanged(&stream.target_path, expected) {
+        if let Err(error) = ensure_expected_source(&stream.target_path, expected) {
             let _ = std::fs::remove_file(&stream.temp_path);
             return Err(error);
         }
@@ -895,10 +989,10 @@ fn finish_save_file_stream(
 
     if let Err(error) = std::fs::rename(&stream.temp_path, &stream.target_path) {
         let _ = std::fs::remove_file(&stream.temp_path);
-        return Err(format!(
+        return Err(SaveStreamError::failed(format!(
             "Unable to finalize save for '{}': {error}",
             stream.target_path.to_string_lossy()
-        ));
+        )));
     }
 
     Ok(SaveFileStreamFinishResult {
@@ -1051,17 +1145,31 @@ mod window_title;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::{atspi_bus_override, ensure_text_file_is_unchanged, modified_ms, TextFileVersion};
+    use super::{
+        atspi_bus_override, ensure_expected_source, modified_ms, ExpectedSource, TextFileVersion,
+        SAVE_EXTERNAL_APPEARED, SAVE_EXTERNAL_CHANGE, SAVE_EXTERNAL_DELETE,
+    };
     use std::os::unix::fs::MetadataExt;
 
-    fn version(path: &std::path::Path) -> TextFileVersion {
+    fn expect_present(path: &std::path::Path) -> ExpectedSource {
         let metadata = std::fs::metadata(path).unwrap();
-        TextFileVersion {
-            size: metadata.len(),
-            modified_ms: modified_ms(&metadata),
-            device: Some(metadata.dev()),
-            inode: Some(metadata.ino()),
+        ExpectedSource::Present {
+            version: TextFileVersion {
+                size: metadata.len(),
+                modified_ms: modified_ms(&metadata),
+                device: Some(metadata.dev()),
+                inode: Some(metadata.ino()),
+            },
         }
+    }
+
+    /// A directory of this test's own, so tests cannot collide over one path.
+    fn test_directory(name: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("wisty-save-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
     }
 
     #[test]
@@ -1076,17 +1184,49 @@ mod tests {
 
     #[test]
     fn save_refuses_a_replaced_text_file() {
-        let directory =
-            std::env::temp_dir().join(format!("wisty-save-version-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
+        let directory = test_directory("replaced");
         let path = directory.join("notes.txt");
         std::fs::write(&path, "before").unwrap();
-        let expected = version(&path);
+        let expected = expect_present(&path);
 
         let replacement = directory.join("replacement.txt");
         std::fs::write(&replacement, "after!").unwrap();
         std::fs::rename(&replacement, &path).unwrap();
 
-        assert!(ensure_text_file_is_unchanged(&path, &expected).is_err());
+        let error = ensure_expected_source(&path, &expected).unwrap_err();
+        assert_eq!(error.code, SAVE_EXTERNAL_CHANGE);
+    }
+
+    /// A deletion is not a change: the banner it raises offers no reload.
+    #[test]
+    fn save_reports_a_deleted_text_file_as_a_deletion() {
+        let directory = test_directory("deleted");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "before").unwrap();
+        let expected = expect_present(&path);
+        std::fs::remove_file(&path).unwrap();
+
+        let error = ensure_expected_source(&path, &expected).unwrap_err();
+        assert_eq!(error.code, SAVE_EXTERNAL_DELETE);
+    }
+
+    #[test]
+    fn save_allows_a_new_file_where_none_is_expected() {
+        let directory = test_directory("absent");
+        let path = directory.join("notes.txt");
+
+        assert!(ensure_expected_source(&path, &ExpectedSource::Absent).is_ok());
+    }
+
+    /// Creating a document at an empty path must not silently overwrite a file
+    /// that something else has put there in the meantime.
+    #[test]
+    fn save_refuses_a_file_that_appeared_where_none_was_expected() {
+        let directory = test_directory("appeared");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "not yours").unwrap();
+
+        let error = ensure_expected_source(&path, &ExpectedSource::Absent).unwrap_err();
+        assert_eq!(error.code, SAVE_EXTERNAL_APPEARED);
     }
 }

@@ -44,6 +44,18 @@ export type TextFileVersion = {
   inode: number | null;
 };
 
+/**
+ * What a save asserts about the target path, checked again by the backend
+ * immediately before the write is published.
+ *
+ * A document created at a path that holds no file asserts `absent`: without it
+ * a save has nothing to compare against and would silently overwrite whatever
+ * appeared there in the meantime.
+ */
+export type ExpectedSaveSource =
+  | { kind: "present"; version: TextFileVersion }
+  | { kind: "absent" };
+
 export type FileLoadPhase = "idle" | "loading" | "cancelling" | "error";
 
 export type FileLoadProgress = {

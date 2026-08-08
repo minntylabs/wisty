@@ -24,6 +24,8 @@ type HarnessOverrides = {
   finishSaveFileStream?: () => Promise<{ bytesWrittenTotal: number }>;
   /** Runs after each streamed chunk is written, so a test can edit mid-save. */
   onWriteChunk?: (chunkNumber: number) => void | Promise<void>;
+  /** Runs as each chunk is read, so a test can change the file mid-read. */
+  onReadChunk?: () => void;
   /** What the open dialog returns. Defaults to the container. */
   dialogPath?: string;
   fileSize?: number;
@@ -54,8 +56,10 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     events.push("playback-released");
   });
   const streamReadTextFile = vi.fn(async function* () {
+    overrides.onReadChunk?.();
     yield { text: "plain text", bytesReadTotal: 10, fileSizeBytes: 10 };
   });
+  const showFileTooLarge = vi.fn(async () => {});
 
   const deps = {
     editor: {
@@ -139,7 +143,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     errors: { showError },
     playback: { release: releasePlayback },
     confirmOpenLargeFile: overrides.confirmOpenLargeFile ?? (async () => true),
-    showFileTooLarge: async () => {}
+    showFileTooLarge
   } as unknown as Parameters<typeof useFileLifecycle>[0];
 
   return {
@@ -155,6 +159,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     startSaveFileStream,
     finishSaveFileStream,
     streamReadTextFile,
+    showFileTooLarge,
     markersEnabled,
     releasePlayback,
     events
@@ -485,7 +490,9 @@ describe("saving a container", () => {
 
     await h.lifecycle.saveFile();
 
-    expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/notes.txt");
+    // The harness has no file at that path, so the save asserts there is none:
+    // it is creating the file, not overwriting one it has read.
+    expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/notes.txt", { kind: "absent" });
     expect(h.showError).not.toHaveBeenCalled();
   });
 });
@@ -637,15 +644,18 @@ describe("external text-file changes", () => {
   });
 
   it("reports a save that succeeded as a save, even when the baseline cannot be retaken", async () => {
-    let versionCalls = 0;
+    let written = false;
     const h = createHarness({
+      // The versions taken after the write lands, and only those, fail.
       getTextFileVersion: async () => {
-        versionCalls += 1;
-        // The version taken after the write lands, and only that one, fails.
-        if (versionCalls === 3) {
+        if (written) {
           throw new Error("Permission denied (os error 13)");
         }
         return original;
+      },
+      finishSaveFileStream: async () => {
+        written = true;
+        return { bytesWrittenTotal: 1 };
       }
     });
     await h.lifecycle.openFileAtPath("/tmp/notes.txt");
@@ -679,7 +689,10 @@ describe("external text-file changes", () => {
     failVersion = false;
     await h.lifecycle.saveFile();
 
-    expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/notes.txt", original);
+    expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/notes.txt", {
+      kind: "present",
+      version: original
+    });
   });
 
   it("leaves a document opened during a save alone when the save lands", async () => {
@@ -723,15 +736,217 @@ describe("external text-file changes", () => {
   it("shows a conflict instead of an error when the backend catches a final save race", async () => {
     const h = createHarness({
       getTextFileVersion: async () => original,
+      // Shaped as Rust reports it: a code the frontend can act on, and a
+      // message it would only ever display.
       finishSaveFileStream: async () => {
-        throw new Error("The file changed on disk after it was opened. Reload it, save a copy, or explicitly overwrite it.");
+        throw {
+          code: "SAVE_EXTERNAL_CHANGE",
+          message: "The file changed on disk after it was opened."
+        };
       }
     });
     await h.lifecycle.openFileAtPath("/tmp/notes.txt");
 
     await h.lifecycle.saveFile();
 
+    expect(h.lifecycle.externalChangeState.change()).toEqual({
+      filePath: "/tmp/notes.txt",
+      kind: "changed"
+    });
     expect(h.lifecycle.externalChangeState.isVisible()).toBe(true);
     expect(h.showError).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A conflict the backend raised is dismissible like any other. It records the
+   * version it was raised for, so the next check recognises it rather than
+   * putting the banner straight back.
+   */
+  it("keeps a dismissal of a conflict the backend raised", async () => {
+    let version = original;
+    const h = createHarness({
+      getTextFileVersion: async () => version,
+      finishSaveFileStream: async () => {
+        // The writer that beat the save also moved the version on disk.
+        version = { ...original, modifiedMs: 2_000 };
+        throw { code: "SAVE_EXTERNAL_CHANGE", message: "The file changed on disk." };
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    await h.lifecycle.saveFile();
+    h.lifecycle.dismissExternalChange();
+    await h.lifecycle.checkForExternalChange();
+
+    expect(h.lifecycle.externalChangeState.isVisible()).toBe(false);
+  });
+
+  it("reports a deletion the backend catches as a deletion, not a change", async () => {
+    const h = createHarness({
+      getTextFileVersion: async () => original,
+      finishSaveFileStream: async () => {
+        throw { code: "SAVE_EXTERNAL_DELETE", message: "The file was deleted on disk." };
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    await h.lifecycle.saveFile();
+
+    expect(h.lifecycle.externalChangeState.change()).toEqual({
+      filePath: "/tmp/notes.txt",
+      kind: "deleted"
+    });
+  });
+
+  it("takes the baseline before the read, so a file rewritten during it is a conflict", async () => {
+    let version = original;
+    const h = createHarness({
+      getTextFileVersion: async () => version,
+      // The write lands while the file is still streaming into the editor.
+      onReadChunk: () => {
+        version = { ...original, modifiedMs: 2_000 };
+      }
+    });
+
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    expect(h.lifecycle.externalChangeState.change()).toEqual({
+      filePath: "/tmp/notes.txt",
+      kind: "changed"
+    });
+    expect(h.startSaveFileStream).not.toHaveBeenCalled();
+  });
+
+  it("clears the conflict when a reload fails, rather than acting on a path it has left", async () => {
+    let version: typeof original | null = original;
+    let failRead = false;
+    const h = createHarness({
+      getTextFileVersion: async () => version,
+      onReadChunk: () => {
+        if (failRead) {
+          throw new Error("Input/output error (os error 5)");
+        }
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    version = { ...original, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+    expect(h.lifecycle.externalChangeState.isVisible()).toBe(true);
+
+    failRead = true;
+    await h.lifecycle.reloadExternalChange();
+
+    expect(h.showError).toHaveBeenCalled();
+    expect(h.lifecycle.externalChangeState.change()).toBeNull();
+  });
+
+  it("refuses to reload a file that has grown past the hard limit", async () => {
+    let version = original;
+    const h = createHarness({
+      getTextFileVersion: async () => version,
+      fileSize: 2 * 1024 * 1024 * 1024
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+    version = { ...original, modifiedMs: 2_000 };
+    await h.lifecycle.checkForExternalChange();
+
+    await h.lifecycle.reloadExternalChange();
+
+    expect(h.showFileTooLarge).toHaveBeenCalled();
+    // The conflict stands: nothing about it has been resolved.
+    expect(h.lifecycle.externalChangeState.isVisible()).toBe(true);
+  });
+});
+
+/**
+ * A document created at a path that holds no file. Its baseline is the absence
+ * itself: without one, a save has nothing to assert and silently overwrites
+ * whatever arrived at that path in the meantime.
+ */
+describe("a document created at an empty path", () => {
+  const created = { size: 3, modifiedMs: 5_000, device: 1, inode: 9 };
+
+  it("asserts the path is still empty when it saves", async () => {
+    const h = createHarness({ getTextFileVersion: async () => null });
+    await h.lifecycle.openMissingFileAtPath("/tmp/new.txt");
+
+    await h.lifecycle.saveFile();
+
+    expect(h.startSaveFileStream).toHaveBeenCalledWith("/tmp/new.txt", { kind: "absent" });
+  });
+
+  it("does not report the absent file it was opened for as a deletion", async () => {
+    const h = createHarness({ getTextFileVersion: async () => null });
+
+    await h.lifecycle.openMissingFileAtPath("/tmp/new.txt");
+
+    expect(h.lifecycle.externalChangeState.change()).toBeNull();
+    expect(h.document.state.isDirty).toBe(false);
+  });
+
+  it("raises a conflict when a file appears at the path, and blocks the save", async () => {
+    let version: typeof created | null = null;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openMissingFileAtPath("/tmp/new.txt");
+
+    version = created;
+    await expect(h.lifecycle.checkForExternalChange()).resolves.toBe(true);
+    expect(h.lifecycle.externalChangeState.change()).toEqual({
+      filePath: "/tmp/new.txt",
+      kind: "appeared"
+    });
+
+    await h.lifecycle.saveFile();
+    expect(h.startSaveFileStream).not.toHaveBeenCalled();
+  });
+
+  it("retracts the conflict when the file that appeared goes away again", async () => {
+    let version: typeof created | null = null;
+    const h = createHarness({ getTextFileVersion: async () => version });
+    await h.lifecycle.openMissingFileAtPath("/tmp/new.txt");
+    version = created;
+    await h.lifecycle.checkForExternalChange();
+
+    version = null;
+    await expect(h.lifecycle.checkForExternalChange()).resolves.toBe(false);
+    expect(h.lifecycle.externalChangeState.change()).toBeNull();
+  });
+});
+
+/**
+ * The file going missing around a save is a deletion the user has to see —
+ * including when it is the baseline retaken afterwards that discovers it.
+ */
+describe("a file deleted while it is being saved", () => {
+  const original = { size: 10, modifiedMs: 1_000, device: 1, inode: 2 };
+
+  it("reports a deletion the retaken baseline discovers, instead of saving over it", async () => {
+    let version: typeof original | null = original;
+    let failVersion = false;
+    const h = createHarness({
+      getTextFileVersion: async () => {
+        if (failVersion) {
+          throw new Error("Permission denied (os error 13)");
+        }
+        return version;
+      }
+    });
+    await h.lifecycle.openFileAtPath("/tmp/notes.txt");
+
+    // The baseline is lost to a fault, and by the time Save retakes it the
+    // file has gone. Saving straight over that would recreate it in silence.
+    failVersion = true;
+    await h.lifecycle.saveFile();
+    failVersion = false;
+    version = null;
+
+    await h.lifecycle.saveFile();
+
+    expect(h.startSaveFileStream).not.toHaveBeenCalled();
+    expect(h.lifecycle.externalChangeState.change()).toEqual({
+      filePath: "/tmp/notes.txt",
+      kind: "deleted"
+    });
+    expect(h.document.state.isDirty).toBe(true);
   });
 });

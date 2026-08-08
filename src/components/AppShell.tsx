@@ -3,7 +3,7 @@ import { AboutDialog } from "./AboutDialog";
 import { AddedWordsDialog } from "./AddedWordsDialog";
 import { ConfirmDiscardModal } from "./ConfirmDiscardModal";
 import { ErrorModal } from "./ErrorModal";
-import { ExternalChangeBanner } from "./ExternalChangeBanner";
+import { ExternalChangeBanner, type ExternalChangeBannerKind } from "./ExternalChangeBanner";
 import { FileLoadingModal } from "./FileLoadingModal";
 import { FileSavingModal } from "./FileSavingModal";
 import { LargeFileOpenModal } from "./LargeFileOpenModal";
@@ -68,7 +68,7 @@ type AppShellProps = {
   };
   externalChange: {
     visible: boolean;
-    kind: "changed" | "deleted" | undefined;
+    kind: ExternalChangeBannerKind | undefined;
     filePath: string;
     onReload: () => void;
     onSaveAs: () => void;

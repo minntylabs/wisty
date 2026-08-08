@@ -222,14 +222,40 @@ function App() {
   });
 
   onMount(() => {
+    let checkInFlight = false;
     const checkForExternalChange = () => {
-      void fileLifecycle.checkForExternalChange().catch(() => {
-        // Save is where an unreadable file matters, and it says so there.
-        // Returning to the window is not the moment to interrupt typing with it.
-      });
+      // Both triggers below can arrive for one activation. The check is
+      // idempotent, so collapsing them is only to save the second stat.
+      if (checkInFlight) {
+        return;
+      }
+      checkInFlight = true;
+      void fileLifecycle.checkForExternalChange()
+        .catch(() => {
+          // Save is where an unreadable file matters, and it says so there.
+          // Returning to the window is not the moment to interrupt typing with it.
+        })
+        .finally(() => {
+          checkInFlight = false;
+        });
     };
+
+    // Two triggers, because neither covers the other. The DOM event does not
+    // fire on window re-activation in every webview — WebKitGTK is the one this
+    // project has already been bitten by — and the window event is Tauri's, so
+    // it says nothing about focus moving within the page.
     window.addEventListener("focus", checkForExternalChange);
-    onCleanup(() => window.removeEventListener("focus", checkForExternalChange));
+    const unlistenFocus = appWindow.onFocusChanged(({ payload: focused }) => {
+      if (focused) {
+        checkForExternalChange();
+      }
+    });
+    onCleanup(() => {
+      window.removeEventListener("focus", checkForExternalChange);
+      void unlistenFocus.then((stopListening) => stopListening()).catch(() => {
+        // Nothing to do if the listener never registered.
+      });
+    });
   });
 
   const openAboutDialog = async () => {

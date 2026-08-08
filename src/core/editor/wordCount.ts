@@ -171,6 +171,11 @@ export const createWordCounter = (deps: WordCounterDeps) => {
    */
   const invalidate = () => {
     cancel();
+    // What the last document cost to count says nothing about this one, and
+    // keeping it would hold a small file behind a large one's backoff: open a
+    // gigabyte and then a note, and the note would sit uncounted for ten
+    // seconds.
+    lastScanMs = 0;
     deps.onCount(null);
   };
 

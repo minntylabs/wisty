@@ -86,6 +86,17 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     readLines: () => editorView?.state.doc.iterLines() ?? [],
     onCount: (words) => options.onWordCountChanged?.(words)
   });
+
+  /**
+   * Counting is for the status bar, so a hidden status bar is not worth
+   * scanning a large document for. Turning it back on asks for a count then —
+   * see `applySettings`.
+   */
+  const countWordsIfShown = () => {
+    if (options.getSettings().statusBarEnabled) {
+      wordCounter.schedule();
+    }
+  };
   let suppressDocEvents = 0;
   let largeLineSafeModeEnabled = false;
   let lastReportedPosition: CursorPositionPayload | undefined;
@@ -319,7 +330,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
           if (!update.docChanged) {
             return;
           }
-          wordCounter.schedule();
+          countWordsIfShown();
           revision += 1;
           if (suppressDocEvents > 0) {
             return;
@@ -450,7 +461,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
 
     emitCursorPositionIfChanged(editorView.state);
     // An empty document still has a count to report.
-    wordCounter.schedule();
+    countWordsIfShown();
   };
 
   const destroy = () => {
@@ -505,7 +516,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     // Invalidate and ask again: text identical to what is already there
     // produces no transaction, so the listener would never ask.
     wordCounter.invalidate();
-    wordCounter.schedule();
+    countWordsIfShown();
     dispatchTextChange({
       from: 0,
       to: editorView.state.doc.length,
@@ -553,7 +564,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     // Replacing the state outright is not a transaction, so the update
     // listener never sees this and the count has to be asked for here.
     wordCounter.invalidate();
-    wordCounter.schedule();
+    countWordsIfShown();
     revision = 0;
     editorView.scrollDOM.scrollTop = 0;
     editorView.scrollDOM.scrollLeft = 0;
@@ -569,6 +580,8 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
       return;
     }
     const settings = options.getSettings();
+    // A status bar that has just been switched on has no count yet.
+    countWordsIfShown();
     editorView.dispatch({
       effects: [
         wrapCompartment.reconfigure(!largeLineSafeModeEnabled && settings.textWrapEnabled ? EditorView.lineWrapping : []),

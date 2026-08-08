@@ -135,3 +135,47 @@ describe("the word counter", () => {
     expect(onCount).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("a new document's count", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * The backoff is a property of the document being counted, not of the
+   * counter. Carrying it across would leave a small file waiting out the time
+   * a large one had earned.
+   */
+  it("is not held behind the backoff the last document earned", async () => {
+    const onCount = vi.fn();
+    let lines = ["one two"];
+    const counter = createWordCounter({
+      readLines: () => lines,
+      onCount,
+      quietMs: 100,
+      sliceChars: 1024
+    });
+    const readings = [0, 5_000];
+    let reading = 0;
+    vi.spyOn(Date, "now").mockImplementation(
+      () => readings[Math.min(reading++, readings.length - 1)]
+    );
+
+    // A document expensive enough to earn a long wait before the next scan.
+    counter.schedule();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(onCount).toHaveBeenLastCalledWith(2);
+
+    // Then it is replaced by a small one.
+    lines = ["only"];
+    counter.invalidate();
+    counter.schedule();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(onCount).toHaveBeenLastCalledWith(1);
+  });
+});

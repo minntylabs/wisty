@@ -36,13 +36,13 @@ afterEach(() => {
   readText.mockReset();
 });
 
-const createAdapter = () => {
+const createAdapter = (settingsOverrides: Partial<typeof settings> = {}) => {
   const onDocChanged = vi.fn();
   const onCursorPositionChanged = vi.fn();
   const onFormatModeChanged = vi.fn();
   const onWordCountChanged = vi.fn();
   const adapter = createEditorAdapter({
-    getSettings: () => settings,
+    getSettings: () => ({ ...settings, ...settingsOverrides }),
     onDocChanged,
     onCursorPositionChanged,
     onFormatModeChanged,
@@ -239,6 +239,29 @@ describe("word count", () => {
     await vi.runAllTimersAsync();
 
     expect(onWordCountChanged).toHaveBeenLastCalledWith(0);
+  });
+
+  /** Nothing displays it, so a large document is not scanned for it. */
+  it("does not count while the status bar is hidden", async () => {
+    const { adapter, onWordCountChanged } = createAdapter({ statusBarEnabled: false });
+
+    adapter.setText("one two three");
+    await vi.runAllTimersAsync();
+
+    expect(onWordCountChanged).not.toHaveBeenCalledWith(3);
+  });
+
+  it("counts as soon as the status bar is shown again", async () => {
+    const hidden = { statusBarEnabled: false };
+    const { adapter, onWordCountChanged } = createAdapter(hidden);
+    adapter.setText("one two three");
+    await vi.runAllTimersAsync();
+
+    hidden.statusBarEnabled = true;
+    adapter.applySettings();
+    await vi.runAllTimersAsync();
+
+    expect(onWordCountChanged).toHaveBeenLastCalledWith(3);
   });
 
   it("stops counting once the editor is torn down", async () => {

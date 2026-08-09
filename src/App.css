@@ -843,48 +843,6 @@ body {
   color: var(--text-main);
 }
 
-/* The conversion probe, which only a development build renders. Deliberately
-   plain and a little ugly: it is instrumentation, not part of the app. */
-.conversion-probe {
-  margin-top: 12px;
-  padding: 8px;
-  border: 1px dashed var(--panel-border);
-  border-radius: 4px;
-  font-size: 12px;
-}
-
-.conversion-probe-title {
-  margin: 0 0 6px;
-  font-weight: 600;
-  color: var(--status-text);
-}
-
-.conversion-probe-counts {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 2px 12px;
-  margin: 8px 0 0;
-}
-
-.conversion-probe-counts dt {
-  color: var(--status-text);
-}
-
-.conversion-probe-counts dd {
-  margin: 0;
-}
-
-.conversion-probe-log {
-  margin: 8px 0 0;
-  max-height: 76px;
-  overflow-y: auto;
-  font-family: ui-monospace, monospace;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--status-text);
-  white-space: pre-wrap;
-}
-
 /* ffmpeg's own output: monospaced, scrolling, and bounded so a long
    conversion cannot grow the dialog past the window. */
 .conversion-log {

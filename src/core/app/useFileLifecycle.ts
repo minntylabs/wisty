@@ -908,9 +908,18 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     }
   };
 
-  const saveContainerAtPath = async (filePath: string) => {
+  /**
+   * Writes the open container to `filePath`.
+   *
+   * Answers whether the document was actually moved there. It declines when a
+   * save is already running, and abandons what it learned when the document
+   * changes underneath it — and Save As has follow-up work, migrating the
+   * remembered position and adding a recent file, which must not happen for a
+   * path this never wrote.
+   */
+  const saveContainerAtPath = async (filePath: string): Promise<boolean> => {
     if (isSaving()) {
-      return;
+      return false;
     }
     const transcript = deps.editor.getText();
     const revision = deps.editor.getRevision();
@@ -922,13 +931,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await deps.fileIo.saveContainer(filePath, transcript);
       setSavingCharsWritten(transcript.length);
       if (!documentStillOpenAt(startedAt)) {
-        return;
+        return false;
       }
       deps.document.markSavedAt(revision);
       deps.document.setFilePath(filePath, "container");
       await externalChanges.capture(filePath);
       await rememberLastDirectory(filePath);
       deps.editor.focus();
+      return true;
     } finally {
       endSavingState(saveId);
     }
@@ -943,7 +953,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
           return;
         }
         const previousPath = deps.document.state.filePath;
-        await saveContainerAtPath(result.filePath);
+        // Only if it really moved there. A save already running makes this a
+        // no-op, and a document that changed while the dialog was open is no
+        // longer the one being saved: in either case the remembered position
+        // would be moved to a path nothing was written to, and a file that does
+        // not exist would be offered under Recent.
+        if (!await saveContainerAtPath(result.filePath)) {
+          return;
+        }
         await deps.rememberedPosition.migrate(previousPath, result.filePath);
         await rememberRecentFile(result.filePath);
       }, "Unable to save file");

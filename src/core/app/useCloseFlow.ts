@@ -17,7 +17,16 @@ export const useCloseFlow = (deps: UseCloseFlowDeps) => {
 
   const closeApplicationAction = async () => {
     setCloseFlowState("force-closing");
-    await deps.closeWindow();
+    try {
+      await deps.closeWindow();
+    } catch (error) {
+      // The close did not happen, so the window is still here and still dirty.
+      // Left at force-closing, the next close request would be read as one this
+      // flow had already asked about and would go through without a prompt,
+      // taking the unsaved work with it.
+      setCloseFlowState("idle");
+      throw error;
+    }
   };
 
   const clearCloseIntent = () => {
@@ -26,13 +35,33 @@ export const useCloseFlow = (deps: UseCloseFlowDeps) => {
     }
   };
 
+  /**
+   * Puts the discard question on screen for `action`, unless it is already on
+   * screen for something else.
+   *
+   * The prompt names no action, so whichever one is pending is the one the
+   * user's "discard" answers. Replacing it would run something they were never
+   * asked about and drop what they were, without a trace. The menus are blocked
+   * while the prompt is up, so this is hard to reach — but nothing enforces
+   * that, and the window's close button is outside the menus entirely.
+   *
+   * Returns whether the question is now being asked about `action`.
+   */
+  const askToDiscard = (action: AsyncAction) => {
+    if (confirmDiscardOpen()) {
+      return false;
+    }
+    setPendingAction(() => action);
+    setConfirmDiscardOpen(true);
+    return true;
+  };
+
   const runOrConfirmDiscard = async (action: AsyncAction) => {
     if (!deps.isDirty()) {
       await action();
       return;
     }
-    setPendingAction(() => action);
-    setConfirmDiscardOpen(true);
+    askToDiscard(action);
   };
 
   const requestClose = async () => {
@@ -40,9 +69,9 @@ export const useCloseFlow = (deps: UseCloseFlowDeps) => {
       await closeApplicationAction();
       return;
     }
-    setPendingAction(() => closeApplicationAction);
-    setCloseFlowState("awaiting-discard");
-    setConfirmDiscardOpen(true);
+    if (askToDiscard(closeApplicationAction)) {
+      setCloseFlowState("awaiting-discard");
+    }
   };
 
   const resolveConfirmDiscard = async (shouldDiscard: boolean) => {
@@ -78,10 +107,13 @@ export const useCloseFlow = (deps: UseCloseFlowDeps) => {
     if (!deps.isDirty()) {
       return;
     }
+    // Held back whether or not the question can be asked for this close: if a
+    // prompt is already up for something else, letting the close through would
+    // answer it by destroying the window.
     event.preventDefault();
-    setPendingAction(() => closeApplicationAction);
-    setCloseFlowState("awaiting-discard");
-    setConfirmDiscardOpen(true);
+    if (askToDiscard(closeApplicationAction)) {
+      setCloseFlowState("awaiting-discard");
+    }
   };
 
   return {

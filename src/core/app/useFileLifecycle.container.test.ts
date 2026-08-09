@@ -58,6 +58,10 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
   })));
   const closeContainer = vi.fn(async () => {});
   const saveContainer = vi.fn(overrides.saveContainer ?? (async () => {}));
+  // Save As does these two only once the container has really been written
+  // there, so they are what a save that quietly did nothing is caught by.
+  const migratePosition = vi.fn(async () => {});
+  const addRecentFile = vi.fn(async () => {});
   const savedChunks: string[] = [];
   const startSaveFileStream = vi.fn(async (filePath: string) => ({ streamId: "s", filePath }));
   const finishSaveFileStream = vi.fn(overrides.finishSaveFileStream ?? (async () => ({ bytesWrittenTotal: 1 })));
@@ -104,7 +108,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
       state: { lastDirectory: "", recentFiles: [] },
       actions: {
         setLastDirectory: overrides.setLastDirectory ?? (async () => {}),
-        addRecentFile: async () => {},
+        addRecentFile,
         removeRecentFile: async () => {}
       }
     },
@@ -160,7 +164,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     rememberedPosition: {
       capture: async () => {},
       restore: () => {},
-      migrate: async () => {}
+      migrate: migratePosition
     },
     errors: { showError },
     playback: { release: releasePlayback },
@@ -189,6 +193,8 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     openContainer,
     closeContainer,
     saveContainer,
+    migratePosition,
+    addRecentFile,
     savedChunks,
     startSaveFileStream,
     finishSaveFileStream,
@@ -517,6 +523,67 @@ describe("saving a container", () => {
     expect(h.startSaveFileStream).not.toHaveBeenCalled();
     expect(h.saveContainer).toHaveBeenCalledWith("/tmp/other.tsf", TRANSCRIPT);
     expect(h.document.state).toMatchObject({ kind: "container", filePath: "/tmp/other.tsf" });
+  });
+
+  it("migrates the remembered position once it really has moved", async () => {
+    const h = createHarness();
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    await h.lifecycle.saveFileAs();
+
+    expect(h.migratePosition).toHaveBeenCalledWith(CONTAINER, "/tmp/other.tsf");
+    expect(h.addRecentFile).toHaveBeenCalledWith("/tmp/other.tsf");
+  });
+
+  /**
+   * Saving a container declines outright while another save is running. Save As
+   * did not notice, and went on to move the remembered position to a path
+   * nothing had been written to and to offer that path under Recent.
+   */
+  it("moves nothing when the save is refused because one is already running", async () => {
+    let releaseFirstSave = () => {};
+    const h = createHarness({
+      saveContainer: async () => {
+        await new Promise<void>((resolve) => {
+          releaseFirstSave = resolve;
+        });
+      }
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    // Opening records a recent file of its own; only what Save As does counts.
+    h.addRecentFile.mockClear();
+
+    const firstSave = h.lifecycle.saveFile();
+    await untilSaving(h);
+    await h.lifecycle.saveFileAs();
+
+    expect(h.migratePosition).not.toHaveBeenCalled();
+    expect(h.addRecentFile).not.toHaveBeenCalled();
+
+    releaseFirstSave();
+    await firstSave;
+  });
+
+  /**
+   * The text branch has always guarded this with documentStillOpenAt; the
+   * container branch did not. A document opened while the write was in flight
+   * would have the previous document's position moved out from under it.
+   */
+  it("moves nothing when the document changed while it was being written", async () => {
+    const h = createHarness({
+      saveContainer: async () => {
+        // Stands in for anything that opens a document during the write.
+        h.document.setFilePath("/tmp/somewhere-else.tsf", "container");
+      }
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    h.addRecentFile.mockClear();
+
+    await h.lifecycle.saveFileAs();
+
+    expect(h.saveContainer).toHaveBeenCalledWith("/tmp/other.tsf", TRANSCRIPT);
+    expect(h.migratePosition).not.toHaveBeenCalled();
+    expect(h.addRecentFile).not.toHaveBeenCalled();
   });
 
   it("exports plain text without changing the open container", async () => {

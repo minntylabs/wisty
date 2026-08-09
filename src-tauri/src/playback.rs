@@ -128,7 +128,7 @@ fn open_decoder(audio: SharedAudio) -> Result<DecoderContext, String> {
         return Err("The audio track has no codec parameters".to_string());
     };
     let decoder: Box<dyn AudioDecoder> = symphonia::default::get_codecs()
-        .make_audio_decoder(&params, &AudioDecoderOptions::default())
+        .make_audio_decoder(params, &AudioDecoderOptions::default())
         .map_err(|error| format!("Cannot decode this recording: {error}"))?;
 
     Ok(DecoderContext {

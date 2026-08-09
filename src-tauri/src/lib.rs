@@ -1127,9 +1127,7 @@ fn replace_expected_source(
         )
     };
     if exchanged != 0 {
-        if let Err(external_change) = ensure_expected_source(target, expected) {
-            return Err(external_change);
-        }
+        ensure_expected_source(target, expected)?;
         return Err(SaveStreamError::failed(format!(
             "Unable to finalize save for '{}': {}",
             target.to_string_lossy(),

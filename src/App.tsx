@@ -205,12 +205,40 @@ function App() {
   const [conversionPosition, setConversionPosition] = createSignal<number | null>(null);
   /** Whether ffmpeg is still running, as opposed to the packaging that follows. */
   const [convertingAudio, setConvertingAudio] = createSignal(false);
+  /** What is being built, named before anything has been said about it. */
+  const [conversionRecording, setConversionRecording] = createSignal("");
+  const [conversionContainer, setConversionContainer] = createSignal("");
   /** Set by the Cancel button, so the window can say it has been heard. */
   const [cancellingImport, setCancellingImport] = createSignal(false);
 
+  /**
+   * Whether this import was expected to convert, and whether ffmpeg has yet
+   * been seen doing it.
+   *
+   * A poll landing between the window opening and ffmpeg being spawned finds no
+   * conversion, which reads exactly like one that has finished. Taken at face
+   * value it would say "Writing the container…" for the first moment of every
+   * conversion — the flicker this replaces — so an expected conversion is
+   * believed until it has actually been observed running and then stops.
+   */
+  let expectedConversion = false;
+  let sawConversionRunning = false;
+
+  const beginConversion = (building: { recording: string; container: string; willConvert: boolean }) => {
+    expectedConversion = building.willConvert;
+    sawConversionRunning = false;
+    setConversionRecording(building.recording);
+    setConversionContainer(building.container);
+    setConvertingAudio(building.willConvert);
+    setConverting(true);
+  };
+
   const receiveConversionOutput = (output: ConversionOutput) => {
     setConverting(true);
-    setConvertingAudio(output.running);
+    if (output.running) {
+      sawConversionRunning = true;
+    }
+    setConvertingAudio(output.running || (expectedConversion && !sawConversionRunning));
     if (output.lines.length > 0) {
       setConversionLines((seen) => appendConversionLines(seen, output.lines));
     }
@@ -226,12 +254,16 @@ function App() {
   };
 
   const finishConversion = () => {
+    expectedConversion = false;
+    sawConversionRunning = false;
     setConverting(false);
     setConvertingAudio(false);
     setCancellingImport(false);
     setConversionLines([]);
     setConversionDuration(null);
     setConversionPosition(null);
+    setConversionRecording("");
+    setConversionContainer("");
   };
 
   /**
@@ -256,6 +288,12 @@ function App() {
     },
     get convertingAudio() {
       return convertingAudio();
+    },
+    get recordingName() {
+      return conversionRecording();
+    },
+    get containerName() {
+      return conversionContainer();
     },
     get cancelling() {
       return cancellingImport();
@@ -351,7 +389,7 @@ function App() {
     appVersion,
     conversion: {
       takeOutput: takeConversionOutput,
-      onStarted: () => setConverting(true),
+      onStarted: beginConversion,
       // Each reading is kept until the next one that has it. The last look the
       // watch takes lands after the conversion has been cleared away, and
       // letting that empty it would blank the window on its way out.

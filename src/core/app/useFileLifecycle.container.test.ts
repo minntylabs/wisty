@@ -40,7 +40,9 @@ type HarnessOverrides = {
   createContainer?: (params: { outputPath: string }) => Promise<{ path: string }>;
   /** What the watched conversion says while the container is being built. */
   conversionOutput?: string[];
-  onConversionStarted?: () => void;
+  onConversionStarted?: (building: unknown) => void;
+  /** Whether the player can read the recording, which decides if it converts. */
+  audioPlayable?: boolean;
   onConversionFinished?: () => void;
 };
 
@@ -134,7 +136,11 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
       },
       fileExists: async () => true,
       readTextFile: overrides.readTextFile ?? (async () => "plain text"),
-      probeAudio: async () => ({ duration: 600, codec: "opus" }),
+      probeAudio: async () => ({
+        duration: 600,
+        codec: "opus",
+        playable: overrides.audioPlayable ?? true
+      }),
       createContainer: vi.fn(overrides.createContainer ?? (async (params: { outputPath: string }) => ({ path: params.outputPath }))),
       streamReadTextFile,
       saveTextFile: async () => {},
@@ -172,7 +178,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     confirmImportProblems: async () => true,
     appVersion: () => "2.5.0",
     conversion: {
-      onStarted: () => overrides.onConversionStarted?.(),
+      onStarted: (building: unknown) => overrides.onConversionStarted?.(building),
       takeOutput: async () => ({
         lines: overrides.conversionOutput ?? [],
         durationSecs: null,
@@ -1645,6 +1651,42 @@ describe("importing a transcript", () => {
         })
       })
     );
+  });
+
+  /**
+   * The window opens before ffmpeg has said anything, and used to be told
+   * nothing: it named no file, and it described the wrong step for its first
+   * 150ms because "is it converting?" was answered by the first poll rather
+   * than by what the probe already knew.
+   */
+  it("names what it is building, and says whether a conversion is coming", async () => {
+    const started: unknown[] = [];
+    const h = createHarness({
+      readTextFile: async () => VTT,
+      audioPlayable: false,
+      onConversionStarted: (building) => started.push(building)
+    });
+
+    await h.lifecycle.importTranscript();
+
+    expect(started).toEqual([
+      { recording: "a.m4a", container: "other.tsf", willConvert: true }
+    ]);
+  });
+
+  it("says no conversion is coming for a recording the player can read", async () => {
+    const started: unknown[] = [];
+    const h = createHarness({
+      readTextFile: async () => VTT,
+      audioPlayable: true,
+      onConversionStarted: (building) => started.push(building)
+    });
+
+    await h.lifecycle.importTranscript();
+
+    expect(started).toEqual([
+      { recording: "a.m4a", container: "other.tsf", willConvert: false }
+    ]);
   });
 
   /**

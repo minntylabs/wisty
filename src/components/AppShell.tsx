@@ -60,6 +60,9 @@ type AppShellProps = {
     positionSecs: number | null;
     /** Whether ffmpeg is running, as opposed to the packaging that follows it. */
     convertingAudio: boolean;
+    /** What is being built, known before anything has been said about it. */
+    recordingName: string;
+    containerName: string;
     /** Whether a cancellation has been asked for and not yet taken effect. */
     cancelling: boolean;
     onCancel: () => void;
@@ -185,6 +188,8 @@ export const AppShell = (props: AppShellProps) => {
         durationSecs={props.audioConversion.durationSecs}
         positionSecs={props.audioConversion.positionSecs}
         convertingAudio={props.audioConversion.convertingAudio}
+        recordingName={props.audioConversion.recordingName}
+        containerName={props.audioConversion.containerName}
         cancelling={props.audioConversion.cancelling}
         onCancel={props.audioConversion.onCancel}
       />

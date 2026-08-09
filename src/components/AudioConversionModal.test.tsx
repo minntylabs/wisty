@@ -19,7 +19,7 @@ afterEach(() => {
  * output. Passing the signals straight in would hide exactly the coupling
  * these tests are about.
  */
-const showModal = (initial: string[]) => {
+const showModal = (initial: string[], names: { recording?: string; container?: string } = {}) => {
   const [lines, setLines] = createSignal(initial);
   const [open, setOpen] = createSignal(true);
   const group = () => ({
@@ -28,6 +28,8 @@ const showModal = (initial: string[]) => {
     durationSecs: 600,
     positionSecs: 12,
     convertingAudio: true,
+    recordingName: names.recording ?? "rec.opus",
+    containerName: names.container ?? "rec.tsf",
     cancelling: false
   });
 
@@ -41,6 +43,8 @@ const showModal = (initial: string[]) => {
         durationSecs={group().durationSecs}
         positionSecs={group().positionSecs}
         convertingAudio={group().convertingAudio}
+        recordingName={group().recordingName}
+        containerName={group().containerName}
         cancelling={group().cancelling}
         onCancel={() => {}}
       />
@@ -96,5 +100,27 @@ describe("the conversion window", () => {
     await Promise.resolve();
 
     expect(output()).toBeNull();
+  });
+});
+
+describe("what the window says it is building", () => {
+  /**
+   * An import that converts nothing produces no ffmpeg output, so everything in
+   * the facts list used to be empty: the window was a title, a sentence and an
+   * indeterminate bar, naming no file at all — alone among the app's progress
+   * windows, which all show their path.
+   */
+  it("names both files with no output to go on", () => {
+    showModal([], { recording: "interview.wav", container: "interview.tsf" });
+    const facts = document.querySelector(".conversion-facts")?.textContent ?? "";
+    expect(facts).toContain("interview.wav");
+    expect(facts).toContain("interview.tsf");
+  });
+
+  it("prefers its own name for the recording over ffmpeg's path", () => {
+    showModal(["Input #0, ogg, from '/recordings/a.opus':"], { recording: "a.opus" });
+    const facts = document.querySelector(".conversion-facts")?.textContent ?? "";
+    expect(facts).toContain("a.opus");
+    expect(facts).not.toContain("/recordings/");
   });
 });

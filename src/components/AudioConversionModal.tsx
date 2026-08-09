@@ -24,6 +24,15 @@ type AudioConversionModalProps = {
    * describing work that finished.
    */
   convertingAudio: boolean;
+  /**
+   * What is being built, as file names.
+   *
+   * Known from the moment the window opens, unlike anything in `lines`: an
+   * import that converts nothing produces no ffmpeg output at all, and used to
+   * leave this the only progress window in the app that named no file.
+   */
+  recordingName: string;
+  containerName: string;
   /** Whether a cancellation has been asked for and not yet taken effect. */
   cancelling: boolean;
   onCancel: () => void;
@@ -135,10 +144,12 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
           </DialogDescription>
 
           <dl class="conversion-facts">
-            <Show when={summary().source}>
+            {/* Ours rather than ffmpeg's, which is a full path and absent
+                entirely when nothing is being converted. */}
+            <Show when={props.recordingName || summary().source}>
               {(source) => (
                 <>
-                  <dt>Source file</dt>
+                  <dt>Recording</dt>
                   <dd>{source()}</dd>
                 </>
               )}
@@ -156,6 +167,14 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
                 <>
                   <dt>Output format</dt>
                   <dd>{to()}</dd>
+                </>
+              )}
+            </Show>
+            <Show when={props.containerName}>
+              {(container) => (
+                <>
+                  <dt>Container</dt>
+                  <dd>{container()}</dd>
                 </>
               )}
             </Show>

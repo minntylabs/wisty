@@ -37,6 +37,14 @@ export type ImportTranscriptDeps = {
     transcript: string;
     audioPath: string;
     meta: Record<string, unknown>;
+    /**
+     * Whether the recording is about to be re-encoded. Not the container
+     * writer's business, but this is the moment the window over it opens, and
+     * it is the only thing here that knows: the answer comes from the probe,
+     * several steps back, and the window would otherwise have to guess and
+     * correct itself once ffmpeg's first output arrived.
+     */
+    willConvert: boolean;
   }) => Promise<{ path: string }>;
   /**
    * Asked when the cues do not sit comfortably against the recording. Answering
@@ -58,7 +66,7 @@ export type ImportTranscriptResult =
   | { kind: "cancelled" }
   | { kind: "created"; filePath: string; cues: number; problems: CueProblem[] };
 
-const fileName = (filePath: string) => filePath.slice(filePath.lastIndexOf("/") + 1);
+export const fileName = (filePath: string) => filePath.slice(filePath.lastIndexOf("/") + 1);
 
 const withoutExtension = (name: string) => {
   const dot = name.lastIndexOf(".");
@@ -147,7 +155,8 @@ export const importTranscript = async (
     audioPath: audio.filePath,
     // Rust fills in the audio's duration and codec from the file it is
     // copying, so what is sent is a draft and not the whole of meta.json.
-    meta: meta as unknown as Record<string, unknown>
+    meta: meta as unknown as Record<string, unknown>,
+    willConvert
   });
 
   return { kind: "created", filePath: created.path, cues: countCues(cues), problems };

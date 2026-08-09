@@ -14,7 +14,7 @@ import type { LaunchFileStreamChunkResult } from "../window/launchArgService";
 import { toAppError, type AppErrorCode } from "../errors/appError";
 import { createExternalChangeMonitor, externalChangeKindFromSaveError } from "./externalChangeMonitor";
 import { stripMarkers } from "../tsf/markers";
-import { importTranscript } from "../tsf/importTranscript";
+import { importTranscript, fileName } from "../tsf/importTranscript";
 import { createConversionWatch, type ConversionOutput } from "../tsf/conversionWatch";
 import { appendConversionLines } from "../tsf/conversionLines";
 import type { CueProblem } from "../tsf/vtt";
@@ -74,8 +74,17 @@ type UseFileLifecycleDeps = {
    */
   conversion: {
     takeOutput: () => Promise<ConversionOutput>;
-    /** The container has begun being built, whether or not ffmpeg is involved. */
-    onStarted: () => void;
+    /**
+     * The container has begun being built, whether or not ffmpeg is involved.
+     *
+     * Told what it is building, because the window that opens on this has no
+     * other source for it: ffmpeg names the recording in its output, and for an
+     * import that converts nothing there is no output at all — which left the
+     * window naming no file, unlike every other one that shows a path. And told
+     * whether a conversion is coming, so it does not open describing the wrong
+     * step and correct itself when the first output arrives.
+     */
+    onStarted: (building: { recording: string; container: string; willConvert: boolean }) => void;
     onOutput: (output: ConversionOutput) => void;
     /** Nothing is converting any more, whether it finished or was stopped. */
     onFinished: () => void;
@@ -1123,8 +1132,12 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
           // into the archive, and that used to happen behind a window that
           // never appeared — no progress, no cancel, and an app that looked
           // stopped for as long as the recording was large.
-          createContainer: async (params) => {
-            deps.conversion.onStarted();
+          createContainer: async ({ willConvert, ...params }) => {
+            deps.conversion.onStarted({
+              recording: fileName(params.audioPath),
+              container: fileName(params.outputPath),
+              willConvert
+            });
             watch.start();
             try {
               return await deps.fileIo.createContainer(params);

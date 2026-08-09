@@ -105,7 +105,7 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
             <Show when={summary().to}>
               {(to) => (
                 <>
-                  <dt>Destination format</dt>
+                  <dt>Output format</dt>
                   <dd>{to()}</dd>
                 </>
               )}

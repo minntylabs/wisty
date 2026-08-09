@@ -644,10 +644,22 @@ function App() {
             }
           }}
           audioConversion={{
-            open: converting(),
-            lines: conversionLines(),
-            durationSecs: conversionDuration(),
-            positionSecs: conversionPosition(),
+            // Read one at a time. Written plainly, the whole object is rebuilt
+            // on any access, so asking whether the window is open also reads
+            // the output — and everything watching `open` wakes up every time
+            // ffmpeg says another word.
+            get open() {
+              return converting();
+            },
+            get lines() {
+              return conversionLines();
+            },
+            get durationSecs() {
+              return conversionDuration();
+            },
+            get positionSecs() {
+              return conversionPosition();
+            },
             onCancel: () => {
               void cancelAudioConversion();
             }

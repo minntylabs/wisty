@@ -270,11 +270,11 @@ describe("remember position command", () => {
 });
 
 describe("file.importTranscript command", () => {
-  it("is bound to Ctrl+Shift+I and asks about unsaved work first", async () => {
+  it("is bound to Ctrl+Shift+T and asks about unsaved work first", async () => {
     const deps = createDeps();
     const command = findCommand(buildCommands(deps).definitions, "file.importTranscript");
 
-    expect(command.shortcut).toBe("Ctrl+Shift+I");
+    expect(command.shortcut).toBe("Ctrl+Shift+T");
     await command.run();
     expect(deps.closeFlow.runOrConfirmDiscard).toHaveBeenCalledOnce();
     expect(deps.fileLifecycle.importTranscript).toHaveBeenCalledOnce();
@@ -285,7 +285,25 @@ describe("file.importTranscript command", () => {
  * Two commands on one shortcut is a bug the router cannot report: it runs
  * whichever it finds first, and the other simply never happens.
  */
+/**
+ * WebKitGTK handles these itself, below the page: the inspector opens and the
+ * command never runs, and `preventDefault` cannot reach far enough down to
+ * stop it. Ctrl+Shift+I cost an import shortcut that way.
+ */
+const CLAIMED_BY_THE_WEBVIEW = ["Ctrl+Shift+I", "Ctrl+Shift+C", "F12"];
+
 describe("shortcuts", () => {
+  it("leaves the webview's own shortcuts alone", () => {
+    const deps = createDeps();
+    const taken = buildCommands(deps)
+      .definitions.filter((definition) => definition.shortcut)
+      .filter((definition) => CLAIMED_BY_THE_WEBVIEW.includes(definition.shortcut as string))
+      .map((definition) => `${definition.shortcut} (${definition.id})`);
+
+    expect(taken, "WebKitGTK answers these before the page does").toEqual([]);
+  });
+
+
   it("gives no shortcut to two commands", () => {
     for (const isMac of [false, true]) {
       const deps = createDeps();

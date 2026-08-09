@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import {
   Root as DialogRoot,
   Portal as DialogPortal,
@@ -41,6 +41,30 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
    * away from them faster than they can read it.
    */
   let following = true;
+
+  /**
+   * Whether the full output is showing, held here rather than in a `<details>`
+   * element's own state. Native disclosure state lives in the DOM node, so
+   * anything that replaces the node closes it — and this panel is rebuilt
+   * around new output every 150ms while the conversion runs.
+   */
+  const [showOutput, setShowOutput] = createSignal(false);
+
+  /**
+   * Each conversion starts summarised — what the last one needed explaining
+   * says nothing about this one — but only on the way *in*. This effect re-runs
+   * whenever anything it reads changes, and `open` is read through a props
+   * object its parent rebuilds as output arrives, so acting on the value rather
+   * than the change would shut the output every 150ms.
+   */
+  let wasOpen = false;
+  createEffect(() => {
+    const open = props.open;
+    if (open && !wasOpen) {
+      setShowOutput(false);
+    }
+    wasOpen = open;
+  });
 
   const summary = createMemo(() => summariseConversion(props.lines));
   const progress = createMemo(() => {
@@ -137,12 +161,21 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
                 : `Converted ${formatDuration(props.positionSecs)} of ${formatDuration(props.durationSecs)}`}
           </p>
 
-          <details class="conversion-details">
-            <summary>ffmpeg's output</summary>
-            <pre class="conversion-log" ref={log} onScroll={noteScroll}>
-              <For each={props.lines}>{(line) => <div>{line}</div>}</For>
-            </pre>
-          </details>
+          <div class="conversion-details">
+            <button
+              type="button"
+              class="conversion-disclosure"
+              aria-expanded={showOutput()}
+              onClick={() => setShowOutput((shown) => !shown)}
+            >
+              {showOutput() ? "Hide ffmpeg's output" : "Show ffmpeg's output"}
+            </button>
+            <Show when={showOutput()}>
+              <pre class="conversion-log" ref={log} onScroll={noteScroll}>
+                <For each={props.lines}>{(line) => <div>{line}</div>}</For>
+              </pre>
+            </Show>
+          </div>
 
           <div class="modal-actions">
             <button class="button subtle" onClick={props.onCancel}>Cancel Import</button>

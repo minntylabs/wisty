@@ -22,6 +22,7 @@ type UseAppLifecycleOptions = {
 
 export const useAppLifecycle = (options: UseAppLifecycleOptions) => {
   let unlistenCloseRequest: (() => void) | undefined;
+  let disposed = false;
 
   onMount(() => {
     const editorHost = options.getEditorHost();
@@ -79,11 +80,16 @@ export const useAppLifecycle = (options: UseAppLifecycleOptions) => {
         options.handleWindowCloseRequested(event);
       })
       .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
         unlistenCloseRequest = unlisten;
       });
   });
 
   onCleanup(() => {
+    disposed = true;
     window.removeEventListener("keydown", options.handleGlobalKeydown);
     if (unlistenCloseRequest) {
       unlistenCloseRequest();

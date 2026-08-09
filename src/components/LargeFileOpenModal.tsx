@@ -7,6 +7,7 @@ import {
   Description as DialogDescription,
   CloseButton as DialogCloseButton
 } from "@kobalte/core/dialog";
+import { formatSizeMb } from "../core/files/formatSize";
 
 type LargeFileOpenModalProps = {
   open: boolean;
@@ -18,13 +19,11 @@ type LargeFileOpenModalProps = {
   onAcknowledge: () => void;
 };
 
-const formatSizeMb = (sizeBytes: number): string => (sizeBytes / (1024 * 1024)).toFixed(1);
-
 export const LargeFileOpenModal = (props: LargeFileOpenModalProps) => {
   const title = () => (props.kind === "blocked" ? "File Too Large" : "Large File");
   const description = () =>
     props.kind === "blocked"
-      ? `This file is ${formatSizeMb(props.sizeBytes)} MB. Wisty cannot open files of 1 GB or larger.`
+      ? `This file is ${formatSizeMb(props.sizeBytes)} MB. Wisty cannot open files of 1024 MB or larger.`
       : `This file is ${formatSizeMb(props.sizeBytes)} MB. Opening it may reduce responsiveness.`;
 
   return (

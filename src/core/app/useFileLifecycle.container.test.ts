@@ -70,7 +70,8 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
   const markersEnabled = vi.fn((enabled: boolean) => {
     events.push(enabled ? "markers-on" : "markers-off");
   });
-  const releasePlayback = vi.fn(() => {
+  const stopPlayback = vi.fn(async () => {});
+  const releasePlayback = vi.fn(async () => {
     events.push("playback-released");
   });
   const streamReadTextFile = vi.fn(async function* () {
@@ -173,7 +174,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
       migrate: migratePosition
     },
     errors: { showError },
-    playback: { release: releasePlayback },
+    playback: { stop: stopPlayback, release: releasePlayback },
     confirmOpenLargeFile: overrides.confirmOpenLargeFile ?? (async () => true),
     confirmImportProblems: async () => true,
     appVersion: () => "2.5.0",
@@ -1129,13 +1130,15 @@ describe("external text-file changes", () => {
 
   it("refuses to reload a file that has grown past the hard limit", async () => {
     let version = original;
+    let fileSize = 10;
     const h = createHarness({
       getTextFileVersion: async () => version,
-      fileSize: 2 * 1024 * 1024 * 1024
+      get fileSize() { return fileSize; }
     });
     await h.lifecycle.openFileAtPath("/tmp/notes.txt");
     version = { ...original, modifiedMs: 2_000 };
     await h.lifecycle.checkForExternalChange();
+    fileSize = 2 * 1024 * 1024 * 1024;
 
     await h.lifecycle.reloadExternalChange();
 

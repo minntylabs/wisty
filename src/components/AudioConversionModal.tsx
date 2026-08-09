@@ -187,6 +187,7 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
           <div
             class="file-loading-progress-shell"
             role="progressbar"
+            aria-label="Audio conversion progress"
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={progress() === null ? undefined : Math.round((progress() as number) * 100)}

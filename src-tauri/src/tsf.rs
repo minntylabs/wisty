@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use serde::Serialize;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::codecs::CodecParameters;
@@ -260,8 +263,15 @@ impl PreparedAudio {
 impl Drop for PreparedAudio {
     fn drop(&mut self) {
         if self.temporary {
-            let _ = std::fs::remove_file(&self.path);
+            remove_conversion_output(&self.path);
         }
+    }
+}
+
+fn remove_conversion_output(output: &Path) {
+    let _ = std::fs::remove_file(output);
+    if let Some(parent) = output.parent() {
+        let _ = std::fs::remove_dir(parent);
     }
 }
 
@@ -629,11 +639,29 @@ fn convert_to_playable_audio(
     source: &Path,
     state: Option<&ConversionState>,
 ) -> Result<PathBuf, String> {
-    let output = std::env::temp_dir().join(format!(
-        "{CONVERSION_PREFIX}{}-{}.m4a",
-        std::process::id(),
-        SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temp_root = std::env::temp_dir();
+    let mut conversion_dir = None;
+    for _ in 0..TEMPORARY_CREATE_ATTEMPTS {
+        let candidate = temp_root.join(format!(
+            "{CONVERSION_PREFIX}{}-{}",
+            std::process::id(),
+            SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => {
+                #[cfg(unix)]
+                std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|error| format!("Cannot secure conversion directory: {error}"))?;
+                conversion_dir = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Cannot create conversion directory: {error}")),
+        }
+    }
+    let conversion_dir =
+        conversion_dir.ok_or_else(|| "Cannot create a unique conversion directory".to_string())?;
+    let output = conversion_dir.join("audio.m4a");
 
     let spawned = std::process::Command::new("ffmpeg")
         .arg("-nostdin")
@@ -688,7 +716,7 @@ fn convert_to_playable_audio(
                 // left converting into a file no one will collect.
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = std::fs::remove_file(&output);
+                remove_conversion_output(&output);
                 return Err(error);
             }
             // A cancellation between the spawn and the hand-over found nothing
@@ -735,7 +763,7 @@ fn convert_to_playable_audio(
             let cancelled = state.was_cancelled();
             state.finish();
             if cancelled {
-                let _ = std::fs::remove_file(&output);
+                remove_conversion_output(&output);
                 return Err(CONVERSION_CANCELLED.to_string());
             }
             status
@@ -746,17 +774,17 @@ fn convert_to_playable_audio(
     let status = match status {
         Some(Ok(status)) => status,
         Some(Err(error)) => {
-            let _ = std::fs::remove_file(&output);
+            remove_conversion_output(&output);
             return Err(format!("ffmpeg did not finish: {error}"));
         }
         None => {
-            let _ = std::fs::remove_file(&output);
+            remove_conversion_output(&output);
             return Err("The conversion was lost before it finished.".to_string());
         }
     };
 
     if !status.success() {
-        let _ = std::fs::remove_file(&output);
+        remove_conversion_output(&output);
         return Err(format!(
             "ffmpeg could not convert the recording: {}",
             failure_reason(&said)
@@ -913,13 +941,14 @@ fn write_archive(
             .map_err(|error| format!("Cannot write {WORDS_MEMBER}: {error}"))?;
     }
 
-    let mut writer = zip
+    let writer = zip
         .finish()
         .map_err(|error| format!("Cannot finalise the container: {error}"))?;
     writer
-        .flush()
-        .map_err(|error| format!("Cannot flush the container: {error}"))?;
-    Ok(())
+        .into_inner()
+        .map_err(|error| format!("Cannot flush the container: {error}"))?
+        .sync_all()
+        .map_err(|error| format!("Cannot sync the container: {error}"))
 }
 
 /// The highest container version this build understands.
@@ -1483,7 +1512,12 @@ pub fn sweep_stale_temporaries(parent: &Path, owner_of: fn(&str) -> Option<u32>)
         if owner_lives && !stale {
             continue;
         }
-        let _ = std::fs::remove_file(entry.path());
+        let path = entry.path();
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(path);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -1495,8 +1529,24 @@ fn create_temporary_file(parent: &Path, output: &Path) -> Result<(PathBuf, File)
     sweep_partial_files(parent);
     for _ in 0..TEMPORARY_CREATE_ATTEMPTS {
         let path = temporary_save_path(parent, output);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        let existing_mode = std::fs::metadata(output)
+            .ok()
+            .map(|metadata| metadata.permissions());
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&path) {
             Ok(file) => {
+                if let Some(permissions) = existing_mode {
+                    if let Err(error) = std::fs::set_permissions(&path, permissions) {
+                        let _ = std::fs::remove_file(&path);
+                        return Err(format!(
+                            "Cannot copy permissions to {}: {error}",
+                            path.display()
+                        ));
+                    }
+                }
                 remember_partial(&path);
                 return Ok((path, file));
             }

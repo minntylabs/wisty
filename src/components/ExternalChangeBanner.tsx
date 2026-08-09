@@ -39,7 +39,7 @@ const isUnusablePath = (kind: ExternalChangeBannerKind | undefined) => kind === 
 
 export const ExternalChangeBanner = (props: ExternalChangeBannerProps) => (
   <Show when={props.visible}>
-    <section class="external-change-banner" role="status">
+    <section class="external-change-banner" role="region" aria-label="External file change">
       <div>
         <strong>{HEADINGS[props.kind ?? "changed"]}</strong>
         <span>{props.filePath}</span>

@@ -50,10 +50,7 @@ const ScrollArea = (props: { children: JSX.Element }) => {
 
 const commandLabel = (definition: CommandDefinition) => {
   const label = definition.getLabel ? definition.getLabel() : definition.label;
-  if (!definition.checked) {
-    return label;
-  }
-  return `${label}${definition.checked() ? " ✓" : ""}`;
+  return label;
 };
 
 export const MenuBar = () => {
@@ -62,27 +59,27 @@ export const MenuBar = () => {
   let closeReason: "none" | "escape" | "trigger-toggle" = "none";
 
   const renderItem = (item: MenuItem): JSX.Element => {
-    if (item.visible && !item.visible()) {
-      return null;
-    }
+    const visible = () => !item.visible || item.visible();
     if (item.type === "separator") {
-      return <MenubarSeparator class="menu-separator" />;
+      return <Show when={visible()}><MenubarSeparator class="menu-separator" /></Show>;
     }
     if (item.type === "submenu") {
       return (
-        <MenubarSub>
-          <MenubarSubTrigger class="menu-item menu-submenu-trigger">
-            <span class="menu-item-label">{item.getLabel ? item.getLabel() : item.label}</span>
-            <span class="menu-item-shortcut menu-submenu-arrow">›</span>
-          </MenubarSubTrigger>
-          <MenubarPortal>
-            <MenubarSubContent class="menu-popover">
-              <ScrollArea>
-                <For each={item.items()}>{(child) => renderItem(child)}</For>
-              </ScrollArea>
-            </MenubarSubContent>
-          </MenubarPortal>
-        </MenubarSub>
+        <Show when={visible()}>
+          <MenubarSub>
+            <MenubarSubTrigger class="menu-item menu-submenu-trigger">
+              <span class="menu-item-label">{item.getLabel ? item.getLabel() : item.label}</span>
+              <span class="menu-item-shortcut menu-submenu-arrow">›</span>
+            </MenubarSubTrigger>
+            <MenubarPortal>
+              <MenubarSubContent class="menu-popover">
+                <ScrollArea>
+                  <For each={item.items()}>{(child) => renderItem(child)}</For>
+                </ScrollArea>
+              </MenubarSubContent>
+            </MenubarPortal>
+          </MenubarSub>
+        </Show>
       );
     }
 
@@ -90,21 +87,23 @@ export const MenuBar = () => {
     if (!command) {
       return null;
     }
-    const enabled = menuItemEnabled(command, commands.interactionBlocked());
-
     return (
-      <MenubarItem
-        class="menu-item"
-        disabled={!enabled}
-        onSelect={() => {
-          menu.onMenuCommandSelected(command.id);
-        }}
-      >
-        <span class="menu-item-label">{commandLabel(command)}</span>
-        <Show when={command.shortcut}>
-          <span class="menu-item-shortcut">{command.shortcut}</span>
-        </Show>
-      </MenubarItem>
+      <Show when={visible()}>
+        <MenubarItem
+          class="menu-item"
+          role={command.checked ? "menuitemcheckbox" : undefined}
+          aria-checked={command.checked ? command.checked() : undefined}
+          disabled={!menuItemEnabled(command, commands.interactionBlocked())}
+          onSelect={() => {
+            menu.onMenuCommandSelected(command.id);
+          }}
+        >
+          <span class="menu-item-label">{commandLabel(command)}</span>
+          <Show when={command.shortcut}>
+            <span class="menu-item-shortcut">{command.shortcut}</span>
+          </Show>
+        </MenubarItem>
+      </Show>
     );
   };
 

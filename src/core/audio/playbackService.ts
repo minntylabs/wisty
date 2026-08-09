@@ -55,9 +55,9 @@ export const paddedSpan = (start: number, end: number): { start: number; end: nu
 export type PlaybackService = {
   /** Plays a marker's span, padded. Any span already playing is replaced. */
   playMarker: (start: number, end: number) => void;
-  stop: () => void;
+  stop: () => Promise<void>;
   /** Drops the device and the recording. For document close and app quit. */
-  release: () => void;
+  release: () => Promise<void>;
 };
 
 /**
@@ -98,13 +98,15 @@ export const createPlaybackService = (
       const span = paddedSpan(start, end);
       run(() => port.playSpan(span.start, span.end));
     },
-    stop: () => run(() => port.stopPlayback()),
-    release: () => {
+    stop: async () => {
+      await port.stopPlayback().catch(onError);
+    },
+    release: async () => {
       // Deliberately not routed to onError. This runs while a document is
       // closing, which the user did not ask for audio during: a missing output
       // device must not raise a dialog blaming playback for a close. Nothing
       // downstream can act on it either, since the document is going anyway.
-      void port.releasePlayback().catch(() => {});
+      await port.releasePlayback().catch(() => {});
     }
   };
 };

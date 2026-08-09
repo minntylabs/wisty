@@ -52,7 +52,7 @@ type UseFileLifecycleDeps = {
    * has to silence the other. Only the release is needed here — starting and
    * stopping a span is the editor's business, not the file lifecycle's.
    */
-  playback: { release: () => void };
+  playback: { stop: () => Promise<void>; release: () => Promise<void> };
   confirmOpenLargeFile: (filePath: string, sizeBytes: number) => Promise<boolean>;
   showFileTooLarge: (filePath: string, sizeBytes: number) => Promise<void>;
   /**
@@ -607,7 +607,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       // raising a dialog about playback during a close nobody asked audio for —
       // so being inside this try buys nothing and is not what protects the
       // open. Left here only because it must run before closeContainer.
-      deps.playback.release();
+      await deps.playback.release();
       await deps.fileIo.closeContainer();
     } catch {
       // Nothing the user can act on, and nothing that should block the open.
@@ -627,6 +627,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // container. Do that before changing the frontend, so a bad replacement
     // leaves the open transcript usable instead of showing it without audio or
     // marker support.
+    await deps.playback.stop();
     setIsOpeningContainer(true);
     let container: Awaited<ReturnType<typeof deps.fileIo.openContainer>>;
     try {
@@ -750,10 +751,15 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
           await openContainerAtPath(filePath);
           return;
         }
+        const size = await checkFileSizeLimits(filePath);
+        if (size.kind === "refused") {
+          deps.editor.focus();
+          return;
+        }
         await releaseContainer();
         await loadTextDocumentWithBaseline(
           filePath,
-          () => loadEditorFileAsCleanFromFsStream(filePath)
+          () => loadEditorFileAsCleanFromFsStream(filePath, size.fileSize)
         );
         await rememberLastDirectory(filePath);
         await rememberRecentFile(filePath);
@@ -774,10 +780,15 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         await openContainerAtPath(filePath);
         return;
       }
+      const size = await checkFileSizeLimits(filePath);
+      if (size.kind === "refused") {
+        deps.editor.focus();
+        return;
+      }
       await releaseContainer();
       await loadTextDocumentWithBaseline(
         filePath,
-        () => loadEditorFileAsCleanFromLaunchStream(filePath, fileSizeBytes)
+        () => loadEditorFileAsCleanFromLaunchStream(filePath, fileSizeBytes ?? size.fileSize)
       );
       await rememberLastDirectory(filePath);
       await rememberRecentFile(filePath);

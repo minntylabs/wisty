@@ -139,15 +139,16 @@ fn personal_dictionary_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join(PERSONAL_DICTIONARY_FILE))
 }
 
-fn read_personal_words(path: &Path) -> Vec<String> {
+fn read_personal_words(path: &Path) -> Result<Vec<String>, String> {
     match fs::read_to_string(path) {
-        Ok(contents) => contents
+        Ok(contents) => Ok(contents
             .lines()
             .map(|line| line.trim())
             .filter(|line| !line.is_empty())
             .map(|line| line.to_string())
-            .collect(),
-        Err(_) => Vec::new(),
+            .collect()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!("Unable to read personal dictionary: {error}")),
     }
 }
 
@@ -163,7 +164,7 @@ fn ensure_personal_loaded(
 
     if personal.path.is_none() {
         let path = personal_dictionary_path(app)?;
-        personal.words = read_personal_words(&path);
+        personal.words = read_personal_words(&path)?;
         personal.path = Some(path);
     }
 
@@ -375,8 +376,13 @@ pub fn spell_remove_word(
         .lock()
         .map_err(|error| format!("Spell state poisoned: {error}"))?;
 
+    let previous = personal.words.clone();
     personal.words.retain(|existing| existing != &word);
-    save_personal_words(&personal)
+    if let Err(error) = save_personal_words(&personal) {
+        personal.words = previous;
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Adds a word to the active dictionary for this session only (not persisted).

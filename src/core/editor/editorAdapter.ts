@@ -1,4 +1,4 @@
-import { Compartment, EditorSelection, EditorState, Text, Transaction } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState, Text, Transaction, type TransactionSpec } from "@codemirror/state";
 import { defaultKeymap, history, indentWithTab, isolateHistory, redo, undo } from "@codemirror/commands";
 import { search, searchKeymap } from "@codemirror/search";
 import { drawSelection, dropCursor, EditorView, highlightActiveLine, keymap } from "@codemirror/view";
@@ -167,6 +167,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   const spellCompartment = new Compartment();
   const transcriptCompartment = new Compartment();
   const markerCompartment = new Compartment();
+  const lineBreakCompartment = new Compartment();
 
   const formatting = createFormatting(() => options.getSettings().formatViewMode);
 
@@ -323,6 +324,8 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     return EditorState.create({
       doc,
       extensions: [
+        lineBreakCompartment.of(EditorState.lineSeparator.of(doc.includes("\r\n") ? "\r\n" : "\n")),
+        EditorState.allowMultipleSelections.of(true),
         search(),
         history({
           newGroupDelay: 150,
@@ -411,7 +414,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
 
   const dispatchTextChange = (
     changes: { from: number; to: number; insert: string },
-    editOptions: { emitChange?: boolean; addToHistory?: boolean }
+    editOptions: { emitChange?: boolean; addToHistory?: boolean; effects?: TransactionSpec["effects"] }
   ) => {
     if (!editorView) {
       return;
@@ -426,6 +429,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     try {
       editorView.dispatch({
         changes,
+        effects: editOptions.effects,
         annotations: [Transaction.addToHistory.of(addToHistory)]
       });
     } finally {
@@ -566,7 +570,10 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
       insert: text
     }, {
       emitChange: setTextOptions.emitChange,
-      addToHistory: true
+      addToHistory: true,
+      effects: lineBreakCompartment.reconfigure(
+        EditorState.lineSeparator.of(text.includes("\r\n") ? "\r\n" : "\n")
+      )
     });
   };
 
@@ -793,7 +800,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     if (ranges.length === 0) {
       return "";
     }
-    return ranges.map((range) => view.state.sliceDoc(range.from, range.to)).join("\n");
+    return ranges.map((range) => view.state.sliceDoc(range.from, range.to)).join(view.state.lineBreak);
   };
 
   const copySelection = async () => {
@@ -815,11 +822,11 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     if (ranges.length === 0) {
       return false;
     }
-    const text = ranges.map((range) => state.sliceDoc(range.from, range.to)).join("\n");
+    const text = ranges.map((range) => state.sliceDoc(range.from, range.to)).join(state.lineBreak);
     await writeText(text);
     // Clipboard access yields to the event loop. Do not turn a cursor move or
     // edit during that wait into deletion of a different selection.
-    if (view.state !== state) {
+    if (editorView !== view || view.state !== state) {
       return true;
     }
     view.dispatch({
@@ -838,12 +845,13 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     if (!view) {
       return false;
     }
+    const state = view.state;
     const text = await readText();
-    if (!text) {
+    if (!text || editorView !== view || view.state !== state) {
       return false;
     }
     view.dispatch({
-      ...view.state.replaceSelection(text),
+      ...state.replaceSelection(text),
       userEvent: "input.paste",
       annotations: [
         Transaction.addToHistory.of(true),

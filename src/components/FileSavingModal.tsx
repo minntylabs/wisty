@@ -39,14 +39,7 @@ export const FileSavingModal = (props: FileSavingModalProps) => {
   };
 
   return (
-    <DialogRoot
-      open={props.open}
-      onOpenChange={(open) => {
-        if (!open) {
-          return;
-        }
-      }}
-    >
+    <DialogRoot open={props.open}>
       <DialogPortal>
         <DialogOverlay class="modal-backdrop file-loading-backdrop" />
         <DialogContent class="modal-panel file-loading-panel" aria-label="Saving file">
@@ -58,7 +51,7 @@ export const FileSavingModal = (props: FileSavingModalProps) => {
           </DialogDescription>
           <p class="file-loading-path" title={props.filePath}>{props.filePath}</p>
 
-          <div class="file-loading-progress-shell" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={hasDeterminateProgress() ? Math.round(progressPercent()) : undefined}>
+          <div class="file-loading-progress-shell" role="progressbar" aria-label="File saving progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={hasDeterminateProgress() ? Math.round(progressPercent()) : undefined}>
             <div
               class={`file-loading-progress-fill ${hasDeterminateProgress() ? "" : "indeterminate"}`.trim()}
               style={hasDeterminateProgress() ? { width: `${progressPercent()}%` } : undefined}

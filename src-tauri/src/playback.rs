@@ -18,7 +18,7 @@
 //! failure would be inaudible until it was wrong by a word.
 
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rodio::buffer::SamplesBuffer;
@@ -29,10 +29,12 @@ use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::units::Time;
+use symphonia::core::units::{Time, TimeBase};
+
+const MAX_SPAN_SECS: f64 = 5.0 * 60.0;
 
 /// The recording, shared with the open container rather than copied from it.
 ///
@@ -90,9 +92,16 @@ fn span_frames(seek_secs: f64, start_secs: f64, end_secs: f64, rate: u32) -> (us
 }
 
 /// Decodes [start, end) seconds of `audio`.
-fn decode_span(audio: SharedAudio, start: f64, end: f64) -> Result<DecodedSpan, String> {
+struct DecoderContext {
+    reader: Box<dyn FormatReader>,
+    decoder: Box<dyn AudioDecoder>,
+    track_id: u32,
+    time_base: TimeBase,
+}
+
+fn open_decoder(audio: SharedAudio) -> Result<DecoderContext, String> {
     let stream = MediaSourceStream::new(Box::new(Cursor::new(audio)), Default::default());
-    let mut reader = symphonia::default::get_probe()
+    let reader = symphonia::default::get_probe()
         .probe(
             &Hint::new(),
             stream,
@@ -118,25 +127,41 @@ fn decode_span(audio: SharedAudio, start: f64, end: f64) -> Result<DecodedSpan, 
     let Some(CodecParameters::Audio(params)) = track.codec_params.as_ref() else {
         return Err("The audio track has no codec parameters".to_string());
     };
-    let mut decoder: Box<dyn AudioDecoder> = symphonia::default::get_codecs()
-        .make_audio_decoder(params, &AudioDecoderOptions::default())
+    let decoder: Box<dyn AudioDecoder> = symphonia::default::get_codecs()
+        .make_audio_decoder(&params, &AudioDecoderOptions::default())
         .map_err(|error| format!("Cannot decode this recording: {error}"))?;
 
-    let seeked = reader
+    Ok(DecoderContext {
+        reader,
+        decoder,
+        track_id,
+        time_base,
+    })
+}
+
+/// Decodes [start, end) seconds using a decoder retained for this recording.
+fn decode_context_span(
+    context: &mut DecoderContext,
+    start: f64,
+    end: f64,
+) -> Result<DecodedSpan, String> {
+    let seeked = context
+        .reader
         .seek(
             SeekMode::Accurate,
             SeekTo::Time {
                 time: Time::try_from_secs_f64(start)
                     .ok_or_else(|| format!("{start} is not a usable time"))?,
-                track_id: Some(track_id),
+                track_id: Some(context.track_id),
             },
         )
         .map_err(|error| format!("Cannot seek to {start:.2}s: {error}"))?;
     // Required after any seek: the next packet is discontinuous with the last
     // one the decoder saw, and without this the first frames are rubbish.
-    decoder.reset();
+    context.decoder.reset();
 
-    let seek_secs = time_base
+    let seek_secs = context
+        .time_base
         .calc_time(seeked.actual_ts)
         .ok_or_else(|| "The seek landed outside the recording".to_string())?
         .as_secs_f64();
@@ -147,7 +172,7 @@ fn decode_span(audio: SharedAudio, start: f64, end: f64) -> Result<DecodedSpan, 
     let mut wanted: Option<(usize, usize)> = None;
 
     loop {
-        let packet = match reader.next_packet() {
+        let packet = match context.reader.next_packet() {
             Ok(Some(packet)) => packet,
             // End of file: the span runs to the end of the recording, which is
             // ordinary for the last sentence plus its tail pad.
@@ -159,11 +184,11 @@ fn decode_span(audio: SharedAudio, start: f64, end: f64) -> Result<DecodedSpan, 
             }
             Err(error) => return Err(format!("Cannot read the recording: {error}")),
         };
-        if packet.track_id != track_id {
+        if packet.track_id != context.track_id {
             continue;
         }
 
-        let decoded = match decoder.decode(&packet) {
+        let decoded = match context.decoder.decode(&packet) {
             Ok(decoded) => decoded,
             // One bad packet is recoverable by contract and is not worth
             // refusing to play a sentence over.
@@ -183,27 +208,42 @@ fn decode_span(audio: SharedAudio, start: f64, end: f64) -> Result<DecodedSpan, 
                 return Err("The recording decoded to no audio".to_string());
             }
             wanted = Some(span_frames(seek_secs, start, end, rate));
+        } else {
+            let spec = decoded.spec();
+            if spec.rate() != rate || spec.channels().count() as u16 != channels {
+                return Err("The recording changes audio format during playback".to_string());
+            }
         }
         append_interleaved(&decoded, &mut samples);
 
         let (skip, take) = wanted.unwrap_or((0, 0));
-        if samples.len() >= (skip + take) * usize::from(channels) {
+        if samples.len()
+            >= skip
+                .saturating_add(take)
+                .saturating_mul(usize::from(channels))
+        {
             break;
         }
     }
 
     let (skip, take) = wanted.ok_or_else(|| "The recording decoded to nothing".to_string())?;
     let stride = usize::from(channels);
-    let from = (skip * stride).min(samples.len());
-    let to = (from + take * stride).min(samples.len());
+    let from = skip.saturating_mul(stride).min(samples.len());
+    samples.drain(..from);
+    samples.truncate(take.saturating_mul(stride));
 
     Ok(DecodedSpan {
-        samples: samples[from..to].to_vec(),
+        samples,
         rate: SampleRate::new(rate)
             .ok_or_else(|| "The recording decoded at no sample rate".to_string())?,
         channels: ChannelCount::new(channels)
             .ok_or_else(|| "The recording decoded to no channels".to_string())?,
     })
+}
+
+#[cfg(test)]
+fn decode_span(audio: SharedAudio, start: f64, end: f64) -> Result<DecodedSpan, String> {
+    decode_context_span(&mut open_decoder(audio)?, start, end)
 }
 
 fn append_interleaved(decoded: &GenericAudioBufferRef<'_>, samples: &mut Vec<f32>) {
@@ -222,14 +262,14 @@ struct Playing {
     /// silences the player, so it has to outlive the player it feeds.
     _device: MixerDeviceSink,
     player: Player,
-    audio: SharedAudio,
+    decoder: Mutex<DecoderContext>,
 }
 
 /// Private fields on purpose: unlike TsfState, whose audio this module reads,
 /// nothing outside here has any business holding the device or the player.
 #[derive(Default)]
 pub struct PlaybackState {
-    playing: Mutex<Option<Playing>>,
+    playing: Mutex<Option<Arc<Playing>>>,
     /// Whether plays are currently wanted at all.
     ///
     /// `play_span` is async, so Tauri runs it on a worker and it does NOT
@@ -250,6 +290,8 @@ pub struct PlaybackState {
     /// discarded for the life of the process. Anything the frontend can forget
     /// across a reload cannot be the thing guarding this.
     armed: AtomicBool,
+    /// Invalidates a decode that began before Stop, Close, or Open.
+    generation: AtomicU64,
 }
 
 impl PlaybackState {
@@ -271,12 +313,14 @@ impl PlaybackState {
             playing.player.stop();
         }
         self.armed.store(true, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
     /// Refuse plays. Called when a container is closed.
     pub fn disarm(&self) {
         self.armed.store(false, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Whether a play arriving now belongs to the open document.
@@ -286,7 +330,7 @@ impl PlaybackState {
 
     fn with_player<T>(
         &self,
-        run: impl FnOnce(&mut Option<Playing>) -> Result<T, String>,
+        run: impl FnOnce(&mut Option<Arc<Playing>>) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut guard = self
             .playing
@@ -318,18 +362,19 @@ pub fn play_span(
     if !start.is_finite() || !end.is_finite() {
         return Err(format!("A span needs finite times, got {start} and {end}"));
     }
-    if end <= start {
+    if start < 0.0 || end <= start || end - start > MAX_SPAN_SECS {
         return Err(format!(
-            "A span must end after it starts, got {start} to {end}"
+            "A span must be between zero and {MAX_SPAN_SECS:.0} seconds, got {start} to {end}"
         ));
     }
 
-    playback.with_player(|slot| {
+    let generation = playback.generation.load(Ordering::SeqCst);
+    let playing = playback.with_player(|slot| {
         // Checked under the lock rather than on the way in: release_playback
         // takes the same lock, so testing it earlier would only narrow the
         // window rather than close it.
         if !playback.armed() {
-            return Ok(());
+            return Ok(None);
         }
         if slot.is_none() {
             let audio = {
@@ -342,27 +387,45 @@ pub fn play_span(
                 // something the user can act on, so it makes no sound and no
                 // dialog.
                 let Some(open) = open.as_ref() else {
-                    return Ok(());
+                    return Ok(None);
                 };
                 SharedAudio(Arc::clone(&open.audio))
             };
             let device = rodio::stream::DeviceSinkBuilder::open_default_sink()
                 .map_err(|error| format!("Cannot open an audio output device: {error}"))?;
             let player = Player::connect_new(device.mixer());
-            *slot = Some(Playing {
+            let decoder = open_decoder(audio)?;
+            *slot = Some(Arc::new(Playing {
                 _device: device,
                 player,
-                audio,
-            });
+                decoder: Mutex::new(decoder),
+            }));
         }
+        Ok(Some(Arc::clone(slot.as_ref().expect("just constructed"))))
+    })?;
+    let Some(playing) = playing else {
+        return Ok(());
+    };
 
-        let player = slot.as_mut().expect("just constructed");
-        let span = decode_span(player.audio.clone(), start, end)?;
-        // release_playback can disarm while decoding without waiting for this
-        // lock. Do not queue a span for a document that was closed meanwhile.
-        if !playback.armed() {
+    let span = {
+        let mut decoder = playing
+            .decoder
+            .lock()
+            .map_err(|error| format!("Cannot take the decoder lock: {error}"))?;
+        decode_context_span(&mut decoder, start, end)?
+    };
+
+    playback.with_player(|slot| {
+        // Stop, Close, and Open invalidate a span before waiting on either lock.
+        if !playback.armed()
+            || playback.generation.load(Ordering::SeqCst) != generation
+            || !slot
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &playing))
+        {
             return Ok(());
         }
+        let player = slot.as_ref().expect("checked above");
         // Replaces whatever was playing. stop() returns effectively at once —
         // the queue clears within about a frame — so this is not audible as a
         // gap when clicking from one sentence to the next.
@@ -378,6 +441,7 @@ pub fn play_span(
 /// Stops whatever is playing. Harmless when nothing is.
 #[tauri::command]
 pub fn stop_playback(playback: tauri::State<'_, PlaybackState>) -> Result<(), String> {
+    playback.generation.fetch_add(1, Ordering::SeqCst);
     playback.with_player(|slot| {
         if let Some(playing) = slot.as_ref() {
             playing.player.stop();

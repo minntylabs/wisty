@@ -376,7 +376,7 @@ function App() {
       probeAudio: probeAudioFile,
       createContainer
     },
-    playback: { release: playback.release },
+    playback: { stop: playback.stop, release: playback.release },
     launchFileStream: {
       startLaunchFileStream,
       readLaunchFileChunk,

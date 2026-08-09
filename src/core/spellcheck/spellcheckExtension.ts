@@ -65,6 +65,7 @@ const createScanPlugin = (spellService: SpellService) =>
     class {
       private timer: number | undefined;
       private generation = 0;
+      private destroyed = false;
 
       constructor(private readonly view: EditorView) {
         this.schedule();
@@ -87,16 +88,23 @@ const createScanPlugin = (spellService: SpellService) =>
       private async scan() {
         const generation = ++this.generation;
         const occurrences = collectViewportWords(this.view);
-        const misspelled = await spellService.findMisspelled(occurrences.map((entry) => entry.word));
+        let misspelled: Set<string>;
+        try {
+          misspelled = await spellService.findMisspelled(occurrences.map((entry) => entry.word));
+        } catch {
+          return;
+        }
 
         // Discard if a newer scan superseded this one (e.g. the doc changed).
-        if (generation !== this.generation) {
+        if (this.destroyed || generation !== this.generation) {
           return;
         }
         this.view.dispatch({ effects: setMisspelledEffect.of(buildDecorations(occurrences, misspelled)) });
       }
 
       destroy() {
+        this.destroyed = true;
+        this.generation += 1;
         window.clearTimeout(this.timer);
       }
     }
@@ -186,7 +194,16 @@ const createContextMenuHandler = (
     document.addEventListener("keydown", onKeydown, true);
     window.addEventListener("blur", closeMenu);
 
-    const suggestions = await spellService.suggest(target.word);
+    let suggestions: string[];
+    try {
+      suggestions = await spellService.suggest(target.word);
+    } catch (error) {
+      if (activeMenu === menu) {
+        closeMenu();
+      }
+      onError?.(error);
+      return;
+    }
     if (activeMenu !== menu) {
       return;
     }

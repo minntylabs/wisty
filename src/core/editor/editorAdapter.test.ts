@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { EditorView } from "@codemirror/view";
+import { EditorSelection } from "@codemirror/state";
 import { createEditorAdapter } from "./editorAdapter";
 import { transcriptHoverSelection } from "./transcript/transcriptExtension";
 
@@ -112,6 +113,39 @@ describe("editor adapter", () => {
     adapter.destroy();
     expect(host.querySelector(".cm-editor")).toBeNull();
     expect(adapter.getText()).toBe("");
+  });
+});
+
+describe("clipboard selections", () => {
+  it("keeps CRLF between copied ranges", async () => {
+    const { adapter, host } = createAdapter();
+    adapter.setText("one\r\ntwo");
+    const view = viewOf(host);
+    const secondLine = view.state.doc.line(2);
+    view.dispatch({
+      selection: EditorSelection.create([
+        EditorSelection.range(0, 3),
+        EditorSelection.range(secondLine.from, secondLine.to)
+      ])
+    });
+
+    await expect(adapter.copySelection()).resolves.toBe(true);
+    expect(writeText).toHaveBeenCalledWith("one\r\ntwo");
+  });
+
+  it("does not paste into a document replaced while reading the clipboard", async () => {
+    const { adapter } = createAdapter();
+    let resolveClipboard: (text: string) => void;
+    readText.mockImplementation(
+      () => new Promise<string>((resolve) => { resolveClipboard = resolve; })
+    );
+
+    const paste = adapter.pasteSelection();
+    adapter.setText("replacement");
+    resolveClipboard!("stale");
+
+    await expect(paste).resolves.toBe(false);
+    expect(adapter.getText()).toBe("replacement");
   });
 });
 

@@ -1,6 +1,7 @@
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::fs::{File, Metadata};
 use std::io::BufWriter;
@@ -249,7 +250,14 @@ fn normalize_cli_path(raw: &str) -> Result<PathBuf, String> {
         if uri_path.is_empty() {
             return Err("Invalid file:// path argument".to_string());
         }
-        PathBuf::from(percent_decode(uri_path)?)
+        let uri_path = if let Some(path) = uri_path.strip_prefix("localhost/") {
+            format!("/{path}")
+        } else if uri_path.starts_with('/') {
+            uri_path.to_string()
+        } else {
+            return Err("file:// path argument has a non-local authority".to_string());
+        };
+        PathBuf::from(percent_decode(&uri_path)?)
     } else {
         PathBuf::from(raw)
     };
@@ -1060,23 +1068,88 @@ fn finish_save_stream(
 
     drop(stream.writer);
 
-    if let Some(expected) = &stream.expected_source {
-        if let Err(error) = ensure_expected_source(&stream.target_path, expected) {
-            let _ = std::fs::remove_file(&stream.temp_path);
-            return Err(error);
-        }
-    }
-
-    if let Err(error) = std::fs::rename(&stream.temp_path, &stream.target_path) {
+    if let Err(error) = replace_expected_source(
+        &stream.temp_path,
+        &stream.target_path,
+        stream.expected_source.as_ref(),
+    ) {
         let _ = std::fs::remove_file(&stream.temp_path);
-        return Err(SaveStreamError::failed(format!(
-            "Unable to finalize save for '{}': {error}",
-            stream.target_path.to_string_lossy()
-        )));
+        return Err(error);
     }
 
     Ok(SaveFileStreamFinishResult {
         bytes_written_total: stream.bytes_written_total,
+    })
+}
+
+fn replace_expected_source(
+    temporary: &Path,
+    target: &Path,
+    expected: Option<&ExpectedSource>,
+) -> Result<(), SaveStreamError> {
+    let Some(expected) = expected else {
+        return std::fs::rename(temporary, target).map_err(|error| {
+            SaveStreamError::failed(format!(
+                "Unable to finalize save for '{}': {error}",
+                target.to_string_lossy()
+            ))
+        });
+    };
+    if matches!(expected, ExpectedSource::Absent) {
+        return match std::fs::hard_link(temporary, target)
+            .and_then(|()| std::fs::remove_file(temporary))
+        {
+            Ok(()) => Ok(()),
+            Err(error) => match ensure_expected_source(target, expected) {
+                Err(external_change) => Err(external_change),
+                Ok(()) => Err(SaveStreamError::failed(format!(
+                    "Unable to finalize save for '{}': {error}",
+                    target.to_string_lossy()
+                ))),
+            },
+        };
+    }
+
+    let temporary_c = CString::new(temporary.as_os_str().as_encoded_bytes()).map_err(|_| {
+        SaveStreamError::failed("Temporary save path contains a NUL byte".to_string())
+    })?;
+    let target_c = CString::new(target.as_os_str().as_encoded_bytes())
+        .map_err(|_| SaveStreamError::failed("Save path contains a NUL byte".to_string()))?;
+    // Exchange makes the old target available for validation without ever
+    // exposing a window in which an external writer can be overwritten.
+    let exchanged = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            temporary_c.as_ptr(),
+            libc::AT_FDCWD,
+            target_c.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if exchanged != 0 {
+        if let Err(external_change) = ensure_expected_source(target, expected) {
+            return Err(external_change);
+        }
+        return Err(SaveStreamError::failed(format!(
+            "Unable to finalize save for '{}': {}",
+            target.to_string_lossy(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    if let Err(error) = ensure_expected_source(temporary, expected) {
+        let _ = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                temporary_c.as_ptr(),
+                libc::AT_FDCWD,
+                target_c.as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        };
+        return Err(error);
+    }
+    std::fs::remove_file(temporary).map_err(|error| {
+        SaveStreamError::failed(format!("Unable to remove replaced save file: {error}"))
     })
 }
 

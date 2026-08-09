@@ -6099,6 +6099,7 @@ version = "2.5.0"
 dependencies = [
  "gtk",
  "hunspell-rs",
+ "libc",
  "log",
  "rodio",
  "serde",

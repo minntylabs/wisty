@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createShortcutRouter } from "./shortcutRouter";
+import { createShortcutRouter, duplicateShortcuts } from "./shortcutRouter";
 import type { CommandDefinition } from "./commandRegistry";
 
 const createDefinitions = (): CommandDefinition[] => [
@@ -132,5 +132,30 @@ describe("shortcutRouter text-input handling", () => {
 
     expect(execute).not.toHaveBeenCalled();
     expect(event.defaultPrevented).toBe(false);
+  });
+});
+
+describe("shortcut collisions", () => {
+  /**
+   * Only the first binding for a chord can ever fire, and the duplicate was
+   * skipped in silence — so a menu item printed a shortcut beside itself that
+   * did nothing, and the only way to find out was to press the key.
+   */
+  it("names the commands that claim the same chord", () => {
+    const clashing = [
+      { id: "file.save", label: "Save", shortcut: "Mod+S", run: () => {} },
+      { id: "file.saveAs", label: "Save As", shortcut: "Mod+S", run: () => {} }
+    ];
+    expect(duplicateShortcuts(clashing)).toEqual([
+      "Mod+S is claimed by file.save and file.saveAs"
+    ]);
+  });
+
+  it("does not mind two commands whose chords differ by a modifier", () => {
+    const fine = [
+      { id: "file.save", label: "Save", shortcut: "Mod+S", run: () => {} },
+      { id: "file.saveAs", label: "Save As", shortcut: "Mod+Shift+S", run: () => {} }
+    ];
+    expect(duplicateShortcuts(fine)).toEqual([]);
   });
 });

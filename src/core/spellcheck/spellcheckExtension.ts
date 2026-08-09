@@ -115,7 +115,10 @@ const misspelledWordAt = (view: EditorView, pos: number): WordOccurrence | null 
   return found;
 };
 
-const createContextMenuHandler = (spellService: SpellService) => {
+const createContextMenuHandler = (
+  spellService: SpellService,
+  onError?: (error: unknown) => void
+) => {
   let activeMenu: HTMLElement | undefined;
 
   const closeMenu = () => {
@@ -207,11 +210,20 @@ const createContextMenuHandler = (spellService: SpellService) => {
     }
 
     addSeparator();
+    // Failures are reported rather than dropped: adding a word writes a file,
+    // and a read-only config directory used to leave the menu closing, the word
+    // still underlined and nothing said anywhere.
     addItem("Add to Dictionary", () => {
-      void spellService.addWord(target.word).then(() => rescan(view));
+      void spellService
+        .addWord(target.word)
+        .then(() => rescan(view))
+        .catch((error: unknown) => onError?.(error));
     });
     addItem("Ignore All", () => {
-      void spellService.ignoreWord(target.word).then(() => rescan(view));
+      void spellService
+        .ignoreWord(target.word)
+        .then(() => rescan(view))
+        .catch((error: unknown) => onError?.(error));
     });
 
     // Keep the menu within the viewport.
@@ -257,10 +269,18 @@ const spellTheme = EditorView.baseTheme({
   }
 });
 
-/** Builds the spell-check extension bundle backed by the given service. */
-export const createSpellcheckExtension = (spellService: SpellService): Extension => [
+/**
+ * Builds the spell-check extension bundle backed by the given service.
+ *
+ * `onError` receives failures from the context menu's own actions, which write
+ * to disk and so can fail for reasons the user can act on.
+ */
+export const createSpellcheckExtension = (
+  spellService: SpellService,
+  onError?: (error: unknown) => void
+): Extension => [
   misspelledField,
   createScanPlugin(spellService),
-  createContextMenuHandler(spellService),
+  createContextMenuHandler(spellService, onError),
   spellTheme
 ];

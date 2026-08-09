@@ -177,7 +177,13 @@ describe("rejecting edits that would damage a marker", () => {
     view.destroy();
   });
 
-  it("rejects a multi-change transaction if any one change would damage a marker", () => {
+  /**
+   * Replace All arrives as one transaction holding every replacement, and a
+   * marker's token is still in the document under its icon — so a search for
+   * "12" or "." matches inside one. Rejecting the transaction whole threw away
+   * every other replacement in the document, silently.
+   */
+  it("keeps the safe changes in a transaction that also damages a marker", () => {
     const { view } = createView();
     view.dispatch({
       changes: [
@@ -186,7 +192,42 @@ describe("rejecting edits that would damage a marker", () => {
       ]
     });
 
+    const text = view.state.doc.toString();
+    expect(text.startsWith("CAROL:"), "the safe replacement was thrown away").toBe(true);
+    expect(text).toContain("⟦734.12–736.80⟧");
+    view.destroy();
+  });
+
+  it("makes no change at all when every change in the transaction damages one", () => {
+    const { view } = createView();
+    view.dispatch({
+      changes: [
+        { from: firstMarkerFrom + 4, insert: "9" },
+        { from: firstMarkerFrom + 6, insert: "8" }
+      ]
+    });
+
     expect(view.state.doc.toString()).toBe(DOC);
+    view.destroy();
+  });
+
+  /** The shape the bug actually took: Replace All over a container. */
+  it("replaces every safe occurrence when the search also matches inside a token", () => {
+    const { view } = createView();
+    const doc = view.state.doc.toString();
+    // "7" appears inside both markers of the first turn and nowhere else, so
+    // add a prose occurrence to stand for the replacements that must survive.
+    const changes: { from: number; to: number; insert: string }[] = [];
+    for (let at = doc.indexOf("7"); at !== -1; at = doc.indexOf("7", at + 1)) {
+      changes.push({ from: at, to: at + 1, insert: "X" });
+    }
+    expect(changes.length, "the fixture needs several matches").toBeGreaterThan(1);
+
+    view.dispatch({ changes });
+
+    const text = view.state.doc.toString();
+    expect(text).toContain("⟦734.12–736.80⟧");
+    expect(text).toContain("⟦742.90–745.30⟧");
     view.destroy();
   });
 

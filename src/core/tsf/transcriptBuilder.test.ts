@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTranscript, speakerLabel } from "./transcriptBuilder";
+import { buildTranscript, speakerLabel, UNNAMED_SPEAKER } from "./transcriptBuilder";
 import { parseSubtitles } from "./vtt";
 import { parseMarkers } from "./markers";
 import { parseTurnLine, wordSpans } from "../editor/transcript/transcriptParser";
@@ -164,9 +164,26 @@ describe("speaker names are made safe for the transcript parser", () => {
     }
   });
 
-  it("a name that sanitises away leaves the line unlabelled rather than broken", () => {
+  /**
+   * Leaving the line unlabelled was the old behaviour and it is the failure
+   * this function exists to prevent: the words lose their speaker with nothing
+   * to show it happened. A placeholder keeps the turn a turn — still separate
+   * from its neighbours, still parsed as a turn, and obviously in want of a
+   * name — which is a thing someone can find and correct.
+   */
+  it("a name that sanitises away becomes a visible placeholder", () => {
     const text = build(cue("..."));
     expect(text.startsWith(":")).toBe(false);
-    expect(text).toBe("⟦1.00–2.00⟧Some words here.");
+    expect(text).toBe(`${UNNAMED_SPEAKER}: ⟦1.00–2.00⟧Some words here.`);
+  });
+
+  it("keeps two unnameable speakers apart rather than merging them", () => {
+    // Both clean away to the placeholder, but they are still different people
+    // and their turns must not run together into one.
+    const text = buildTranscript([
+      { start: 1, end: 2, text: "First.", speaker: "..." },
+      { start: 2, end: 3, text: "Second.", speaker: "???" }
+    ]);
+    expect(text.split("\n\n")).toHaveLength(2);
   });
 });

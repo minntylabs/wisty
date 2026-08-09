@@ -209,41 +209,79 @@ const createVisibilityField = (getInitialVisible: () => boolean) =>
       )
   });
 
+/** Whether this one change would leave a fragment of a marker behind. */
+const changeDamagesMarker = (
+  markers: DecorationSet,
+  fromA: number,
+  toA: number
+): boolean => {
+  let damages = false;
+  // Only the markers overlapping the change are examined: `between` walks that
+  // span, not the document.
+  markers.between(fromA, toA, (from, to) => {
+    if (changeSplits({ from, to }, fromA, toA)) {
+      damages = true;
+      return false;
+    }
+    return undefined;
+  });
+  return damages;
+};
+
 /**
- * Rejects any change that would leave a fragment of a marker behind.
+ * Drops any change that would leave a fragment of a marker behind, and lets the
+ * rest of its transaction through.
  *
  * `atomicRanges` already stops the caret entering a token, which covers typing
  * and backspace. This covers everything that does not go through the caret:
- * paste, find-and-replace, select-all-and-retype, and programmatic edits. The
- * transaction is rejected whole rather than repaired, because a partial repair
- * would silently change what the user asked for.
+ * paste, find-and-replace, select-all-and-retype, and programmatic edits.
  *
- * Only the markers overlapping each change are examined — `between` walks that
- * span, not the document.
+ * A `changeFilter` returning false was the obvious way to write this, and it is
+ * wrong for the case that matters: it cancels the whole transaction. Replace All
+ * arrives as one transaction holding every replacement, and a marker's token is
+ * still in the document under its icon — `⟦734.12–736.80⟧` — so searching for
+ * `12` or `.` matches inside one. A single such match threw away every other
+ * replacement in the document, silently.
+ *
+ * So the damaging changes are removed and the transaction is rebuilt from what
+ * is left. The user gets the edit they asked for everywhere it was safe, and
+ * the markers they did not ask to edit stay whole.
  */
 const createChangeFilter = (markerField: StateField<DecorationSet>) =>
-  EditorState.changeFilter.of((tr) => {
+  EditorState.transactionFilter.of((tr) => {
     if (!tr.docChanged) {
-      return true;
+      return tr;
     }
     const markers = tr.startState.field(markerField, false);
     if (!markers) {
-      return true;
+      return tr;
     }
-    let damages = false;
-    tr.changes.iterChanges((fromA, toA) => {
-      if (damages) {
+
+    const kept: { from: number; to: number; insert: string }[] = [];
+    let dropped = false;
+    tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+      if (changeDamagesMarker(markers, fromA, toA)) {
+        dropped = true;
         return;
       }
-      markers.between(fromA, toA, (from, to) => {
-        if (changeSplits({ from, to }, fromA, toA)) {
-          damages = true;
-          return false;
-        }
-        return undefined;
-      });
+      kept.push({ from: fromA, to: toA, insert: inserted.toString() });
     });
-    return !damages;
+
+    if (!dropped) {
+      return tr;
+    }
+    if (kept.length === 0) {
+      // Nothing survived, so there is no edit to make. The selection is left
+      // alone deliberately: the caret has not moved and neither has the text.
+      return [];
+    }
+    return {
+      changes: kept,
+      // Positions in `tr` are for a document this transaction no longer
+      // produces, so the selection and the scroll intent cannot be carried
+      // over. What survives is the edit itself.
+      annotations: Transaction.userEvent.of(tr.annotation(Transaction.userEvent) ?? "input")
+    };
   });
 
 /** Every marker in the document. Walks them all, so not for the hot path. */

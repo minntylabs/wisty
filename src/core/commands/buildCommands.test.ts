@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { duplicateShortcuts } from "./shortcutRouter";
 import { buildCommands } from "./buildCommands";
 import { MENU_ID_BY_MNEMONIC } from "../app/useMenuState";
 import type { FormatViewMode } from "../settings/settingsTypes";
@@ -349,6 +350,22 @@ describe("shortcuts", () => {
       }
 
       expect(clashes, `on ${isMac ? "macOS" : "Linux"}`).toEqual([]);
+    }
+  });
+});
+
+describe("the real command set", () => {
+  /**
+   * Only the first binding for a chord ever fires, and the router skips the
+   * rest without saying so — so a collision is a menu item that prints a
+   * shortcut and does nothing when it is pressed. Nothing else would catch it.
+   */
+  it("has no two commands claiming the same shortcut", () => {
+    for (const isMac of [false, true]) {
+      const deps = createDeps();
+      deps.platform.isMac = isMac;
+      const { definitions } = buildCommands(deps);
+      expect(duplicateShortcuts(definitions), `isMac: ${isMac}`).toEqual([]);
     }
   });
 });

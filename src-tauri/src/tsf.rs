@@ -1325,15 +1325,41 @@ fn source_is_unchanged(open: &OpenTsf) -> Result<(), String> {
 }
 
 fn temporary_save_path(parent: &Path, output: &Path) -> PathBuf {
+    let name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("transcript.tsf");
     parent.join(format!(
-        ".{}.{}.{}.partial",
-        output
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("transcript.tsf"),
+        ".{}.{}.{}{PARTIAL_SUFFIX}",
+        shortened_for_temporary(name, TEMPORARY_NAME_BUDGET),
         std::process::id(),
         SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+/// How much of a file name a temporary may carry.
+///
+/// A temporary is the document's name with a dot in front and about forty
+/// characters after it. Most filesystems cap a single name at 255 bytes, so a
+/// document named near that limit produced a temporary that could not be
+/// created at all — and the failure named the temporary rather than the name
+/// that caused it. The name in a temporary is there to be recognised, not to be
+/// complete, so it is the part that gives way.
+const TEMPORARY_NAME_BUDGET: usize = 160;
+
+/// `name` truncated to `budget` bytes without splitting a character.
+///
+/// Uniqueness does not depend on this: the pid and sequence number after it are
+/// what keep two temporaries apart, and creation uses `create_new` regardless.
+pub fn shortened_for_temporary(name: &str, budget: usize) -> &str {
+    if name.len() <= budget {
+        return name;
+    }
+    let mut end = budget;
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
 }
 
 /// The suffix every half-written container is named with.
@@ -1404,25 +1430,29 @@ fn partial_owner(file_name: &str) -> Option<u32> {
     pid.parse().ok()
 }
 
-/// Clears out abandoned containers beside one about to be written.
-///
-/// The startup sweep cannot find these: it knows where converted recordings go,
-/// because this process chose that directory, but a container goes wherever the
-/// user said and there is no record of where that was. Doing it here instead
-/// means a directory is tidied the next time a container is written into it,
-/// which also covers the process being killed outright — the one case the
-/// registry above cannot.
-///
-/// Same rule as the conversion sweep: a live owner protects a file, unless it
-/// is old enough that the pid must have been reused.
 /// Directories already swept, so it is not done again on every save.
 static SWEPT_DIRECTORIES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
-fn sweep_partial_files(parent: &Path) {
-    // Once per directory for the life of the process. What it collects is what
-    // an *earlier* process abandoned, so a second look finds nothing new — and
-    // this is on the path of every save, where a directory listing plus a
-    // `/proc` stat per candidate is a cost the save should not carry twice.
+/// Clears out temporaries an earlier process abandoned beside a file being written.
+///
+/// The startup sweep cannot find these: it knows where converted recordings go,
+/// because this process chose that directory, but a document goes wherever the
+/// user said and there is no record of where that was. Doing it on the way past
+/// means a directory is tidied the next time something is written into it, which
+/// also covers the process being killed outright — the one case a registry of
+/// open files cannot.
+///
+/// `owner_of` reads the writing process's pid out of a file name and answers
+/// `None` for a name that is not one of ours. Container temporaries and text
+/// save temporaries are named differently and both need this, so which files to
+/// take is the caller's rule and when to take them is this one's: a live owner
+/// protects a file, unless it is old enough that the pid must have been reused.
+///
+/// Once per directory for the life of the process. What it collects is what an
+/// earlier process left, so a second look finds nothing new — and this is on the
+/// path of every save, where a directory listing plus a `/proc` stat per
+/// candidate is a cost the save should not carry twice.
+pub fn sweep_stale_temporaries(parent: &Path, owner_of: fn(&str) -> Option<u32>) {
     {
         let Ok(mut swept) = SWEPT_DIRECTORIES.lock() else {
             return;
@@ -1440,7 +1470,7 @@ fn sweep_partial_files(parent: &Path) {
         let Some(name) = name.to_str() else {
             continue;
         };
-        let Some(pid) = partial_owner(name) else {
+        let Some(pid) = owner_of(name) else {
             continue;
         };
         let owner_lives = Path::new(&format!("/proc/{pid}")).exists();
@@ -1455,6 +1485,10 @@ fn sweep_partial_files(parent: &Path) {
         }
         let _ = std::fs::remove_file(entry.path());
     }
+}
+
+fn sweep_partial_files(parent: &Path) {
+    sweep_stale_temporaries(parent, partial_owner);
 }
 
 fn create_temporary_file(parent: &Path, output: &Path) -> Result<(PathBuf, File), String> {
@@ -1555,7 +1589,12 @@ pub fn save_tsf(
     // recording only to throw the result away. The full fingerprint runs after
     // the write, where it is what the rename actually depends on.
     source_metadata_is_unchanged(&open)?;
-    let output = PathBuf::from(path);
+    // Through any symlink, exactly as the text saves do. Publishing by renaming
+    // replaces the *path*, so a container reached through a link would be
+    // replaced by a real file and the file it pointed at left holding the old
+    // recording — the save silently detached from what was opened. It also puts
+    // the temporary beside the real file, on the same filesystem.
+    let output = std::fs::canonicalize(&path).unwrap_or_else(|_| PathBuf::from(&path));
     let parent = output
         .parent()
         .ok_or_else(|| "Output path has no parent directory".to_string())?;
@@ -2044,6 +2083,38 @@ mod tests {
             later_leftover.exists(),
             "the directory was swept a second time"
         );
+    }
+
+    /// A temporary is the document's name plus about forty characters. Most
+    /// filesystems cap a single name at 255 bytes, so a document named near
+    /// that limit produced a temporary that could not be created at all.
+    #[test]
+    fn a_long_document_name_still_yields_a_usable_temporary() {
+        let dir = temp_dir("long-name");
+        let long = format!("{}.tsf", "n".repeat(240));
+        let temporary = temporary_save_path(&dir, &dir.join(&long));
+        let name = temporary.file_name().unwrap().to_str().unwrap();
+
+        assert!(
+            name.len() < 255,
+            "the temporary name is {} bytes",
+            name.len()
+        );
+        // Still recognisable as this document's, and still one of ours.
+        assert!(name.starts_with(".nnn"));
+        assert_eq!(partial_owner(name), Some(std::process::id()));
+        // And it can actually be created.
+        let (created, _file) = create_temporary_file(&dir, &dir.join(&long)).expect("temporary");
+        assert!(created.exists());
+        abandon_partial(&created);
+    }
+
+    #[test]
+    fn shortening_a_name_never_splits_a_character() {
+        // Budget lands in the middle of the three-byte character.
+        assert_eq!(shortened_for_temporary("aa\u{4e16}bb", 3), "aa");
+        assert_eq!(shortened_for_temporary("aa\u{4e16}bb", 5), "aa\u{4e16}");
+        assert_eq!(shortened_for_temporary("short", 100), "short");
     }
 
     #[test]

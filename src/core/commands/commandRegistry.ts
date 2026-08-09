@@ -45,7 +45,22 @@ export type CommandRegistry = {
   register: (definition: CommandDefinition) => void;
 };
 
-export const createCommandRegistry = (definitions: CommandDefinition[]): CommandRegistry => {
+/**
+ * Where a command's failure goes.
+ *
+ * Both the ways a command is run — a menu selection and a keyboard shortcut —
+ * discard the promise, so without this a command that rejects was an unhandled
+ * rejection in the console and nothing else on screen. Most commands report
+ * their own failures, but not all: the spelling-language items call the settings
+ * actions directly, so a failed settings write meant a menu item that appeared
+ * to do nothing at all.
+ */
+export type CommandErrorReporter = (commandId: string, error: unknown) => void;
+
+export const createCommandRegistry = (
+  definitions: CommandDefinition[],
+  onError?: CommandErrorReporter
+): CommandRegistry => {
   const commandMap = new Map(definitions.map((definition) => [definition.id, definition]));
 
   const get = (id: string) => commandMap.get(id);
@@ -71,7 +86,14 @@ export const createCommandRegistry = (definitions: CommandDefinition[]): Command
     if (!command) {
       return false;
     }
-    await command.run();
+    try {
+      await command.run();
+    } catch (error) {
+      // Reported rather than rethrown: the callers cannot act on it, and both
+      // of them discard the promise, so rethrowing only reaches the console.
+      onError?.(id, error);
+      return false;
+    }
     return true;
   };
 

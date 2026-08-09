@@ -149,6 +149,15 @@ function App() {
     getSettings: () => settingsStore.state,
     onMarkerClick: playback.playMarker,
     onStopPlayback: playback.stop,
+    onSpellActionError: (error) => {
+      const appError = toAppError(error, "UNKNOWN", "Unable to update the dictionary");
+      errorModalQueue.enqueue({
+        title: "Unable to update the dictionary",
+        message: appError.message,
+        code: appError.code,
+        details: appError.details
+      });
+    },
     onDocChanged: ({ revision }) => {
       documentStore.setRevision(revision);
     },
@@ -566,7 +575,15 @@ function App() {
     showAbout: openAboutDialog
   });
 
-  const commandRegistry = createCommandRegistry(definitions);
+  const commandRegistry = createCommandRegistry(definitions, (commandId, error) => {
+    const appError = toAppError(error, "UNKNOWN", "Unable to complete that action");
+    errorModalQueue.enqueue({
+      title: "Unable to complete that action",
+      message: appError.message,
+      code: appError.code,
+      details: { ...(appError.details ?? {}), command: commandId }
+    });
+  });
 
   createEffect(() => {
     for (const dictionary of spellDictionaries()) {

@@ -10,8 +10,37 @@ export type DictionaryInfo = {
  * repeated checks of the same word (common as the viewport is re-scanned) don't
  * cross the IPC boundary more than once.
  */
+/**
+ * How many distinct words to remember the verdict for.
+ *
+ * The cache exists to stop the same word crossing the IPC boundary each time
+ * the viewport is re-scanned, which is a matter of the few thousand words on
+ * screen and around them. Left unbounded it gained an entry for every distinct
+ * word of every document opened, for the life of the process — the one thing
+ * here that scales with the gigabyte files this editor is built to open.
+ *
+ * Oldest-first eviction: what has just been asked about is what the viewport
+ * holds, and what has not been asked about in fifty thousand words is not on
+ * screen any more.
+ */
+const MAX_CACHED_WORDS = 50_000;
+
 export const createSpellService = () => {
   const correctnessCache = new Map<string, boolean>();
+
+  const remember = (word: string, correct: boolean) => {
+    // Re-inserted so a word still being looked at moves to the newest end, and
+    // Map iteration order does the rest.
+    correctnessCache.delete(word);
+    correctnessCache.set(word, correct);
+    while (correctnessCache.size > MAX_CACHED_WORDS) {
+      const oldest = correctnessCache.keys().next();
+      if (oldest.done) {
+        return;
+      }
+      correctnessCache.delete(oldest.value);
+    }
+  };
 
   const listDictionaries = (): Promise<DictionaryInfo[]> =>
     invoke<DictionaryInfo[]>("spell_list_dictionaries");
@@ -29,7 +58,7 @@ export const createSpellService = () => {
     if (unresolved.length > 0) {
       const results = await invoke<boolean[]>("spell_check_words", { words: unresolved });
       unresolved.forEach((word, index) => {
-        correctnessCache.set(word, results[index] ?? true);
+        remember(word, results[index] ?? true);
       });
     }
 
@@ -47,12 +76,12 @@ export const createSpellService = () => {
 
   const addWord = async (word: string): Promise<void> => {
     await invoke("spell_add_word", { word });
-    correctnessCache.set(word, true);
+    remember(word, true);
   };
 
   const ignoreWord = async (word: string): Promise<void> => {
     await invoke("spell_ignore_word", { word });
-    correctnessCache.set(word, true);
+    remember(word, true);
   };
 
   const listAddedWords = (): Promise<string[]> =>

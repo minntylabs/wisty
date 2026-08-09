@@ -171,13 +171,26 @@ fn ensure_personal_loaded(
 }
 
 /// Writes the personal dictionary's current words to disk.
+///
+/// Through a temporary file and a rename, as every other file this application
+/// writes is. `fs::write` truncates first, so a crash or a full disk partway
+/// through left the file empty or half-written — and this one holds the whole
+/// of what the user has taught the spell checker, with no other copy anywhere.
 fn save_personal_words(personal: &PersonalDictionary) -> Result<(), String> {
     let Some(path) = personal.path.as_ref() else {
         return Ok(());
     };
     let contents = format!("{}\n", personal.words.join("\n"));
-    fs::write(path, contents)
-        .map_err(|error| format!("Unable to save personal dictionary: {error}"))
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+
+    fs::write(&temporary, contents).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        format!("Unable to save personal dictionary: {error}")
+    })?;
+    fs::rename(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        format!("Unable to save personal dictionary: {error}")
+    })
 }
 
 #[cfg(test)]
@@ -300,26 +313,33 @@ pub fn spell_add_word(
 ) -> Result<(), String> {
     ensure_personal_loaded(&state, &app)?;
 
+    // Stored before the checker is told, and taken back out of the list if it
+    // could not be stored. The other order reported a failure while leaving the
+    // word live in hunspell, so it looked added, worked until the app was
+    // closed, and was gone afterwards.
     {
-        let mut guard = state
-            .dictionary
+        let mut personal = state
+            .personal
             .lock()
             .map_err(|error| format!("Spell state poisoned: {error}"))?;
-        if let Some(dictionary) = guard.as_mut() {
-            dictionary.hunspell.add(&word);
+
+        if !personal.words.iter().any(|existing| existing == &word) {
+            personal.words.push(word.clone());
+            if let Err(error) = save_personal_words(&personal) {
+                personal.words.pop();
+                return Err(error);
+            }
         }
     }
 
-    let mut personal = state
-        .personal
+    let mut guard = state
+        .dictionary
         .lock()
         .map_err(|error| format!("Spell state poisoned: {error}"))?;
-
-    if personal.words.iter().any(|existing| existing == &word) {
-        return Ok(());
+    if let Some(dictionary) = guard.as_mut() {
+        dictionary.hunspell.add(&word);
     }
-    personal.words.push(word);
-    save_personal_words(&personal)
+    Ok(())
 }
 
 /// Returns the personal dictionary's words, sorted for display.

@@ -60,6 +60,14 @@ type EditorAdapterOptions = {
   onMarkerClick?: (start: number, end: number) => void;
   /** Escape was pressed in a transcript. Silences whatever is playing. */
   onStopPlayback?: () => void;
+  /**
+   * A spell-check action taken from the editor's own context menu failed.
+   *
+   * Adding a word writes a file, so it can fail for reasons the user can act
+   * on. Nothing else is watching that menu — it is built and handled inside the
+   * extension — so without this the failure had nowhere to go.
+   */
+  onSpellActionError?: (error: unknown) => void;
 };
 
 type SetTextOptions = {
@@ -124,7 +132,9 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   const searchPanelAdapter = createSearchPanelAdapter();
 
   const spellService = createSpellService();
-  const spellExtension = createSpellcheckExtension(spellService);
+  const spellExtension = createSpellcheckExtension(spellService, (error) =>
+    options.onSpellActionError?.(error)
+  );
   let spellEnabled = false;
   let spellLoadedLanguage: string | undefined;
   let spellDictionaryDirty = false;

@@ -707,6 +707,42 @@ fn resolve_save_target(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The suffix every half-written text save is named with.
+const SAVE_TEMP_SUFFIX: &str = ".tmp";
+/// The part of the name that says a temporary is one of ours.
+const SAVE_TEMP_MARKER: &str = ".wisty-save-";
+
+/// The pid a save temporary's name carries, if it is one of ours.
+///
+/// The form is `.<document name>.wisty-save-<pid>-<stream>-<nanos>.tmp`, and
+/// the document name has dots of its own, so the marker is found from the right.
+fn save_temp_owner(file_name: &str) -> Option<u32> {
+    if !file_name.starts_with('.') {
+        return None;
+    }
+    let inner = file_name.strip_suffix(SAVE_TEMP_SUFFIX)?;
+    let (_name, rest) = inner.rsplit_once(SAVE_TEMP_MARKER)?;
+    let pid = rest.split('-').next()?;
+    pid.parse().ok()
+}
+
+/// Deletes the temporaries of every save this process still has open.
+///
+/// For the window closing mid-save. Nothing waits for the write to finish: the
+/// bytes are going nowhere useful, and the file removed is one this process
+/// created and has not renamed. Without this a save interrupted by a quit left
+/// a full copy of the document beside it, named as a dotfile, for ever — the
+/// same defect the container writer had, in the path that runs far more often.
+fn discard_open_save_streams(state: &LaunchArgState) {
+    let Ok(mut streams) = state.active_save_streams.lock() else {
+        return;
+    };
+    for (_id, stream) in streams.drain() {
+        drop(stream.writer);
+        let _ = std::fs::remove_file(&stream.temp_path);
+    }
+}
+
 fn build_save_temp_path(target_path: &Path, stream_id: &str) -> Result<PathBuf, String> {
     let parent = target_path.parent().ok_or_else(|| {
         format!(
@@ -743,9 +779,11 @@ fn build_save_temp_path(target_path: &Path, stream_id: &str) -> Result<PathBuf, 
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
+    // Truncated so the whole temporary stays inside the filesystem's limit on a
+    // single name; see the helper for why the document's name is what gives way.
     let temp_name = format!(
-        ".{}.wisty-save-{}-{}-{}.tmp",
-        file_name.to_string_lossy(),
+        ".{}{SAVE_TEMP_MARKER}{}-{}-{}{SAVE_TEMP_SUFFIX}",
+        crate::tsf::shortened_for_temporary(&file_name.to_string_lossy(), 160),
         std::process::id(),
         stream_id,
         unique_suffix
@@ -878,6 +916,12 @@ fn start_save_stream(
         *counter += 1;
         format!("save-{}", *counter)
     };
+
+    // Anything an earlier process abandoned here goes now. See the sweep's own
+    // comment for why this is the only place it can be done.
+    if let Some(parent) = target_path.parent() {
+        crate::tsf::sweep_stale_temporaries(parent, save_temp_owner);
+    }
 
     let temp_path = build_save_temp_path(&target_path, &stream_id)?;
     let existing_mode = match std::fs::metadata(&target_path) {
@@ -1208,6 +1252,7 @@ pub fn run() {
                     .state::<tsf::ConversionState>()
                     .request_cancel();
                 tsf::remove_partial_files();
+                discard_open_save_streams(&window.app_handle().state::<LaunchArgState>());
             }
         })
         .run(tauri::generate_context!())
@@ -1221,10 +1266,10 @@ mod window_title;
 #[cfg(test)]
 mod tests {
     use super::{
-        atspi_bus_override, cancel_save_stream, ensure_expected_source, finish_save_stream,
-        modified_ms, start_save_stream, write_save_chunk, ExpectedSource, LaunchArgState,
-        TextFileVersion, SAVE_EXTERNAL_APPEARED, SAVE_EXTERNAL_CHANGE, SAVE_EXTERNAL_DELETE,
-        SAVE_EXTERNAL_NOT_A_FILE,
+        atspi_bus_override, cancel_save_stream, discard_open_save_streams, ensure_expected_source,
+        finish_save_stream, modified_ms, save_temp_owner, start_save_stream, write_save_chunk,
+        ExpectedSource, LaunchArgState, TextFileVersion, SAVE_EXTERNAL_APPEARED,
+        SAVE_EXTERNAL_CHANGE, SAVE_EXTERNAL_DELETE, SAVE_EXTERNAL_NOT_A_FILE,
     };
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::Path;
@@ -1600,5 +1645,78 @@ mod tests {
         let error = ensure_expected_source(&path, &ExpectedSource::Absent).unwrap_err();
 
         assert_eq!(error.code, SAVE_EXTERNAL_NOT_A_FILE);
+    }
+
+    /// A save writes into a temporary beside the document and renames it into
+    /// place. Nothing removed that temporary if the process ended mid-save, so
+    /// quitting during one left a full copy of the document beside it, named as
+    /// a dotfile, for ever. Containers were given this treatment already; this
+    /// is the path that runs far more often.
+    #[test]
+    fn closing_removes_the_temporaries_of_saves_still_open() {
+        let dir = std::env::temp_dir().join(format!("wisty-save-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("notes.txt");
+        std::fs::write(&target, b"before").unwrap();
+
+        let state = LaunchArgState::new(None);
+        let started =
+            start_save_stream(&state, target.to_string_lossy().to_string(), None).unwrap();
+        write_save_chunk(&state, started.stream_id.clone(), "half".to_string()).unwrap();
+
+        let temporary: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| save_temp_owner(&entry.file_name().to_string_lossy()).is_some())
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(temporary.len(), 1, "the save wrote no temporary");
+
+        discard_open_save_streams(&state);
+
+        assert!(!temporary[0].exists(), "the temporary outlived the window");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"before",
+            "the file changed"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_save_temporary_names_the_process_that_owns_it() {
+        let name = format!(".notes.txt.wisty-save-{}-save-1-12345.tmp", 4321);
+        assert_eq!(save_temp_owner(&name), Some(4321));
+        // Document names have dots of their own, and so does this one.
+        assert_eq!(
+            save_temp_owner(".my.notes.v2.txt.wisty-save-77-save-2-9.tmp"),
+            Some(77)
+        );
+        assert_eq!(
+            save_temp_owner("notes.txt.wisty-save-77-save-2-9.tmp"),
+            None
+        );
+        assert_eq!(
+            save_temp_owner(".notes.txt.wisty-save-77-save-2-9.bak"),
+            None
+        );
+        assert_eq!(save_temp_owner(".notes.txt.partial"), None);
+    }
+
+    #[test]
+    fn a_long_document_name_still_yields_a_usable_save_temporary() {
+        let dir = std::env::temp_dir().join(format!("wisty-save-long-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join(format!("{}.txt", "n".repeat(240)));
+        std::fs::write(&target, b"before").unwrap();
+
+        let state = LaunchArgState::new(None);
+        let started = start_save_stream(&state, target.to_string_lossy().to_string(), None)
+            .expect("a long name should still be savable");
+        write_save_chunk(&state, started.stream_id.clone(), "after".to_string()).unwrap();
+        assert!(finish_save_stream(&state, started.stream_id).is_ok());
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"after");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

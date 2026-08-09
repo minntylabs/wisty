@@ -65,8 +65,18 @@ export const speakerLabel = (speaker: string): string => {
     .replace(/[⟦⟧]/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  return cleaned.slice(0, MAX_SPEAKER_LENGTH).trim();
+  const label = cleaned.slice(0, MAX_SPEAKER_LENGTH).trim();
+  // A name made only of what is removed here — "..." or "?" — cleaned away to
+  // nothing, and buildTranscript then wrote the words with no label at all.
+  // Losing the attribution silently is the failure this whole function exists
+  // to avoid, so an unusable name becomes a visible placeholder instead: the
+  // turn is still a turn, still separate from its neighbours, and still
+  // obviously in need of a name.
+  return label || UNNAMED_SPEAKER;
 };
+
+/** Stands in for a speaker name that cannot survive being made into a label. */
+export const UNNAMED_SPEAKER = "SPEAKER";
 
 /**
  * The transcript text for `cues`.

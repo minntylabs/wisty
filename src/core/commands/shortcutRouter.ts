@@ -84,6 +84,39 @@ const matchesShortcut = (event: KeyboardEvent, binding: ShortcutBinding): boolea
   return normalizeEventKey(event) === binding.key;
 };
 
+/**
+ * Commands whose shortcut is already claimed by an earlier one.
+ *
+ * Only the first binding for a chord can ever fire, so a collision means a menu
+ * item printing a shortcut beside itself that does nothing. Nothing said so:
+ * the duplicate was skipped in silence, and the only way to find out was to
+ * press the key. Exported so a test can assert the real command set has none.
+ */
+export const duplicateShortcuts = (definitions: readonly CommandDefinition[]): string[] => {
+  const claimedBy = new Map<string, string>();
+  const duplicates: string[] = [];
+  for (const definition of definitions) {
+    if (!definition.shortcut) {
+      continue;
+    }
+    const parsed = parseShortcut(definition.id, definition.shortcut);
+    if (!parsed) {
+      continue;
+    }
+    const chord = chordKey(parsed);
+    const claimant = claimedBy.get(chord);
+    if (claimant) {
+      duplicates.push(`${definition.shortcut} is claimed by ${claimant} and ${definition.id}`);
+      continue;
+    }
+    claimedBy.set(chord, definition.id);
+  }
+  return duplicates;
+};
+
+const chordKey = (binding: ShortcutBinding) =>
+  `${binding.requiresMod ? "mod" : "plain"}:${binding.requiresShift ? "shift" : "plain"}:${binding.requiresAlt ? "alt" : "plain"}:${binding.key}`;
+
 export const createShortcutRouter = (deps: ShortcutRouterDeps) => {
   const bindings: ShortcutBinding[] = [];
   const seenShortcuts = new Set<string>();
@@ -98,7 +131,7 @@ export const createShortcutRouter = (deps: ShortcutRouterDeps) => {
       continue;
     }
 
-    const dedupeKey = `${parsed.requiresMod ? "mod" : "plain"}:${parsed.requiresShift ? "shift" : "plain"}:${parsed.requiresAlt ? "alt" : "plain"}:${parsed.key}`;
+    const dedupeKey = chordKey(parsed);
     if (seenShortcuts.has(dedupeKey)) {
       continue;
     }
@@ -117,6 +150,9 @@ export const createShortcutRouter = (deps: ShortcutRouterDeps) => {
         return false;
       }
       if (deps.canExecute && !deps.canExecute(binding.commandId)) {
+        // Deliberately not prevented: an unavailable command does not claim the
+        // key, so whatever would normally handle it still can. See the test
+        // that pins this.
         return false;
       }
       event.preventDefault();

@@ -1,6 +1,6 @@
 # Wisty
 
-Wisty is a text editor for Linux with a clean look. It doesn't have code highlighting but has some special mode related to editing transcripts, which will be documented later. It only handles UTF-8 files and has support for very large files (streamed read/write, will attempt to open files up to 1GB).
+Wisty is a text editor for Linux with a clean look. It doesn't have code highlighting but has some special modes related to editing transcripts, which will be documented later. It only handles UTF-8 files and has support for very large files (streamed read/write, will attempt to open files up to 1GB).
 
 Wisty was originally a fork of [Parchment](https://github.com/tywil04/parchment) but has been completely rewritten in Typescript using AI tools.
 
@@ -11,7 +11,7 @@ Wisty has a basic Formatted mode for displaying styled markdown and also has spe
 
 ## Linux only
 
-Wisty is a Linux application and there are no plans to port it to Windows or macOS. The code is written accordingly. Paths are POSIX, the font picker is GTK's, the window title fallback is for Wayland, and the save path relies on Unix file modes and on device and inode numbers to tell one file from another. None of it is guarded by platform conditionals.
+Wisty is a Linux application and there are no plans to port it to Windows or macOS.
 
 ## Features
 

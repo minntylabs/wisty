@@ -1132,11 +1132,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         }
         // What ffmpeg said is the explanation for anything that went wrong
         // while it ran, and the error dialog is the only place left to read it.
-        // Joined into one string: the dialog serialises details as JSON, and a
-        // log arriving as a quoted, comma-separated array is no longer a log.
+        // Passed as the lines it was read as: the dialog prints a log as text,
+        // so joining it here would only take away the line structure it needs.
         throw {
           ...failure,
-          details: { ...(failure.details ?? {}), ffmpegOutput: ffmpegOutput.join("\n") }
+          details: { ...(failure.details ?? {}), ffmpegOutput }
         };
       }
 

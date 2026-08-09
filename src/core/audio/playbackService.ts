@@ -87,7 +87,12 @@ export const createPlaybackService = (
       // A marker whose times cannot be played is a damaged document rather than
       // a playback problem, and asking Rust to play it would only produce a
       // dialog saying so. Ignoring it leaves the rest of the transcript usable.
-      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      //
+      // Backwards only, not zero-length. An instantaneous cue is ordinary —
+      // Whisper emits a few per recording — and the parser keeps them precisely
+      // because the padding around a span makes them audible anyway. Refusing
+      // them here made those sentences silently unclickable.
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
         return;
       }
       const span = paddedSpan(start, end);

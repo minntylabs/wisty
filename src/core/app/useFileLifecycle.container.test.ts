@@ -1572,7 +1572,9 @@ describe("importing a transcript", () => {
       "Unable to import transcript",
       expect.objectContaining({
         details: expect.objectContaining({
-          ffmpegOutput: expect.stringContaining("[aac @ 0x1] Queue input is backward in time")
+          // The lines as they were read, not joined: the dialog prints a log as
+          // text, and joining here would only cost it its line structure.
+          ffmpegOutput: expect.arrayContaining(["[aac @ 0x1] Queue input is backward in time"])
         })
       })
     );

@@ -51,6 +51,12 @@ pub struct CreateTsfResult {
 struct AudioFacts {
     duration: f64,
     codec: String,
+    /// Whether the player can read it, or it has to be converted on the way in.
+    ///
+    /// Answered from the same probe as the rest: asking separately meant opening
+    /// and parsing the recording twice for one dialog, which is a wait the user
+    /// sits through on a large file.
+    playable: bool,
 }
 
 /// Reads duration and codec from the recording.
@@ -111,7 +117,21 @@ fn probe_audio(path: &Path) -> Result<AudioFacts, String> {
         _ => "unknown".to_string(),
     };
 
-    Ok(AudioFacts { duration, codec })
+    // A codec the registry names is not necessarily one it can decode: HE-AAC
+    // reports "aac" and is still refused, which is the whole reason conversion
+    // exists. Only building the decoder settles it.
+    let playable = match track.codec_params.as_ref() {
+        Some(CodecParameters::Audio(audio)) => symphonia::default::get_codecs()
+            .make_audio_decoder(audio, &AudioDecoderOptions::default())
+            .is_ok(),
+        _ => false,
+    };
+
+    Ok(AudioFacts {
+        duration,
+        codec,
+        playable,
+    })
 }
 
 /// Fills in the parts of meta.json this side is responsible for.
@@ -290,6 +310,13 @@ pub struct ConversionState {
 struct RunningConversion {
     /// Held so it can be killed from another thread. Taken out to be waited on.
     child: Option<std::process::Child>,
+    /// Whether ffmpeg has finished.
+    ///
+    /// The record outlives the process. Clearing it away at the end discarded
+    /// whatever had been said since the last collection — which is exactly the
+    /// output that explains a failure, since it is printed immediately before
+    /// exit, and the last collection happens after this point.
+    finished: bool,
     lines: Vec<String>,
     /// The recording's length, as ffmpeg reports it before it starts.
     duration_secs: Option<f64>,
@@ -462,6 +489,7 @@ impl ConversionState {
         };
         *guard = Some(RunningConversion {
             child: Some(child),
+            finished: false,
             lines: Vec::new(),
             duration_secs: None,
             position_secs: None,
@@ -470,8 +498,18 @@ impl ConversionState {
     }
 
     /// Forgets a cancellation, because a new import is not the stopped one.
+    ///
+    /// The finished conversion's record goes with it. It is kept past the end so
+    /// that ffmpeg's last words can still be collected; keeping it past the
+    /// *next* import would show that import the previous one's output, and an
+    /// import that converts nothing would inherit a bar and a length as well.
     fn begin_import(&self) {
         self.cancelled.store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = self.inner.lock() {
+            if guard.as_ref().is_some_and(|running| running.finished) {
+                *guard = None;
+            }
+        }
     }
 
     /// Records the cancellation, then stops the ffmpeg it applies to. In that
@@ -532,9 +570,13 @@ impl ConversionState {
         self.cancelled.load(Ordering::SeqCst)
     }
 
+    /// Marks the conversion over, and keeps what it said for one last look.
     fn finish(&self) {
         if let Ok(mut guard) = self.inner.lock() {
-            *guard = None;
+            if let Some(running) = guard.as_mut() {
+                running.finished = true;
+                running.child = None;
+            }
         }
     }
 }
@@ -550,7 +592,7 @@ pub fn take_conversion_output(
             lines: std::mem::take(&mut running.lines),
             duration_secs: running.duration_secs,
             position_secs: running.position_secs,
-            running: true,
+            running: !running.finished,
         },
         None => ConversionOutput::default(),
     })
@@ -1393,17 +1435,14 @@ pub fn probe_audio_file(path: String) -> Result<serde_json::Value, String> {
     // before it asks where to put the container, rather than announcing it once
     // the slow part has already started. The codec name cannot answer this:
     // HE-AAC reports "aac" and is still refused.
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "playable".into(),
-            serde_json::Value::Bool(audio_is_playable(Path::new(&path))),
-        );
-    }
     Ok(value)
 }
 
 /// The prefix every temporary file a conversion writes is named with.
 const CONVERSION_PREFIX: &str = "wisty-import-";
+
+/// Past this, a leftover is litter whatever process now holds its number.
+const STALE_CONVERSION_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Deletes converted recordings left behind by a Wisty that is no longer running.
 ///
@@ -1426,7 +1465,21 @@ pub fn sweep_conversion_leftovers() {
         let Some((pid, _)) = rest.split_once('-') else {
             continue;
         };
-        if pid.parse::<u32>().is_err() || Path::new(&format!("/proc/{pid}")).exists() {
+        if pid.parse::<u32>().is_err() {
+            continue;
+        }
+        // Owned by a live process, so left alone — unless it is old enough that
+        // the pid must have been reused, since a conversion lasts minutes and
+        // pids wrap. Without the age test a leftover whose number was taken by
+        // something unrelated would be protected for good.
+        let owner_lives = Path::new(&format!("/proc/{pid}")).exists();
+        let age = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok());
+        let stale = age.is_some_and(|age| age > STALE_CONVERSION_AGE);
+        if owner_lives && !stale {
             continue;
         }
         let _ = std::fs::remove_file(entry.path());
@@ -1572,6 +1625,7 @@ mod tests {
         let facts = AudioFacts {
             duration: 12.5,
             codec: "aac".into(),
+            playable: true,
         };
         let mut input = draft();
         // A field this side has never heard of must survive: the format's growth
@@ -1596,6 +1650,7 @@ mod tests {
         let facts = AudioFacts {
             duration: 1.0,
             codec: "x".into(),
+            playable: true,
         };
         assert!(complete_meta(serde_json::json!([1, 2]), &facts, "audio.wav").is_err());
     }
@@ -2292,7 +2347,73 @@ mod tests {
             position.is_some_and(|position| position >= 0.0),
             "no position to put a bar at"
         );
-        assert!(state.lock().expect("lock").is_none(), "left running");
+        let guard = state.lock().expect("lock");
+        let running = guard
+            .as_ref()
+            .expect("the record was cleared, taking ffmpeg's last words with it");
+        assert!(running.finished, "left running");
+    }
+
+    /// What ffmpeg says last is what says why it failed: the error is printed
+    /// immediately before it exits, after the window's final collection has
+    /// been scheduled but before it happens. Clearing the record at the end
+    /// threw exactly those lines away.
+    #[test]
+    fn what_ffmpeg_says_at_the_end_outlives_the_conversion() {
+        let state = ConversionState::default();
+        state.begin_import();
+        // Stands in for a running ffmpeg. No child, because none is spawned:
+        // what is under test is the record's lifetime, not the process's.
+        *state.lock().expect("lock") = Some(RunningConversion {
+            child: None,
+            finished: false,
+            lines: Vec::new(),
+            duration_secs: None,
+            position_secs: None,
+        });
+
+        state.record("Stream mapping:".to_string());
+        // Collected once while it runs, as the window does.
+        let collected =
+            std::mem::take(&mut state.lock().expect("lock").as_mut().expect("record").lines);
+        assert_eq!(collected, vec!["Stream mapping:".to_string()]);
+
+        // Said after that collection and before the next one, which is where
+        // the reason for a failure always lands.
+        state.record("[aac] Invalid data found when processing input".to_string());
+        state.finish();
+
+        let guard = state.lock().expect("lock");
+        let running = guard.as_ref().expect("the record was cleared");
+        assert_eq!(
+            running.lines,
+            vec!["[aac] Invalid data found when processing input".to_string()],
+            "the last words were thrown away"
+        );
+        assert!(running.finished, "still claiming to run");
+    }
+
+    /// The record outliving the conversion must not outlive the import: the
+    /// next one would open showing the previous one's output, and one that
+    /// converts nothing would show a length and a bar it never earned.
+    #[test]
+    fn a_new_import_does_not_inherit_the_last_conversions_words() {
+        let state = ConversionState::default();
+        *state.lock().expect("lock") = Some(RunningConversion {
+            child: None,
+            finished: false,
+            lines: vec!["Stream mapping:".to_string()],
+            duration_secs: Some(600.0),
+            position_secs: Some(12.0),
+        });
+        state.finish();
+
+        state.begin_import();
+
+        assert!(
+            state.lock().expect("lock").is_none(),
+            "the new import inherited the last conversion's record"
+        );
     }
 
     /// Converting is one step of an import; packaging the container is the

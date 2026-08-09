@@ -59,10 +59,18 @@ describe("playing a marker", () => {
     const h = createHarness();
     h.service.playMarker(Number.NaN, 5);
     h.service.playMarker(5, Number.POSITIVE_INFINITY);
-    h.service.playMarker(5, 5);
     h.service.playMarker(6, 5);
     expect(h.port.playSpan).not.toHaveBeenCalled();
     expect(h.onError).not.toHaveBeenCalled();
+  });
+
+  it("plays an instantaneous marker, because the padding gives it length", () => {
+    // Whisper emits a few zero-length cues per recording and the parser keeps
+    // them deliberately. Refusing them here left those sentences looking like
+    // any other and doing nothing when clicked.
+    const h = createHarness();
+    h.service.playMarker(12, 12);
+    expect(h.port.playSpan).toHaveBeenCalledWith(12 - HEAD_PAD_SECONDS, 12 + TAIL_PAD_SECONDS);
   });
 
   it("reports a failure rather than leaving it unhandled", async () => {

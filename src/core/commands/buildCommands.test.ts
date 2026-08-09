@@ -271,11 +271,11 @@ describe("remember position command", () => {
 });
 
 describe("file.importTranscript command", () => {
-  it("is bound to Alt+I and asks about unsaved work first", async () => {
+  it("is bound to Alt+Shift+I and asks about unsaved work first", async () => {
     const deps = createDeps();
     const command = findCommand(buildCommands(deps).definitions, "file.importTranscript");
 
-    expect(command.shortcut).toBe("Alt+I");
+    expect(command.shortcut).toBe("Alt+Shift+I");
     await command.run();
     expect(deps.closeFlow.runOrConfirmDiscard).toHaveBeenCalledOnce();
     expect(deps.fileLifecycle.importTranscript).toHaveBeenCalledOnce();

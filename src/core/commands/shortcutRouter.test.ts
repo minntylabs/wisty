@@ -41,6 +41,42 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
+/**
+ * Alt+Shift is the only modifier pair Wisty binds anything to, and the browser
+ * reports the shifted letter as uppercase. Matching is exact on every
+ * modifier, so this is the combination most easily got wrong.
+ */
+describe("Alt+Shift shortcuts", () => {
+  const withImport = (): CommandDefinition[] => [
+    ...createDefinitions(),
+    { id: "file.importTranscript", label: "Import", shortcut: "Alt+Shift+I", run: () => {} }
+  ];
+
+  it("runs on the uppercase letter the browser reports", () => {
+    const execute = vi.fn(async () => true);
+    const router = createShortcutRouter({ definitions: withImport(), execute });
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+
+    const event = dispatchKeydownOn(host, router, { key: "I", altKey: true, shiftKey: true });
+
+    expect(execute).toHaveBeenCalledWith("file.importTranscript");
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  /** Alt alone is the menu mnemonics' space, which is checked before this. */
+  it("does not run without shift", () => {
+    const execute = vi.fn(async () => true);
+    const router = createShortcutRouter({ definitions: withImport(), execute });
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+
+    dispatchKeydownOn(host, router, { key: "i", altKey: true });
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+});
+
 describe("shortcutRouter text-input handling", () => {
   it("yields editor-scoped shortcuts to native handling when a text input outside the editor has focus", () => {
     const execute = vi.fn(async () => true);

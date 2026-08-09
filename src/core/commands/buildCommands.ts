@@ -129,7 +129,11 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
       // level below the page, so a build with developer extras on — every dev
       // build — opens the inspector instead, and preventDefault in the page
       // cannot stop it.
-      shortcut: "Alt+I",
+      //
+      // Shift as well as Alt because the menu mnemonics are checked first and
+      // only for Alt with nothing else held. Alt+Shift is a space no menu can
+      // ever claim, whatever letters future menus start with.
+      shortcut: "Alt+Shift+I",
       // Ends by opening the container it builds, so it replaces the open
       // document and asks about unsaved work first, as Open does.
       run: () => deps.closeFlow.runOrConfirmDiscard(deps.fileLifecycle.importTranscript)

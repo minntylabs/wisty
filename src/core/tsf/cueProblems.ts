@@ -21,7 +21,7 @@ const describe = (problem: CueProblem, count: number): string => {
   const cues = count === 1 ? "1 cue" : `${count} cues`;
   switch (problem.kind) {
     case "beyond-audio":
-      return `${cues} end after the recording does, which is ${seconds(problem.audioDuration)} long. `
+      return `${cues} run past the end of the recording, which is ${seconds(problem.audioDuration)} long. `
         + "This usually means the transcript belongs to a different recording.";
     case "overlap":
       return `${cues} start before the one before them has ended.`;

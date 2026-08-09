@@ -319,6 +319,28 @@ describe("validateCues", () => {
     ]);
   });
 
+  /**
+   * The ordinary shape of the mistake: a transcript a little longer than its
+   * recording, whose last cue starts inside it and finishes after it. Checking
+   * the start alone said nothing about this at all.
+   */
+  it("reports a cue that starts inside the recording and ends after it", () => {
+    const overrunning = [{ start: 95, end: 104, text: "still talking" }];
+    expect(validateCues(overrunning, 100)).toEqual([
+      { kind: "beyond-audio", index: 0, audioDuration: 100 }
+    ]);
+  });
+
+  /**
+   * A cue may legitimately run to the last instant, and a recording converted
+   * on the way in is measured before the conversion and stored after it, which
+   * moves the length by a few tens of milliseconds.
+   */
+  it("allows a cue to reach the end, and a little past it", () => {
+    expect(validateCues([{ start: 90, end: 100, text: "last words" }], 100)).toEqual([]);
+    expect(validateCues([{ start: 90, end: 100.4, text: "last words" }], 100)).toEqual([]);
+  });
+
   it("does not treat segments of one cue as overlapping", () => {
     const segments = parseSubtitles(`WEBVTT
 

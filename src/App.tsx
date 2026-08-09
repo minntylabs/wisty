@@ -91,6 +91,8 @@ type LargeFileDialogState =
 type ImportProblemsState = {
   lines: string[];
   cueCount: number;
+  /** Whether importing this recording means re-encoding the whole of it. */
+  willConvert: boolean;
   resolve: (accepted: boolean) => void;
 };
 
@@ -201,9 +203,14 @@ function App() {
   /** ffmpeg's two readings: the recording's length, and how far into it it is. */
   const [conversionDuration, setConversionDuration] = createSignal<number | null>(null);
   const [conversionPosition, setConversionPosition] = createSignal<number | null>(null);
+  /** Whether ffmpeg is still running, as opposed to the packaging that follows. */
+  const [convertingAudio, setConvertingAudio] = createSignal(false);
+  /** Set by the Cancel button, so the window can say it has been heard. */
+  const [cancellingImport, setCancellingImport] = createSignal(false);
 
   const receiveConversionOutput = (output: ConversionOutput) => {
     setConverting(true);
+    setConvertingAudio(output.running);
     if (output.lines.length > 0) {
       setConversionLines((seen) => appendConversionLines(seen, output.lines));
     }
@@ -220,6 +227,8 @@ function App() {
 
   const finishConversion = () => {
     setConverting(false);
+    setConvertingAudio(false);
+    setCancellingImport(false);
     setConversionLines([]);
     setConversionDuration(null);
     setConversionPosition(null);
@@ -245,14 +254,42 @@ function App() {
     get positionSecs() {
       return conversionPosition();
     },
+    get convertingAudio() {
+      return convertingAudio();
+    },
+    get cancelling() {
+      return cancellingImport();
+    },
     onCancel: () => {
+      // Said before it is done: stopping ffmpeg is immediate, but a
+      // cancellation during packaging is honoured only when the container would
+      // otherwise be moved into place, which is seconds away on a long
+      // recording. Until then the window would look like it had ignored it.
+      setCancellingImport(true);
       void cancelAudioConversion();
     }
   };
 
-  const confirmImportProblems = (problems: CueProblem[], cueCount: number): Promise<boolean> =>
+  /**
+   * The dialogs that answer their own keys — Escape closes them, and nothing
+   * behind them should hear anything. Written once and used twice: by the key
+   * routing, which steps aside for them, and by the predicate that decides whether commands can run. Two lists
+   * of the same dialogs is how the last one drifted out of date.
+   */
+  const modalDialogOpen = () =>
+    aboutOpen()
+    || addedWordsOpen()
+    || largeFileDialog() !== null
+    || importProblems() !== null
+    || converting();
+
+  const confirmImportProblems = (
+    problems: CueProblem[],
+    cueCount: number,
+    willConvert: boolean
+  ): Promise<boolean> =>
     new Promise((resolve) => {
-      setImportProblems({ lines: describeCueProblems(problems), cueCount, resolve });
+      setImportProblems({ lines: describeCueProblems(problems), cueCount, willConvert, resolve });
     });
 
   const closeImportProblems = (accepted: boolean) => {
@@ -521,11 +558,7 @@ function App() {
   const isInteractionBlocked = () =>
     fileLifecycle.isFileOperationInProgress()
     || errorModalQueue.open()
-    || aboutOpen()
-    || addedWordsOpen()
-    || largeFileDialog() !== null
-    || importProblems() !== null
-    || converting()
+    || modalDialogOpen()
     || closeFlow.confirmDiscardOpen();
 
   const { handleMenuCommandSelected, handleMenuPanelOpenChange } = useMenuCommandPipeline({
@@ -555,10 +588,7 @@ function App() {
     requestCancelFileSave: fileLifecycle.requestCancelSaving,
     errorModalOpen: errorModalQueue.open,
     dismissErrorModal: dismissErrorModalAndRefocus,
-    aboutOpen,
-    addedWordsOpen,
-    largeFileDialogOpen: () => largeFileDialog() !== null,
-    importDialogOpen: () => converting() || importProblems() !== null,
+    modalDialogOpen,
     confirmDiscardOpen: closeFlow.confirmDiscardOpen,
     resolveConfirmDiscard: closeFlow.resolveConfirmDiscard,
     menuPanelOpen: menuState.menuPanelOpen,
@@ -575,7 +605,10 @@ function App() {
 
   const commandsContextValue = {
     sections,
-    registry: commandRegistry
+    registry: commandRegistry,
+    // Read lazily: this is built before the predicate below exists, and it is
+    // only ever asked at render time.
+    interactionBlocked: () => isInteractionBlocked()
   };
 
   const menuContextValue = {
@@ -711,6 +744,9 @@ function App() {
             },
             get cueCount() {
               return importProblems()?.cueCount ?? 0;
+            },
+            get willConvert() {
+              return importProblems()?.willConvert ?? false;
             },
             onCancel: () => closeImportProblems(false),
             onImportAnyway: () => closeImportProblems(true)

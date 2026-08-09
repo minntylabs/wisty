@@ -4,7 +4,8 @@ import { createConversionWatch, type ConversionOutput } from "./conversionWatch"
 const said = (...lines: string[]): ConversionOutput => ({
   lines,
   durationSecs: null,
-  positionSecs: null
+  positionSecs: null,
+  running: true
 });
 
 describe("watching a conversion", () => {
@@ -38,10 +39,22 @@ describe("watching a conversion", () => {
     expect(seen).toEqual(["opening input", "encoding", "done"]);
   });
 
-  it("says nothing when there is nothing to say", async () => {
+  /**
+   * A silent look is still news: it is how the window learns that ffmpeg has
+   * finished and the packaging that follows it has begun. The window is opened
+   * by the caller, so reporting quiet cannot open one for a recording that
+   * needs no work.
+   */
+  it("reports a look that found nothing", async () => {
     const onOutput = vi.fn();
+    const finished: ConversionOutput = {
+      lines: [],
+      durationSecs: 600,
+      positionSecs: 600,
+      running: false
+    };
     const watch = createConversionWatch({
-      takeOutput: async () => said(),
+      takeOutput: async () => finished,
       onOutput,
       intervalMs: 10
     });
@@ -50,7 +63,7 @@ describe("watching a conversion", () => {
     await vi.advanceTimersByTimeAsync(30);
     await watch.stop();
 
-    expect(onOutput).not.toHaveBeenCalled();
+    expect(onOutput).toHaveBeenCalledWith(finished);
   });
 
   /**
@@ -61,7 +74,7 @@ describe("watching a conversion", () => {
   it("reports a position even when nothing was said", async () => {
     const onOutput = vi.fn();
     const watch = createConversionWatch({
-      takeOutput: async () => ({ lines: [], durationSecs: 600, positionSecs: 42 }),
+      takeOutput: async () => ({ lines: [], durationSecs: 600, positionSecs: 42, running: true }),
       onOutput,
       intervalMs: 10
     });
@@ -70,7 +83,12 @@ describe("watching a conversion", () => {
     await vi.advanceTimersByTimeAsync(10);
     await watch.stop();
 
-    expect(onOutput).toHaveBeenCalledWith({ lines: [], durationSecs: 600, positionSecs: 42 });
+    expect(onOutput).toHaveBeenCalledWith({
+      lines: [],
+      durationSecs: 600,
+      positionSecs: 42,
+      running: true
+    });
   });
 
   /**

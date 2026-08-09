@@ -47,6 +47,8 @@ type AppShellProps = {
     open: boolean;
     problems: string[];
     cueCount: number;
+    /** Whether importing the chosen recording means re-encoding it. */
+    willConvert: boolean;
     onCancel: () => void;
     onImportAnyway: () => void;
   };
@@ -56,6 +58,10 @@ type AppShellProps = {
     /** ffmpeg's readings, each `null` until it has reported one. */
     durationSecs: number | null;
     positionSecs: number | null;
+    /** Whether ffmpeg is running, as opposed to the packaging that follows it. */
+    convertingAudio: boolean;
+    /** Whether a cancellation has been asked for and not yet taken effect. */
+    cancelling: boolean;
     onCancel: () => void;
   };
   showTransferHitBlocker: boolean;
@@ -168,6 +174,7 @@ export const AppShell = (props: AppShellProps) => {
         open={props.importProblems.open}
         problems={props.importProblems.problems}
         cueCount={props.importProblems.cueCount}
+        willConvert={props.importProblems.willConvert}
         onCancel={props.importProblems.onCancel}
         onImportAnyway={props.importProblems.onImportAnyway}
       />
@@ -177,6 +184,8 @@ export const AppShell = (props: AppShellProps) => {
         lines={props.audioConversion.lines}
         durationSecs={props.audioConversion.durationSecs}
         positionSecs={props.audioConversion.positionSecs}
+        convertingAudio={props.audioConversion.convertingAudio}
+        cancelling={props.audioConversion.cancelling}
         onCancel={props.audioConversion.onCancel}
       />
 

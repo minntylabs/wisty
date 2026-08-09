@@ -4,6 +4,14 @@ import type { CommandRegistry, MenuSection } from "../commands/commandRegistry";
 type CommandsContextValue = {
   sections: MenuSection[];
   registry: CommandRegistry;
+  /**
+   * Whether the app is busy with something the user must not act behind.
+   *
+   * The menu needs it because it is the same answer the command pipeline gives:
+   * without it every item rendered as usual while a file was loading, saving or
+   * converting, and clicking one did nothing at all.
+   */
+  interactionBlocked: Accessor<boolean>;
 };
 
 type MenuContextValue = {

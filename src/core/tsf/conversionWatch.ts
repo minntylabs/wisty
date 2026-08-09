@@ -18,6 +18,11 @@ export type ConversionOutput = {
   durationSecs: number | null;
   /** How far into the recording it has got. */
   positionSecs: number | null;
+  /**
+   * Whether ffmpeg is still running. Building a container is converting and
+   * then packaging, and the window says different things about each.
+   */
+  running: boolean;
 };
 
 export type ConversionWatchDeps = {
@@ -28,7 +33,12 @@ export type ConversionWatchDeps = {
   intervalMs?: number;
 };
 
-const NOTHING: ConversionOutput = { lines: [], durationSecs: null, positionSecs: null };
+const NOTHING: ConversionOutput = {
+  lines: [],
+  durationSecs: null,
+  positionSecs: null,
+  running: false
+};
 
 const DEFAULT_INTERVAL_MS = 150;
 
@@ -56,11 +66,11 @@ export const createConversionWatch = (deps: ConversionWatchDeps) => {
     if (belongsTo !== generation) {
       return;
     }
-    // A reading with nothing in it is one no conversion is running behind, and
-    // reporting those would open the window for a recording needing no work.
-    if (output.lines.length > 0 || output.positionSecs !== null) {
-      deps.onOutput(output);
-    }
+    // Every look is reported, including the empty ones. A silent conversion is
+    // still news — it is how the window learns that ffmpeg has finished and
+    // the packaging has started — and the window is opened by the caller now
+    // rather than by the first thing said.
+    deps.onOutput(output);
     if (running) {
       timer = setTimeout(() => void poll(belongsTo), intervalMs);
     }

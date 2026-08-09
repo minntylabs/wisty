@@ -18,6 +18,14 @@ type AudioConversionModalProps = {
   durationSecs: number | null;
   /** How far into the recording it has got. */
   positionSecs: number | null;
+  /**
+   * Whether ffmpeg is still running. Building a container is two steps, and
+   * saying "converting" through the second one — with the bar at its end — is
+   * describing work that finished.
+   */
+  convertingAudio: boolean;
+  /** Whether a cancellation has been asked for and not yet taken effect. */
+  cancelling: boolean;
   onCancel: () => void;
 };
 
@@ -84,6 +92,22 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
     }
   });
 
+  /** What the window is doing, in the order the user needs to hear it. */
+  const positionLine = () => {
+    if (props.cancelling) {
+      return "Stopping…";
+    }
+    if (!props.convertingAudio) {
+      return "Writing the container…";
+    }
+    if (props.positionSecs === null) {
+      return "Starting…";
+    }
+    return props.durationSecs === null
+      ? `Converted ${formatDuration(props.positionSecs)}`
+      : `Converted ${formatDuration(props.positionSecs)} of ${formatDuration(props.durationSecs)}`;
+  };
+
   const noteScroll = () => {
     if (!log) {
       return;
@@ -105,9 +129,9 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
         <DialogContent class="modal-panel conversion-panel" aria-label="Importing">
           <DialogTitle>Importing</DialogTitle>
           <DialogDescription>
-            {props.lines.length > 0
+            {props.convertingAudio
               ? "This recording is in a format Wisty cannot play, so it is being converted as the container is built."
-              : "Building the container: reading the recording and packaging it with the transcript."}
+              : "Packaging the recording and the transcript into the container."}
           </DialogDescription>
 
           <dl class="conversion-facts">
@@ -154,15 +178,7 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
             />
           </div>
 
-          <p class="conversion-position">
-            {props.positionSecs === null
-              ? props.lines.length > 0
-                ? "Starting…"
-                : "Working…"
-              : props.durationSecs === null
-                ? `Converted ${formatDuration(props.positionSecs)}`
-                : `Converted ${formatDuration(props.positionSecs)} of ${formatDuration(props.durationSecs)}`}
-          </p>
+          <p class="conversion-position">{positionLine()}</p>
 
           {/* Nothing to show until ffmpeg has said something, which it only
               does for a recording that needs converting. */}
@@ -205,7 +221,9 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
           </Show>
 
           <div class="modal-actions">
-            <button class="button subtle" onClick={props.onCancel}>Cancel Import</button>
+            <button class="button subtle" disabled={props.cancelling} onClick={props.onCancel}>
+              {props.cancelling ? "Stopping…" : "Cancel Import"}
+            </button>
           </div>
         </DialogContent>
       </DialogPortal>

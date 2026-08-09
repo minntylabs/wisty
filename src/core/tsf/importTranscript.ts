@@ -31,7 +31,7 @@ export type ImportTranscriptDeps = {
     pickContainerPath: (defaultPath?: string) => Promise<{ kind: "cancelled" } | { kind: "saved"; filePath: string }>;
   };
   readTextFile: (filePath: string) => Promise<string>;
-  probeAudio: (filePath: string) => Promise<{ duration: number; codec: string }>;
+  probeAudio: (filePath: string) => Promise<{ duration: number; codec: string; playable?: boolean }>;
   createContainer: (params: {
     outputPath: string;
     transcript: string;
@@ -43,7 +43,12 @@ export type ImportTranscriptDeps = {
    * no abandons the import; none of these problems prevents a usable container,
    * so none of them refuses on its own.
    */
-  confirmProblems: (problems: CueProblem[], cueCount: number) => Promise<boolean>;
+  confirmProblems: (
+    problems: CueProblem[],
+    cueCount: number,
+    /** Whether importing this recording means re-encoding the whole of it. */
+    willConvert: boolean
+  ) => Promise<boolean>;
   /** For meta.json's provenance, which no code reads and readers may need. */
   appVersion: () => string;
   now?: () => Date;
@@ -109,7 +114,16 @@ export const importTranscript = async (
   // not belong together are still two files when it is noticed.
   const facts = await deps.probeAudio(audio.filePath);
   const problems = validateCues(cues, facts.duration);
-  if (problems.length > 0 && !await deps.confirmProblems(problems, countCues(cues))) {
+  // A recording the player cannot read is converted on the way in, which is the
+  // slow part of an import and the one thing here that cannot be undone by
+  // cancelling early. Said before the last question rather than after it: by
+  // then the work has started, and "it is being converted" is news that arrives
+  // too late to act on.
+  const willConvert = facts.playable === false;
+  if (
+    (problems.length > 0 || willConvert)
+    && !await deps.confirmProblems(problems, countCues(cues), willConvert)
+  ) {
     return { kind: "cancelled" };
   }
 

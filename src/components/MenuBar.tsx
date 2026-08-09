@@ -12,7 +12,7 @@ import {
   SubContent as MenubarSubContent
 } from "@kobalte/core/menubar";
 import { useCommandsContext, useMenuContext } from "../core/app/appContexts";
-import { CommandDefinition, MenuItem } from "../core/commands/commandRegistry";
+import { CommandDefinition, MenuItem, menuItemEnabled } from "../core/commands/commandRegistry";
 
 /** Tracks whether a scrollable element has content hidden below its visible edge. */
 const createScrollOverflow = () => {
@@ -90,7 +90,7 @@ export const MenuBar = () => {
     if (!command) {
       return null;
     }
-    const enabled = command.enabled ? command.enabled() : true;
+    const enabled = menuItemEnabled(command, commands.interactionBlocked());
 
     return (
       <MenubarItem

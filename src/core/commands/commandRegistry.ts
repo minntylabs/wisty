@@ -83,3 +83,17 @@ export const createCommandRegistry = (definitions: CommandDefinition[]): Command
     register
   };
 };
+
+/**
+ * Whether a menu item should be offered.
+ *
+ * Both halves of it: what the command says about itself, and whether anything
+ * can be run at all. Only the first was consulted, so every item rendered as
+ * usual while a file was loading, saving or converting — and clicking one did
+ * nothing, because the pipeline that runs commands consults the second.
+ */
+export const menuItemEnabled = (
+  command: Pick<CommandDefinition, "enabled">,
+  interactionBlocked: boolean
+): boolean => (command.enabled ? command.enabled() : true) && !interactionBlocked;
+

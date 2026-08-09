@@ -48,6 +48,29 @@ const ruleBody = (stylesheet: string, className: string): string | null => {
 };
 
 describe("dialog panel styles", () => {
+  /**
+   * The checks below read class names out of the source, so a class this file
+   * cannot read is a panel it cannot check — and an unpositioned one would
+   * ship exactly as the conversion panel did. A literal is the price of being
+   * able to prove anything about them.
+   */
+  it("gives every dialog a class it can be checked by", () => {
+    const computed: string[] = [];
+    for (const name of readdirSync(COMPONENT_ROOT)) {
+      if (!/\.tsx$/.test(name) || /\.test\.tsx$/.test(name)) {
+        continue;
+      }
+      const source = readFileSync(join(COMPONENT_ROOT, name), "utf8");
+      for (const match of source.matchAll(/<Dialog(?:Content|Overlay)\s+class=(.)/g)) {
+        if (match[1] !== '"') {
+          computed.push(`${name}: class=${match[1]}…`);
+        }
+      }
+    }
+
+    expect(computed, "write these as literal class strings so they can be linted").toEqual([]);
+  });
+
   it("positions every dialog panel", () => {
     const stylesheet = readFileSync(STYLESHEET_PATH, "utf8");
 

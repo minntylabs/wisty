@@ -7,11 +7,12 @@ type UseGlobalKeyRoutingOptions = {
   requestCancelFileSave: () => void;
   errorModalOpen: Accessor<boolean>;
   dismissErrorModal: () => void;
-  aboutOpen: Accessor<boolean>;
-  addedWordsOpen: Accessor<boolean>;
-  largeFileDialogOpen: Accessor<boolean>;
-  /** The conversion window, and the question an import asks about its cues. */
-  importDialogOpen: Accessor<boolean>;
+  /**
+   * Every dialog that owns its own keys, including the ones this file used to
+   * name individually. Composed by the caller, which is also what decides
+   * whether commands can run — one list, so the two cannot disagree.
+   */
+  modalDialogOpen: Accessor<boolean>;
   confirmDiscardOpen: Accessor<boolean>;
   resolveConfirmDiscard: (shouldDiscard: boolean) => Promise<void>;
   menuPanelOpen: Accessor<boolean>;
@@ -55,12 +56,7 @@ export const useGlobalKeyRouting = (options: UseGlobalKeyRoutingOptions) => {
 
     // Dialogs handle their own keys (Escape via the dialog library); keep
     // application shortcuts from acting behind them.
-    if (
-      options.aboutOpen()
-      || options.addedWordsOpen()
-      || options.largeFileDialogOpen()
-      || options.importDialogOpen()
-    ) {
+    if (options.modalDialogOpen()) {
       return;
     }
 

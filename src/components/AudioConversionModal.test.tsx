@@ -26,7 +26,9 @@ const showModal = (initial: string[]) => {
     open: open(),
     lines: lines(),
     durationSecs: 600,
-    positionSecs: 12
+    positionSecs: 12,
+    convertingAudio: true,
+    cancelling: false
   });
 
   host = document.createElement("div");
@@ -38,6 +40,8 @@ const showModal = (initial: string[]) => {
         lines={group().lines}
         durationSecs={group().durationSecs}
         positionSecs={group().positionSecs}
+        convertingAudio={group().convertingAudio}
+        cancelling={group().cancelling}
         onCancel={() => {}}
       />
     ),

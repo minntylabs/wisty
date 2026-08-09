@@ -59,7 +59,12 @@ type UseFileLifecycleDeps = {
    * Asked when an imported transcript does not sit comfortably against the
    * recording. None of those problems refuses the import on its own.
    */
-  confirmImportProblems: (problems: CueProblem[], cueCount: number) => Promise<boolean>;
+  confirmImportProblems: (
+    problems: CueProblem[],
+    cueCount: number,
+    /** Whether importing the chosen recording means re-encoding it. */
+    willConvert: boolean
+  ) => Promise<boolean>;
   /** For the provenance an imported container records about its maker. */
   appVersion: () => string;
   /**

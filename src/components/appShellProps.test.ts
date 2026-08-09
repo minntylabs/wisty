@@ -61,8 +61,24 @@ const groupBody = (source: string, name: string): string | null => {
  */
 const eagerFields = (body: string): string[] => {
   const found: string[] = [];
+  // Depth, not indentation. Keying on how far a line is indented meant a group
+  // nested one level deeper — or simply reformatted — passed this check without
+  // a single field being looked at.
+  let depth = 0;
   for (const line of body.split("\n")) {
-    const match = /^\s{12}([A-Za-z][A-Za-z0-9]*):\s*(.+?),?\s*$/.exec(line);
+    const openedAt = depth;
+    for (const character of line) {
+      if (character === "{" || character === "(" || character === "[") {
+        depth += 1;
+      } else if (character === "}" || character === ")" || character === "]") {
+        depth -= 1;
+      }
+    }
+    // A field of the group itself: inside its braces, outside anything nested.
+    if (openedAt !== 2) {
+      continue;
+    }
+    const match = /^\s*([A-Za-z][A-Za-z0-9]*):\s*(.+?),?\s*$/.exec(line);
     if (!match) {
       continue;
     }

@@ -169,7 +169,7 @@ export const parseSubtitles = (source: string): Cue[] => {
     // Throwing would discard an entire transcript over one bad timing, and the
     // words are the part worth keeping; a marker with nothing to play is
     // visibly useless, where a guessed end would be quietly wrong.
-    // `validateCues` reports it as `zero-length` so it can be surfaced before a
+    // `validateCues` reports it as `backwards` so it can be surfaced before a
     // container is written.
     const declaredEnd = parseTimestamp(timing[2]);
     const end = Math.max(start, declaredEnd);
@@ -222,6 +222,9 @@ export type CueProblem =
  * VTT, that recording) is caught before it becomes a .tsf, which is the
  * likeliest real mistake here.
  */
+/** How far past the end a cue may run before it is worth mentioning. */
+const BEYOND_AUDIO_TOLERANCE_SECONDS = 1;
+
 export const validateCues = (cues: readonly Cue[], audioDuration?: number): CueProblem[] => {
   const problems: CueProblem[] = [];
   cues.forEach((cue, index) => {
@@ -240,7 +243,16 @@ export const validateCues = (cues: readonly Cue[], audioDuration?: number): CueP
     if (cue.clamped) {
       problems.push({ kind: "backwards", index });
     }
-    if (audioDuration !== undefined && cue.start > audioDuration) {
+    // By where the cue *ends*, which is what running past the recording means.
+    // Checking the start alone missed the ordinary shape of the mistake: a
+    // transcript a little longer than its recording, whose last cues begin
+    // inside it and finish after it.
+    //
+    // The tolerance covers two honest disagreements. A cue may legitimately run
+    // to the last instant of the recording, and a recording that has to be
+    // converted on the way in is measured before the conversion and stored
+    // after it — re-encoding shifts the length by a few tens of milliseconds.
+    if (audioDuration !== undefined && cue.end > audioDuration + BEYOND_AUDIO_TOLERANCE_SECONDS) {
       problems.push({ kind: "beyond-audio", index, audioDuration });
     }
   });

@@ -781,6 +781,12 @@ body {
   line-height: 1.45;
 }
 
+.import-conversion-note {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--status-text);
+}
+
 .import-problems li + li {
   margin-top: 4px;
 }

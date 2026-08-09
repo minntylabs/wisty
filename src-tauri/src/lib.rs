@@ -1133,6 +1133,11 @@ pub fn run() {
         })
         .build();
 
+    // Anything a killed Wisty left converting in the temporary directory. Done
+    // before the window exists because it is housekeeping, not startup work:
+    // the files are recording-sized and nothing else will ever remove them.
+    tsf::sweep_conversion_leftovers();
+
     tauri::Builder::default()
         .manage(LaunchArgState::new(launch_file))
         .manage(spellcheck::SpellState::default())
@@ -1180,8 +1185,16 @@ pub fn run() {
         // parent that spawned it. Quitting mid-import would otherwise leave
         // ffmpeg encoding into a temporary file that nothing will collect and
         // nothing will ever read.
+        // A conversion is a child process, and a child process outlives the
+        // parent that spawned it. Both events are watched because neither is
+        // certain: `CloseRequested` comes early enough to stop ffmpeg before the
+        // webview is torn down, and `Destroyed` catches a close that never asked.
+        // Neither fires for a kill, which is what the startup sweep is for.
         .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::Destroyed) {
+            if matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            ) {
                 use tauri::Manager;
                 window
                     .app_handle()

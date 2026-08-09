@@ -305,6 +305,13 @@ pub struct ConversionOutput {
     lines: Vec<String>,
     duration_secs: Option<f64>,
     position_secs: Option<f64>,
+    /// Whether ffmpeg is still running.
+    ///
+    /// Building a container is two steps — converting, then packaging — and the
+    /// window has to tell them apart. Judging by whether anything has been said
+    /// would leave it claiming to convert long after ffmpeg had finished, with
+    /// its bar stuck at the end.
+    running: bool,
 }
 
 /// `HH:MM:SS.mmm`, which is how ffmpeg writes both a duration and a position.
@@ -543,6 +550,7 @@ pub fn take_conversion_output(
             lines: std::mem::take(&mut running.lines),
             duration_secs: running.duration_secs,
             position_secs: running.position_secs,
+            running: true,
         },
         None => ConversionOutput::default(),
     })
@@ -568,7 +576,7 @@ fn convert_to_playable_audio(
     state: Option<&ConversionState>,
 ) -> Result<PathBuf, String> {
     let output = std::env::temp_dir().join(format!(
-        "wisty-import-{}-{}.m4a",
+        "{CONVERSION_PREFIX}{}-{}.m4a",
         std::process::id(),
         SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
@@ -803,8 +811,14 @@ fn write_archive(
     let mut zip = ZipWriter::new(BufWriter::new(file));
 
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    // Audio is already compressed; deflating it again costs seconds and saves nothing.
-    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    // Audio is already compressed; deflating it again costs seconds and saves
+    // nothing. `large_file` is the zip64 header a member over 4GiB needs: without
+    // it the writer aborts mid-copy with "Large file option has not been set",
+    // after minutes of streaming, and a recording that big is exactly the one
+    // nobody wants to import twice. A long WAV reaches it — around six hours.
+    let stored = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .large_file(true);
 
     zip.start_file(TRANSCRIPT_MEMBER, deflated)
         .map_err(|error| format!("Cannot write {TRANSCRIPT_MEMBER}: {error}"))?;
@@ -1251,7 +1265,11 @@ fn write_open_archive(file: File, transcript: &str, open: &OpenTsf) -> Result<()
     validate_member_name(&open.audio_member)?;
     let mut zip = ZipWriter::new(BufWriter::new(file));
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    // As in `write_archive`: a container whose recording is over 4GiB has to be
+    // rewritable, or saving it once would destroy it.
+    let stored = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .large_file(true);
 
     zip.start_file(TRANSCRIPT_MEMBER, deflated)
         .map_err(|error| format!("Cannot write {TRANSCRIPT_MEMBER}: {error}"))?;
@@ -1368,7 +1386,51 @@ pub fn save_tsf(
 #[tauri::command(async)]
 pub fn probe_audio_file(path: String) -> Result<serde_json::Value, String> {
     let facts = probe_audio(Path::new(&path))?;
-    serde_json::to_value(facts).map_err(|error| format!("Cannot report audio facts: {error}"))
+    let mut value = serde_json::to_value(facts)
+        .map_err(|error| format!("Cannot report audio facts: {error}"))?;
+    // Whether the player can read it, which decides whether importing it means
+    // re-encoding the whole recording. Asked here so the import can say so
+    // before it asks where to put the container, rather than announcing it once
+    // the slow part has already started. The codec name cannot answer this:
+    // HE-AAC reports "aac" and is still refused.
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "playable".into(),
+            serde_json::Value::Bool(audio_is_playable(Path::new(&path))),
+        );
+    }
+    Ok(value)
+}
+
+/// The prefix every temporary file a conversion writes is named with.
+const CONVERSION_PREFIX: &str = "wisty-import-";
+
+/// Deletes converted recordings left behind by a Wisty that is no longer running.
+///
+/// A conversion cleans up after itself on every path it can reach, but the path
+/// it cannot reach is the app being quit or killed while ffmpeg is working:
+/// nothing runs after that, and a recording-sized file stays in the temporary
+/// directory for good. They are matched by the process that made them — this is
+/// Linux, so a process either has a `/proc` entry or does not exist — which
+/// leaves a second Wisty's conversions alone.
+pub fn sweep_conversion_leftovers() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(rest) = name.strip_prefix(CONVERSION_PREFIX) else {
+            continue;
+        };
+        let Some((pid, _)) = rest.split_once('-') else {
+            continue;
+        };
+        if pid.parse::<u32>().is_err() || Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
 }
 
 /// `async` for the same reason as `save_tsf`: probing, compressing and syncing
@@ -2363,6 +2425,30 @@ mod tests {
 
         let mut guard = state.lock().expect("lock");
         assert_eq!(guard.as_mut().expect("running").duration_secs, Some(600.0));
+    }
+
+    /// The sweep deletes recording-sized litter, so what it will not touch
+    /// matters more than what it will: a conversion belonging to a Wisty that
+    /// is still running must survive it.
+    #[test]
+    fn the_sweep_takes_only_what_no_process_owns() {
+        let temp = std::env::temp_dir();
+        // A pid no process can have: the kernel's maximum is far below this.
+        let abandoned = temp.join(format!("{CONVERSION_PREFIX}4294967295-77.m4a"));
+        let ours = temp.join(format!("{CONVERSION_PREFIX}{}-77.m4a", std::process::id()));
+        let innocent = temp.join("wisty-something-else.m4a");
+        for path in [&abandoned, &ours, &innocent] {
+            std::fs::write(path, b"x").expect("write");
+        }
+
+        sweep_conversion_leftovers();
+
+        assert!(!abandoned.exists(), "the abandoned conversion was kept");
+        assert!(ours.exists(), "a live Wisty's conversion was deleted");
+        assert!(innocent.exists(), "a file that is not ours was deleted");
+
+        let _ = std::fs::remove_file(&ours);
+        let _ = std::fs::remove_file(&innocent);
     }
 
     /// The bar's two readings, out of the stream they share with the log.

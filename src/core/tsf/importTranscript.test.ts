@@ -18,7 +18,9 @@ const createDeps = (overrides: Partial<ImportTranscriptDeps> = {}) => {
     audioPath: string;
     meta: Record<string, unknown>;
   }) => ({ path: params.outputPath }));
-  const confirmProblems = vi.fn(async (_problems: CueProblem[], _cueCount: number) => true);
+  const confirmProblems = vi.fn(
+    async (_problems: CueProblem[], _cueCount: number, _willConvert: boolean) => true
+  );
   const probeAudio = vi.fn(async () => ({ duration: 60, codec: "aac" }));
   const pickAudio = vi.fn(async () => ({ kind: "opened" as const, filePath: "/recordings/mum_11.m4a" }));
   const pickContainerPath = vi.fn(async () => ({ kind: "saved" as const, filePath: "/out/mum_11.tsf" }));
@@ -122,6 +124,51 @@ describe("importing a transcript", () => {
       await expect(importTranscript(deps)).resolves.toEqual({ kind: "cancelled" });
       expect(pickContainerPath).not.toHaveBeenCalled();
       expect(createContainer).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Converting is minutes of work on a long recording, and the only part of an
+   * import that cannot be undone cheaply. Saying so after the output path has
+   * been chosen would be telling the user once it was already happening.
+   */
+  describe("when the recording has to be converted", () => {
+    const unplayable = {
+      probeAudio: vi.fn(async () => ({ duration: 60, codec: "unknown", playable: false }))
+    };
+
+    it("says so before asking where the container goes", async () => {
+      const { deps, confirmProblems, pickContainerPath } = createDeps(unplayable);
+
+      await importTranscript(deps);
+
+      expect(confirmProblems).toHaveBeenCalled();
+      const [problems, , willConvert] = confirmProblems.mock.calls[0];
+      expect(problems).toEqual([]);
+      expect(willConvert).toBe(true);
+      expect(confirmProblems.mock.invocationCallOrder[0])
+        .toBeLessThan(pickContainerPath.mock.invocationCallOrder[0]);
+    });
+
+    it("writes nothing when the answer is no", async () => {
+      const { deps, createContainer, pickContainerPath } = createDeps({
+        ...unplayable,
+        confirmProblems: async () => false
+      });
+
+      await expect(importTranscript(deps)).resolves.toEqual({ kind: "cancelled" });
+      expect(pickContainerPath).not.toHaveBeenCalled();
+      expect(createContainer).not.toHaveBeenCalled();
+    });
+
+    it("asks nothing when the recording plays as it is", async () => {
+      const { deps, confirmProblems } = createDeps({
+        probeAudio: vi.fn(async () => ({ duration: 60, codec: "aac", playable: true }))
+      });
+
+      await importTranscript(deps);
+
+      expect(confirmProblems).not.toHaveBeenCalled();
     });
   });
 

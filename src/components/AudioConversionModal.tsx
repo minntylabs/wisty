@@ -89,7 +89,7 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
             <Show when={summary().source}>
               {(source) => (
                 <>
-                  <dt>Recording</dt>
+                  <dt>Source file</dt>
                   <dd>{source()}</dd>
                 </>
               )}
@@ -97,7 +97,7 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
             <Show when={summary().from}>
               {(from) => (
                 <>
-                  <dt>Now</dt>
+                  <dt>Source format</dt>
                   <dd>{from()}</dd>
                 </>
               )}
@@ -105,7 +105,7 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
             <Show when={summary().to}>
               {(to) => (
                 <>
-                  <dt>Becoming</dt>
+                  <dt>Destination format</dt>
                   <dd>{to()}</dd>
                 </>
               )}

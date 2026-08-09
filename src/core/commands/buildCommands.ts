@@ -30,6 +30,8 @@ type BuildCommandsDeps = {
     importTranscript: () => Promise<void>;
     chooseEditorFont: () => Promise<void>;
     safeModeActive: Accessor<boolean>;
+    /** An import runs from its first dialog to the container being opened. */
+    isImporting: Accessor<boolean>;
   };
   editor: {
     undoEdit: () => boolean;
@@ -125,6 +127,10 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
     {
       id: "file.importTranscript",
       label: "Import Transcript...",
+      // Greyed out while one is running, because the second one would be
+      // refused: a conversion is one process with one slot to live in, and an
+      // item that is offered and then declines is worse than one that says so.
+      enabled: () => !deps.fileLifecycle.isImporting(),
       // Not Ctrl+Shift+I: WebKitGTK binds that to its own web inspector, at a
       // level below the page, so a build with developer extras on — every dev
       // build — opens the inspector instead, and preventDefault in the page

@@ -1176,6 +1176,19 @@ pub fn run() {
             playback::stop_playback,
             playback::release_playback
         ])
+        // A conversion is a child process, and a child process outlives the
+        // parent that spawned it. Quitting mid-import would otherwise leave
+        // ffmpeg encoding into a temporary file that nothing will collect and
+        // nothing will ever read.
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                use tauri::Manager;
+                window
+                    .app_handle()
+                    .state::<tsf::ConversionState>()
+                    .request_cancel();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

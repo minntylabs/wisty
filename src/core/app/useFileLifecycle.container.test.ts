@@ -40,6 +40,8 @@ type HarnessOverrides = {
   createContainer?: (params: { outputPath: string }) => Promise<{ path: string }>;
   /** What the watched conversion says while the container is being built. */
   conversionOutput?: string[];
+  onConversionStarted?: () => void;
+  onConversionFinished?: () => void;
 };
 
 const createHarness = (overrides: HarnessOverrides = {}) => {
@@ -166,13 +168,14 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     confirmImportProblems: async () => true,
     appVersion: () => "2.5.0",
     conversion: {
+      onStarted: () => overrides.onConversionStarted?.(),
       takeOutput: async () => ({
         lines: overrides.conversionOutput ?? [],
         durationSecs: null,
         positionSecs: null
       }),
       onOutput: () => {},
-      onFinished: () => {}
+      onFinished: () => overrides.onConversionFinished?.()
     },
     showFileTooLarge
   } as unknown as Parameters<typeof useFileLifecycle>[0];
@@ -1569,10 +1572,47 @@ describe("importing a transcript", () => {
       "Unable to import transcript",
       expect.objectContaining({
         details: expect.objectContaining({
-          ffmpegOutput: expect.arrayContaining(["[aac @ 0x1] Queue input is backward in time"])
+          ffmpegOutput: expect.stringContaining("[aac @ 0x1] Queue input is backward in time")
         })
       })
     );
+  });
+
+  /**
+   * Most of building a container is not ffmpeg. A recording that needs no
+   * conversion is still probed, compressed and copied into the archive, and
+   * that used to happen behind a window that never opened: no progress, no
+   * cancel, and an app that looked stopped for as long as the file was large.
+   */
+  it("shows the window while the container is built, conversion or not", async () => {
+    const shown: string[] = [];
+    let releaseBuild: () => void = () => {};
+    let buildHasStarted: () => void = () => {};
+    const building = new Promise<void>((resolve) => {
+      buildHasStarted = resolve;
+    });
+    const h = createHarness({
+      readTextFile: async () => VTT,
+      // Says nothing at all, as a recording needing no conversion does.
+      conversionOutput: [],
+      onConversionStarted: () => shown.push("shown"),
+      onConversionFinished: () => shown.push("closed"),
+      createContainer: async (params: { outputPath: string }) => {
+        buildHasStarted();
+        await new Promise<void>((resolve) => {
+          releaseBuild = resolve;
+        });
+        return { path: params.outputPath };
+      }
+    });
+
+    const importing = h.lifecycle.importTranscript();
+    await building;
+    expect(shown, "nothing said the app was working").toEqual(["shown"]);
+
+    releaseBuild();
+    await importing;
+    expect(shown).toEqual(["shown", "closed"]);
   });
 
   /**

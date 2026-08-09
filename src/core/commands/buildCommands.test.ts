@@ -10,6 +10,7 @@ const createDeps = (overrides: {
   isPositionRemembered?: boolean;
   markersVisible?: boolean;
   isContainerDocument?: boolean;
+  isImporting?: boolean;
 } = {}) => {
   const settingsState = {
     themeMode: "light" as const,
@@ -44,7 +45,8 @@ const createDeps = (overrides: {
       exportText: vi.fn(async () => {}),
       importTranscript: vi.fn(async () => {}),
       chooseEditorFont: vi.fn(async () => {}),
-      safeModeActive: () => false
+      safeModeActive: () => false,
+      isImporting: () => overrides.isImporting ?? false
     },
     editor: {
       undoEdit: vi.fn(() => true),
@@ -276,9 +278,17 @@ describe("file.importTranscript command", () => {
     const command = findCommand(buildCommands(deps).definitions, "file.importTranscript");
 
     expect(command.shortcut).toBe("Alt+Shift+I");
+    expect(command.enabled?.()).toBe(true);
     await command.run();
     expect(deps.closeFlow.runOrConfirmDiscard).toHaveBeenCalledOnce();
     expect(deps.fileLifecycle.importTranscript).toHaveBeenCalledOnce();
+  });
+
+  /** A second import is refused, so it should not be offered. */
+  it("is disabled while an import is running", () => {
+    const deps = createDeps({ isImporting: true });
+    const command = findCommand(buildCommands(deps).definitions, "file.importTranscript");
+    expect(command.enabled?.()).toBe(false);
   });
 });
 

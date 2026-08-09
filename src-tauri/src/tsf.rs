@@ -346,6 +346,50 @@ const PROGRESS_FIELDS: [&str; 12] = [
     "size",
 ];
 
+/// How much of ffmpeg's tail is kept to explain a failure with.
+const FAILURE_LINES_KEPT: usize = 12;
+
+/// Which of ffmpeg's last words actually says what went wrong.
+///
+/// Not simply the last one. ffmpeg signs off with `Conversion failed!` after a
+/// line of encoder statistics, so the last line is reliably the least useful
+/// thing it said: the cause — no space, no such file, invalid data — is several
+/// lines above. Measured against a real failing conversion, not guessed at.
+fn failure_reason(said: &[String]) -> String {
+    // The one line ffmpeg always ends a failure with, and the only one that
+    // says nothing at all. Its encoder statistics are thin, but they are a fact
+    // about this conversion and this is the last resort.
+    const SIGN_OFFS: [&str; 1] = ["Conversion failed!"];
+    let explains = |line: &&String| {
+        let lowered = line.to_lowercase();
+        [
+            "error",
+            "invalid",
+            "no space",
+            "denied",
+            "not found",
+            "unable",
+            "cannot",
+            "failed to",
+        ]
+        .iter()
+        .any(|word| lowered.contains(word))
+    };
+
+    if let Some(reason) = said.iter().rev().find(explains) {
+        return reason.clone();
+    }
+    said.iter()
+        .rev()
+        .find(|line| !SIGN_OFFS.iter().any(|sign_off| line.contains(sign_off)))
+        .cloned()
+        .unwrap_or_else(|| {
+            said.last()
+                .cloned()
+                .unwrap_or_else(|| "no output".to_string())
+        })
+}
+
 fn is_progress_field(line: &str) -> bool {
     let Some((key, _)) = line.split_once('=') else {
         return false;
@@ -425,7 +469,7 @@ impl ConversionState {
 
     /// Records the cancellation, then stops the ffmpeg it applies to. In that
     /// order, so the import cannot read the flag as unset in between.
-    fn request_cancel(&self) {
+    pub fn request_cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         if let Ok(mut guard) = self.inner.lock() {
             if let Some(child) = guard.as_mut().and_then(|running| running.child.as_mut()) {
@@ -459,12 +503,17 @@ impl ConversionState {
             running.position_secs = Some(position);
             return;
         }
-        if let Some(duration) = line
-            .split_once("Duration:")
-            .and_then(|(_, rest)| rest.split(',').next())
-            .and_then(parse_timestamp)
-        {
-            running.duration_secs = Some(duration);
+        // The first `Duration:` only, which is the input's. A second input, or
+        // an output ffmpeg chooses to describe, would otherwise move the bar's
+        // scale underneath it partway through.
+        if running.duration_secs.is_none() {
+            if let Some(duration) = line
+                .split_once("Duration:")
+                .and_then(|(_, rest)| rest.split(',').next())
+                .and_then(parse_timestamp)
+            {
+                running.duration_secs = Some(duration);
+            }
         }
         if is_progress_field(&line) {
             return;
@@ -580,11 +629,18 @@ fn convert_to_playable_audio(
                 let _ = std::fs::remove_file(&output);
                 return Err(error);
             }
+            // A cancellation between the spawn and the hand-over found nothing
+            // to kill, so it is applied here instead. Without this the whole
+            // recording is converted — minutes of it — before anyone notices it
+            // was stopped before it began.
+            if state.was_cancelled() {
+                state.request_cancel();
+            }
         }
         None => unwatched_child = Some(child),
     }
 
-    let mut last_line = String::new();
+    let mut said = Vec::new();
     if let Some(stderr) = stderr {
         for line in BufReader::new(stderr).lines() {
             let Ok(line) = line else { break };
@@ -595,7 +651,15 @@ fn convert_to_playable_audio(
             if let Some(state) = state {
                 state.record(line.clone());
             }
-            last_line = line;
+            if is_progress_field(&line) {
+                continue;
+            }
+            // Only the tail is kept: a failing ffmpeg can repeat itself for as
+            // long as it runs, and what explains the failure is near the end.
+            said.push(line);
+            if said.len() > FAILURE_LINES_KEPT {
+                said.remove(0);
+            }
         }
     }
 
@@ -631,13 +695,10 @@ fn convert_to_playable_audio(
 
     if !status.success() {
         let _ = std::fs::remove_file(&output);
-        // ffmpeg's own last line says more about why than anything invented here.
-        let detail = if last_line.is_empty() {
-            "no output"
-        } else {
-            &last_line
-        };
-        return Err(format!("ffmpeg could not convert the recording: {detail}"));
+        return Err(format!(
+            "ffmpeg could not convert the recording: {}",
+            failure_reason(&said)
+        ));
     }
 
     if !audio_is_playable(&output) {
@@ -2247,6 +2308,61 @@ mod tests {
         ] {
             assert!(!is_progress_field(said), "should be shown: {said}");
         }
+    }
+
+    /// ffmpeg's last line is reliably the least useful thing it said. These are
+    /// its real endings, from actual failing conversions.
+    #[test]
+    fn the_failure_reason_is_the_line_that_explains_it() {
+        let disk_full = [
+            "[out#0/ipod @ 0x5f9a] video:0kB audio:708kB",
+            "Error writing trailer of /tmp/out.m4a: No space left on device",
+            "[aac @ 0x58e3] Qavg: nan",
+            "Conversion failed!",
+        ]
+        .map(String::from);
+        assert_eq!(
+            failure_reason(&disk_full),
+            "Error writing trailer of /tmp/out.m4a: No space left on device"
+        );
+
+        let bad_input = [
+            "[in#0 @ 0x55ed] Error opening input: Invalid data found when processing input",
+            "Error opening input file bogus.opus.",
+            "Error opening input files: Invalid data found when processing input",
+        ]
+        .map(String::from);
+        assert_eq!(
+            failure_reason(&bad_input),
+            "Error opening input files: Invalid data found when processing input"
+        );
+
+        // Nothing that explains itself: the sign-offs are still worth less than
+        // the line before them.
+        let unhelpful = ["[aac @ 0x1] Qavg: 110.383", "Conversion failed!"].map(String::from);
+        assert_eq!(failure_reason(&unhelpful), "[aac @ 0x1] Qavg: 110.383");
+
+        assert_eq!(failure_reason(&[]), "no output");
+    }
+
+    /// The bar's scale is the recording's length, and it must not move partway
+    /// through because ffmpeg mentioned another duration.
+    #[test]
+    fn the_length_is_the_first_one_reported() {
+        let state = ConversionState::default();
+        state
+            .begin(
+                std::process::Command::new("true")
+                    .spawn()
+                    .expect("spawn true"),
+            )
+            .expect("begin");
+
+        state.record("  Duration: 00:10:00.00, start: 0.000000, bitrate: 80 kb/s".to_string());
+        state.record("  Duration: 00:00:03.00, start: 0.000000, bitrate: 64 kb/s".to_string());
+
+        let mut guard = state.lock().expect("lock");
+        assert_eq!(guard.as_mut().expect("running").duration_secs, Some(600.0));
     }
 
     /// The bar's two readings, out of the stream they share with the log.

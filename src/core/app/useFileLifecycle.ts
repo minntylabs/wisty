@@ -69,6 +69,8 @@ type UseFileLifecycleDeps = {
    */
   conversion: {
     takeOutput: () => Promise<ConversionOutput>;
+    /** The container has begun being built, whether or not ffmpeg is involved. */
+    onStarted: () => void;
     onOutput: (output: ConversionOutput) => void;
     /** Nothing is converting any more, whether it finished or was stopped. */
     onFinished: () => void;
@@ -1093,7 +1095,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
           probeAudio: deps.fileIo.probeAudio,
           // Watched for as long as the container is being built, which is the
           // only part of this that can convert anything.
+          // The window is opened here rather than by the first thing ffmpeg
+          // says, because most of this step is not ffmpeg: a recording that
+          // needs no conversion still has to be probed, compressed and copied
+          // into the archive, and that used to happen behind a window that
+          // never appeared — no progress, no cancel, and an app that looked
+          // stopped for as long as the recording was large.
           createContainer: async (params) => {
+            deps.conversion.onStarted();
             watch.start();
             try {
               return await deps.fileIo.createContainer(params);
@@ -1118,9 +1127,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         }
         // What ffmpeg said is the explanation for anything that went wrong
         // while it ran, and the error dialog is the only place left to read it.
+        // Joined into one string: the dialog serialises details as JSON, and a
+        // log arriving as a quoted, comma-separated array is no longer a log.
         throw {
           ...failure,
-          details: { ...(failure.details ?? {}), ffmpegOutput }
+          details: { ...(failure.details ?? {}), ffmpegOutput: ffmpegOutput.join("\n") }
         };
       }
 
@@ -1269,6 +1280,18 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       savingCharsWritten,
       savingTotalChars
     },
+    /**
+     * Whether a read or a write of the document is under way — loading, saving,
+     * opening a container, or importing one.
+     *
+     * Published because the app had two notions of "busy" that had drifted
+     * apart: this one, which guards the operations, and one in the view that
+     * decides whether the menus and shortcuts are live. A command the second
+     * allowed and the first refused ran as far as its guard and stopped, from a
+     * menu that looked ready.
+     */
+    isFileOperationInProgress: fileOperationInProgress,
+    isImporting,
     safeModeActive
   };
 };

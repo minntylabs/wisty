@@ -32,11 +32,14 @@ const TICK_MS = 150;
 export type FakeConversion = { stop: () => void };
 
 export const createFakeConversion = (deps: {
+  onStarted: () => void;
   onOutput: (output: ConversionOutput) => void;
   onFinished: () => void;
 }): FakeConversion => {
   let position = 0;
   let tick = 0;
+
+  deps.onStarted();
 
   deps.onOutput({ lines: HEADER, durationSecs: DURATION_SECS, positionSecs: 0 });
 

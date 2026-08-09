@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, lazy } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, lazy, onCleanup } from "solid-js";
 import {
   Root as DialogRoot,
   Portal as DialogPortal,
@@ -79,12 +79,14 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
     wasOpen = open;
   });
 
-  /** Only read by the probe: how many times output has arrived. */
+  /** Counted only where something reads it, which is the probe. */
   const [batches, setBatches] = createSignal(0);
-  createEffect(() => {
-    props.lines;
-    setBatches((seen) => seen + 1);
-  });
+  if (import.meta.env.DEV) {
+    createEffect(() => {
+      props.lines;
+      setBatches((seen) => seen + 1);
+    });
+  }
 
   const summary = createMemo(() => summariseConversion(props.lines));
   const progress = createMemo(() => {
@@ -125,7 +127,9 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
         <DialogContent class="modal-panel conversion-panel" aria-label="Importing">
           <DialogTitle>Importing</DialogTitle>
           <DialogDescription>
-            Converting audio.
+            {props.lines.length > 0
+              ? "This recording is in a format Wisty cannot play, so it is being converted as the container is built."
+              : "Building the container: reading the recording and packaging it with the transcript."}
           </DialogDescription>
 
           <dl class="conversion-facts">
@@ -174,33 +178,53 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
 
           <p class="conversion-position">
             {props.positionSecs === null
-              ? "Starting…"
+              ? props.lines.length > 0
+                ? "Starting…"
+                : "Working…"
               : props.durationSecs === null
                 ? `Converted ${formatDuration(props.positionSecs)}`
                 : `Converted ${formatDuration(props.positionSecs)} of ${formatDuration(props.durationSecs)}`}
           </p>
 
-          <div class="conversion-details">
-            <button
-              type="button"
-              class="conversion-disclosure"
-              aria-expanded={showOutput()}
-              onClick={() => {
-                // Showing it again starts at the end, following. The flag
-                // belongs to the view rather than to the reader, and a stale
-                // one would leave a fresh log stuck at its top.
-                following = true;
-                setShowOutput((shown) => !shown);
-              }}
-            >
-              {showOutput() ? "Hide ffmpeg's output" : "Show ffmpeg's output"}
-            </button>
-            <Show when={showOutput()}>
-              <pre class="conversion-log" ref={log} onScroll={noteScroll}>
-                <For each={props.lines}>{(line) => <div>{line}</div>}</For>
-              </pre>
-            </Show>
-          </div>
+          {/* Nothing to show until ffmpeg has said something, which it only
+              does for a recording that needs converting. */}
+          <Show when={props.lines.length > 0}>
+            <div class="conversion-details">
+              <button
+                type="button"
+                class="conversion-disclosure"
+                aria-expanded={showOutput()}
+                onClick={() => {
+                  // Showing it again starts at the end, following. The flag
+                  // belongs to the view rather than to the reader, and a stale
+                  // one would leave a fresh log stuck at its top.
+                  following = true;
+                  setShowOutput((shown) => !shown);
+                }}
+              >
+                {showOutput() ? "Hide ffmpeg's output" : "Show ffmpeg's output"}
+              </button>
+              <Show when={showOutput()}>
+                <pre
+                  class="conversion-log"
+                  // Cleared when the element goes, so the effect below cannot
+                  // scroll a node that has left the document and `following`
+                  // cannot be read from one.
+                  ref={(element) => {
+                    log = element;
+                    onCleanup(() => {
+                      if (log === element) {
+                        log = undefined;
+                      }
+                    });
+                  }}
+                  onScroll={noteScroll}
+                >
+                  <For each={props.lines}>{(line) => <div>{line}</div>}</For>
+                </pre>
+              </Show>
+            </div>
+          </Show>
 
           <Show when={ConversionProbe ? props.probe : undefined}>
             {(probe) => {

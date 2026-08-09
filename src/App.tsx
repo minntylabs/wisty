@@ -242,6 +242,7 @@ function App() {
         }
         event.preventDefault();
         fakeConversion = createFakeConversion({
+          onStarted: () => setConverting(true),
           onOutput: receiveConversionOutput,
           onFinished: () => {
             fakeConversion = null;
@@ -379,6 +380,7 @@ function App() {
     appVersion,
     conversion: {
       takeOutput: takeConversionOutput,
+      onStarted: () => setConverting(true),
       // Each reading is kept until the next one that has it. The last look the
       // watch takes lands after the conversion has been cleared away, and
       // letting that empty it would blank the window on its way out.
@@ -573,13 +575,23 @@ function App() {
       });
     }
   });
+  /**
+   * Whether the app is busy with something the user must not act behind.
+   *
+   * One definition, in one place. It used to list the file operations by hand
+   * and miss two of them — opening a container and importing one — so the menu
+   * bar stayed live behind the conversion window, and clicking Open there ran
+   * as far as a guard that silently refused it. A dialog whose commands are
+   * offered but declined is worse than one that greys them out.
+   */
   const isInteractionBlocked = () =>
-    fileLifecycle.loadingState.isLoading()
-    || fileLifecycle.savingState.isSaving()
+    fileLifecycle.isFileOperationInProgress()
     || errorModalQueue.open()
     || aboutOpen()
     || addedWordsOpen()
     || largeFileDialog() !== null
+    || importProblems() !== null
+    || converting()
     || closeFlow.confirmDiscardOpen();
 
   const { handleMenuCommandSelected, handleMenuPanelOpenChange } = useMenuCommandPipeline({

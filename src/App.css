@@ -793,6 +793,10 @@ body {
   z-index: 66;
   width: 560px;
   max-width: 94vw;
+  /* Everything open at once is taller than a laptop screen, and a panel
+     centred by transform grows off both ends at once. It scrolls instead. */
+  max-height: 88vh;
+  overflow-y: auto;
 }
 
 /* The facts lifted out of ffmpeg's header, as label and value. */
@@ -872,7 +876,7 @@ body {
 
 .conversion-probe-log {
   margin: 8px 0 0;
-  max-height: 120px;
+  max-height: 76px;
   overflow-y: auto;
   font-family: ui-monospace, monospace;
   font-size: 11px;
@@ -886,7 +890,7 @@ body {
 .conversion-log {
   margin: 8px 0 0;
   padding: 8px;
-  max-height: 220px;
+  max-height: 120px;
   overflow-y: auto;
   border: 1px solid var(--panel-border);
   border-radius: 4px;

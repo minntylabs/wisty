@@ -102,11 +102,10 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
     >
       <DialogPortal>
         <DialogOverlay class="modal-backdrop file-loading-backdrop" />
-        <DialogContent class="modal-panel conversion-panel" aria-label="Converting the recording">
-          <DialogTitle>Converting the Recording</DialogTitle>
+        <DialogContent class="modal-panel conversion-panel" aria-label="Importing">
+          <DialogTitle>Importing</DialogTitle>
           <DialogDescription>
-            This recording is in a format Wisty cannot play, so it is being converted as
-            it is imported. This happens once, when the container is built.
+            Converting audio.
           </DialogDescription>
 
           <dl class="conversion-facts">

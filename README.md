@@ -1,26 +1,17 @@
 # Wisty
 
-Wisty is a lightweight text editor for Linux with a clean, elegant look. It is intended for general use (don't expect code highlighting). It only handles UTF-8 files and has support for very large files (streamed read/write, will attempt to open files up to 1GB).
+Wisty is a text editor for Linux with a clean look. It doesn't have code highlighting but has some special mode related to editing transcripts, which will be documented later. It only handles UTF-8 files and has support for very large files (streamed read/write, will attempt to open files up to 1GB).
 
 Wisty was originally a fork of [Parchment](https://github.com/tywil04/parchment) but has been completely rewritten in Typescript using AI tools.
 
 ![wisty light](images/wisty-light.png)
 ![wisty dark](images/wisty-dark.png)
 
-The main motivation for creating wisty was aesthetics. I wasn't happy with the visual style of any existing Linux graphical text editors. Also, I wanted a simple, non-coding-oriented text editor. I think there is room for at least one editor which doesn't have code parsing and highlighting features. Wisty is just for basic text viewing/editing functions. It has a basic Formatted mode for displaying styled markdown and spell-checking options.
+Wisty has a basic Formatted mode for displaying styled markdown and also has spell-checking options.
 
 ## Linux only
 
-Wisty is a Linux application and will not be ported to Windows or macOS. This
-is a deliberate, permanent decision, not a gap waiting to be filled: there are
-no plans to accept ports, and pull requests adding support for other operating
-systems will not be merged.
-
-The code is written accordingly. Paths are POSIX, the font picker is GTK's, the
-window title fallback is for Wayland, and the save path relies on Unix file
-modes and on device and inode numbers to tell one file from another. None of it
-is guarded by platform conditionals, because there is no other platform to
-guard against.
+Wisty is a Linux application and there are no plans to port it to Windows or macOS. The code is written accordingly. Paths are POSIX, the font picker is GTK's, the window title fallback is for Wayland, and the save path relies on Unix file modes and on device and inode numbers to tell one file from another. None of it is guarded by platform conditionals.
 
 ## Features
 

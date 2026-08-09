@@ -812,7 +812,7 @@ pub fn write_tsf(
 
     let result = write_archive(file, transcript, audio_path, &meta, &audio_member, words);
     if let Err(error) = result {
-        let _ = std::fs::remove_file(&temporary);
+        abandon_partial(&temporary);
         return Err(error);
     }
 
@@ -821,14 +821,16 @@ pub fn write_tsf(
     // behind and nothing at the name the user chose. Packaging a long recording
     // takes seconds, and a Cancel clicked during them meant nothing before this.
     if conversion.is_some_and(|conversion| conversion.was_cancelled()) {
-        let _ = std::fs::remove_file(&temporary);
+        abandon_partial(&temporary);
         return Err(CONVERSION_CANCELLED.to_string());
     }
 
     std::fs::rename(&temporary, output_path).map_err(|error| {
-        let _ = std::fs::remove_file(&temporary);
+        abandon_partial(&temporary);
         format!("Cannot write {}: {error}", output_path.display())
     })?;
+    // It is the container now, not a partial one.
+    forget_partial(&temporary);
 
     let bytes = std::fs::metadata(output_path)
         .map(|metadata| metadata.len())
@@ -1288,11 +1290,120 @@ fn temporary_save_path(parent: &Path, output: &Path) -> PathBuf {
     ))
 }
 
+/// The suffix every half-written container is named with.
+const PARTIAL_SUFFIX: &str = ".partial";
+
+/// Half-written containers this process has open, by path.
+///
+/// A container is built beside its destination and renamed into place, and
+/// every path that can fail removes it on the way out. What none of them covers
+/// is the process ending in the middle — which became reachable when the window
+/// gained a way to close during an import. These are the size of the recording,
+/// so leaving one behind is not a small thing.
+static PARTIAL_FILES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn remember_partial(path: &Path) {
+    if let Ok(mut open) = PARTIAL_FILES.lock() {
+        open.push(path.to_path_buf());
+    }
+}
+
+fn forget_partial(path: &Path) {
+    if let Ok(mut open) = PARTIAL_FILES.lock() {
+        open.retain(|remembered| remembered != path);
+    }
+}
+
+/// Removes a temporary that will not become a container, and stops tracking it.
+fn abandon_partial(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    forget_partial(path);
+}
+
+/// Deletes whatever half-written containers this process still has open.
+///
+/// For the window closing during a save or an import. Nothing waits for the
+/// write to finish: the bytes are going nowhere useful, and the file being
+/// removed is one this process created and has not yet renamed.
+pub fn remove_partial_files() {
+    remove_tracked_partials(None);
+}
+
+/// The work of `remove_partial_files`, narrowed to one directory for the tests.
+///
+/// The registry is process-wide, and the tests run in one process: a drain of
+/// all of it would take away files the tests running alongside are still
+/// writing. `None` is the whole of it, which is what closing means.
+fn remove_tracked_partials(under: Option<&Path>) {
+    let Ok(mut open) = PARTIAL_FILES.lock() else {
+        return;
+    };
+    let (taken, left): (Vec<PathBuf>, Vec<PathBuf>) = open
+        .drain(..)
+        .partition(|path| under.is_none_or(|parent| path.starts_with(parent)));
+    *open = left;
+    for path in taken {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The pid a `.partial` name carries, if it is one of ours.
+///
+/// The form is `.<container name>.<pid>.<sequence>.partial`, and the container
+/// name has dots of its own, so it is read from the right.
+fn partial_owner(file_name: &str) -> Option<u32> {
+    let inner = file_name.strip_prefix('.')?.strip_suffix(PARTIAL_SUFFIX)?;
+    let (rest, _sequence) = inner.rsplit_once('.')?;
+    let (_name, pid) = rest.rsplit_once('.')?;
+    pid.parse().ok()
+}
+
+/// Clears out abandoned containers beside one about to be written.
+///
+/// The startup sweep cannot find these: it knows where converted recordings go,
+/// because this process chose that directory, but a container goes wherever the
+/// user said and there is no record of where that was. Doing it here instead
+/// means a directory is tidied the next time a container is written into it,
+/// which also covers the process being killed outright — the one case the
+/// registry above cannot.
+///
+/// Same rule as the conversion sweep: a live owner protects a file, unless it
+/// is old enough that the pid must have been reused.
+fn sweep_partial_files(parent: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(pid) = partial_owner(name) else {
+            continue;
+        };
+        let owner_lives = Path::new(&format!("/proc/{pid}")).exists();
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > STALE_CONVERSION_AGE);
+        if owner_lives && !stale {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
+}
+
 fn create_temporary_file(parent: &Path, output: &Path) -> Result<(PathBuf, File), String> {
+    sweep_partial_files(parent);
     for _ in 0..TEMPORARY_CREATE_ATTEMPTS {
         let path = temporary_save_path(parent, output);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((path, file)),
+            Ok(file) => {
+                remember_partial(&path);
+                return Ok((path, file));
+            }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(format!("Cannot create {}: {error}", path.display())),
         }
@@ -1387,19 +1498,20 @@ pub fn save_tsf(
         .ok_or_else(|| "Output path has no parent directory".to_string())?;
     let (temporary, file) = create_temporary_file(parent, &output)?;
     if let Err(error) = write_open_archive(file, &transcript, &open) {
-        let _ = std::fs::remove_file(&temporary);
+        abandon_partial(&temporary);
         return Err(error);
     }
     // Check again immediately before replacement. A timestamp/length check
     // alone misses same-sized edits, so source_is_unchanged also fingerprints.
     if let Err(error) = source_is_unchanged(&open) {
-        let _ = std::fs::remove_file(&temporary);
+        abandon_partial(&temporary);
         return Err(error);
     }
     std::fs::rename(&temporary, &output).map_err(|error| {
-        let _ = std::fs::remove_file(&temporary);
+        abandon_partial(&temporary);
         format!("Cannot write {}: {error}", output.display())
     })?;
+    forget_partial(&temporary);
     let mut guard = state
         .0
         .lock()
@@ -1427,15 +1539,14 @@ pub fn save_tsf(
 /// `async` for the same reason as the rest: probing opens and parses the file.
 #[tauri::command(async)]
 pub fn probe_audio_file(path: String) -> Result<serde_json::Value, String> {
+    // `playable` comes back with the rest: whether the player can read this
+    // decides whether importing it means re-encoding the whole recording, and
+    // the import says so before it asks where to put the container rather than
+    // announcing it once the slow part has started. The codec name cannot
+    // answer it — HE-AAC reports "aac" and is still refused — so the probe
+    // settles it by building a decoder while it has the file open anyway.
     let facts = probe_audio(Path::new(&path))?;
-    let mut value = serde_json::to_value(facts)
-        .map_err(|error| format!("Cannot report audio facts: {error}"))?;
-    // Whether the player can read it, which decides whether importing it means
-    // re-encoding the whole recording. Asked here so the import can say so
-    // before it asks where to put the container, rather than announcing it once
-    // the slow part has already started. The codec name cannot answer this:
-    // HE-AAC reports "aac" and is still refused.
-    Ok(value)
+    serde_json::to_value(facts).map_err(|error| format!("Cannot report audio facts: {error}"))
 }
 
 /// The prefix every temporary file a conversion writes is named with.
@@ -1724,6 +1835,107 @@ mod tests {
             leftovers.is_empty(),
             "no temporary file should be left behind"
         );
+    }
+
+    /// A container is built beside its destination and renamed into place, and
+    /// every failure removes it on the way out. What none of them covers is the
+    /// process ending mid-write — which became reachable when the window gained
+    /// a way to close during an import. These are the size of the recording.
+    #[test]
+    fn closing_takes_the_half_written_container_with_it() {
+        let dir = temp_dir("partial-on-close");
+        let output = dir.join("out.tsf");
+        let (temporary, _file) = create_temporary_file(&dir, &output).expect("temporary");
+        assert!(temporary.exists());
+
+        // Scoped to this test's directory: the registry is process-wide and
+        // these tests share a process, so draining all of it would take away
+        // what the tests running alongside are still writing.
+        remove_tracked_partials(Some(&dir));
+
+        assert!(
+            !temporary.exists(),
+            "the half-written container outlived the window"
+        );
+    }
+
+    /// What the registry is still tracking under `dir`.
+    ///
+    /// Filtered by directory because it is process-wide and these tests share a
+    /// process; each test has a directory of its own.
+    fn tracked_partials_in(dir: &Path) -> Vec<PathBuf> {
+        PARTIAL_FILES
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|path| path.starts_with(dir))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_container_that_was_written_is_no_longer_tracked() {
+        // The entry is harmless to leave — the path it names has been renamed
+        // away, so removing it later would do nothing. It is the accumulation
+        // that matters: one every time anything is saved, for the life of the
+        // process.
+        let dir = temp_dir("partial-forgotten");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+        let output = dir.join("out.tsf");
+
+        write_tsf(&output, "text", &audio, draft(), None).expect("write");
+
+        assert!(
+            tracked_partials_in(&dir).is_empty(),
+            "a finished container is still being tracked as half-written"
+        );
+        remove_tracked_partials(Some(&dir));
+        assert!(output.exists(), "a finished container was swept away");
+    }
+
+    #[test]
+    fn the_partial_sweep_reads_the_owner_out_of_the_name() {
+        let mine = format!(".out.tsf.{}.0.partial", std::process::id());
+        assert_eq!(partial_owner(&mine), Some(std::process::id()));
+        // Container names have dots of their own, which is why it reads from
+        // the right rather than the left.
+        assert_eq!(
+            partial_owner(".my.recording.v2.tsf.4321.7.partial"),
+            Some(4321)
+        );
+        assert_eq!(
+            partial_owner("out.tsf.4321.7.partial"),
+            None,
+            "no leading dot"
+        );
+        assert_eq!(partial_owner(".out.tsf.4321.7.tmp"), None, "not a partial");
+        assert_eq!(partial_owner(".out.tsf.partial"), None, "no pid to read");
+    }
+
+    /// The startup sweep cannot find these: it knows where converted recordings
+    /// go because this process chose that directory, but a container goes
+    /// wherever the user said and nothing records where. Tidying the directory
+    /// on the way past is what covers a process that was killed outright.
+    #[test]
+    fn writing_a_container_clears_out_abandoned_ones_beside_it() {
+        let dir = temp_dir("partial-sweep");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+        // Owned by pid 0, which no process has.
+        let abandoned = dir.join(".out.tsf.0.9.partial");
+        std::fs::write(&abandoned, b"half a container").unwrap();
+        // Owned by a process that is very much alive, and so not ours to take.
+        let live = dir.join(format!(".out.tsf.{}.9.partial", std::process::id()));
+        std::fs::write(&live, b"someone else is writing this").unwrap();
+
+        write_tsf(&dir.join("out.tsf"), "text", &audio, draft(), None).expect("write");
+
+        assert!(
+            !abandoned.exists(),
+            "an abandoned container was left behind"
+        );
+        assert!(live.exists(), "a live process's container was taken away");
     }
 
     #[test]

@@ -1181,15 +1181,19 @@ pub fn run() {
             playback::stop_playback,
             playback::release_playback
         ])
+        // Closing in the middle of an import leaves two things behind, and
+        // nothing else will collect either.
+        //
         // A conversion is a child process, and a child process outlives the
-        // parent that spawned it. Quitting mid-import would otherwise leave
-        // ffmpeg encoding into a temporary file that nothing will collect and
-        // nothing will ever read.
-        // A conversion is a child process, and a child process outlives the
-        // parent that spawned it. Both events are watched because neither is
-        // certain: `CloseRequested` comes early enough to stop ffmpeg before the
-        // webview is torn down, and `Destroyed` catches a close that never asked.
-        // Neither fires for a kill, which is what the startup sweep is for.
+        // parent that spawned it: quitting mid-import would leave ffmpeg
+        // encoding into a temporary file nothing will ever read. A container
+        // being packaged is a half-written file beside its destination, the
+        // size of the recording.
+        //
+        // Both events are watched because neither is certain: `CloseRequested`
+        // comes early enough to act before the webview is torn down, and
+        // `Destroyed` catches a close that never asked. Neither fires for a
+        // kill, which is what the sweeps are for.
         .on_window_event(|window, event| {
             if matches!(
                 event,
@@ -1200,6 +1204,7 @@ pub fn run() {
                     .app_handle()
                     .state::<tsf::ConversionState>()
                     .request_cancel();
+                tsf::remove_partial_files();
             }
         })
         .run(tauri::generate_context!())

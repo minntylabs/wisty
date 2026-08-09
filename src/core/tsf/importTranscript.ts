@@ -21,6 +21,9 @@ import { parseSubtitles, validateCues, type Cue, type CueProblem } from "./vtt";
 import { buildTranscript } from "./transcriptBuilder";
 import { createMetaDraft } from "./metaJson";
 
+/** Subtitle files are read and expanded into cue structures in the renderer. */
+export const MAX_SUBTITLE_IMPORT_BYTES = 64 * 1024 * 1024;
+
 export type ImportTranscriptDeps = {
   dialogs: {
     /** The .vtt or .srt. */
@@ -30,6 +33,7 @@ export type ImportTranscriptDeps = {
     /** Where the container goes. */
     pickContainerPath: (defaultPath?: string) => Promise<{ kind: "cancelled" } | { kind: "saved"; filePath: string }>;
   };
+  getFileSize: (filePath: string) => Promise<number>;
   readTextFile: (filePath: string) => Promise<string>;
   probeAudio: (filePath: string) => Promise<{ duration: number; codec: string; playable?: boolean }>;
   createContainer: (params: {
@@ -106,6 +110,13 @@ export const importTranscript = async (
   const subtitles = await deps.dialogs.pickSubtitles();
   if (subtitles.kind === "cancelled") {
     return { kind: "cancelled" };
+  }
+
+  const subtitleSize = await deps.getFileSize(subtitles.filePath);
+  if (subtitleSize >= MAX_SUBTITLE_IMPORT_BYTES) {
+    throw new Error(
+      `Subtitle files must be smaller than ${MAX_SUBTITLE_IMPORT_BYTES / (1024 * 1024)} MB.`
+    );
   }
 
   // Parsed before the recording is asked for: a file that is not a transcript

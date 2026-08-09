@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { importTranscript, type ImportTranscriptDeps } from "./importTranscript";
+import { importTranscript, MAX_SUBTITLE_IMPORT_BYTES, type ImportTranscriptDeps } from "./importTranscript";
 import { SubtitleParseError, type CueProblem } from "./vtt";
 
 const VTT = `WEBVTT
@@ -31,6 +31,7 @@ const createDeps = (overrides: Partial<ImportTranscriptDeps> = {}) => {
       pickAudio,
       pickContainerPath
     },
+    getFileSize: async () => VTT.length,
     readTextFile: async () => VTT,
     probeAudio,
     createContainer,
@@ -89,6 +90,18 @@ describe("importing a transcript", () => {
     const { deps, pickAudio } = createDeps({ readTextFile: async () => "not a transcript at all" });
 
     await expect(importTranscript(deps)).rejects.toBeInstanceOf(SubtitleParseError);
+    expect(pickAudio).not.toHaveBeenCalled();
+  });
+
+  it("refuses an oversized transcript before reading it or asking for the recording", async () => {
+    const readTextFile = vi.fn(async () => VTT);
+    const { deps, pickAudio } = createDeps({
+      getFileSize: async () => MAX_SUBTITLE_IMPORT_BYTES,
+      readTextFile
+    });
+
+    await expect(importTranscript(deps)).rejects.toThrow("Subtitle files must be smaller than 64 MB.");
+    expect(readTextFile).not.toHaveBeenCalled();
     expect(pickAudio).not.toHaveBeenCalled();
   });
 

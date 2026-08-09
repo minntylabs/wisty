@@ -1173,6 +1173,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
                 "Import step 3 of 3: save the transcript container as"
               )
           },
+          getFileSize: deps.fileIo.getFileSize,
           readTextFile: deps.fileIo.readTextFile,
           probeAudio: deps.fileIo.probeAudio,
           // Watched for as long as the container is being built, which is the

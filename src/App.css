@@ -786,7 +786,13 @@ body {
 }
 
 .conversion-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 66;
   width: 560px;
+  max-width: 94vw;
 }
 
 /* ffmpeg's own output: monospaced, scrolling, and bounded so a long

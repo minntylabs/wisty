@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { exists, open as openFile, readTextFile, stat, writeTextFile } from "@tauri-apps/plugin-fs";
 import type { TextFilePresence } from "../app/contracts";
+import type { ConversionOutput } from "../tsf/conversionWatch";
 
 export type OpenFileResult =
   | { kind: "cancelled" }
@@ -403,8 +404,8 @@ export const createContainer = async (
  * Polled rather than pushed: it needs no event permission and no listener to
  * unregister, and a conversion lasts seconds. The lines are ffmpeg's own.
  */
-export const takeConversionOutput = async (): Promise<string[]> =>
-  invoke<string[]>("take_conversion_output");
+export const takeConversionOutput = async (): Promise<ConversionOutput> =>
+  invoke<ConversionOutput>("take_conversion_output");
 
 /** Stops the conversion, and with it the import that asked for it. */
 export const cancelAudioConversion = async (): Promise<void> => {

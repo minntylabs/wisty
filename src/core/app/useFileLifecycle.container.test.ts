@@ -164,7 +164,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     confirmImportProblems: async () => true,
     appVersion: () => "2.5.0",
     conversion: {
-      takeOutput: async () => [],
+      takeOutput: async () => ({ lines: [], durationSecs: null, positionSecs: null }),
       onOutput: () => {},
       onFinished: () => {}
     },

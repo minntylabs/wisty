@@ -284,6 +284,32 @@ struct RunningConversion {
     child: Option<std::process::Child>,
     lines: Vec<String>,
     cancelled: bool,
+    /// The recording's length, as ffmpeg reports it before it starts.
+    duration_secs: Option<f64>,
+    /// How far into the recording it has got.
+    position_secs: Option<f64>,
+}
+
+/// What the window shows: ffmpeg's words, and how far through it is.
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversionOutput {
+    /// What it has said since this was last called.
+    lines: Vec<String>,
+    duration_secs: Option<f64>,
+    position_secs: Option<f64>,
+}
+
+/// `HH:MM:SS.mmm`, which is how ffmpeg writes both a duration and a position.
+fn parse_timestamp(value: &str) -> Option<f64> {
+    let mut seconds = 0.0;
+    let mut parts = 0;
+    for field in value.trim().trim_end_matches(',').split(':') {
+        let field: f64 = field.parse().ok()?;
+        seconds = seconds * 60.0 + field;
+        parts += 1;
+    }
+    (parts == 3).then_some(seconds)
 }
 
 /// Reported distinctly from a failure: the user asking for it to stop is not an
@@ -332,6 +358,8 @@ impl ConversionState {
             child: Some(child),
             lines: Vec::new(),
             cancelled: false,
+            duration_secs: None,
+            position_secs: None,
         });
         Ok(())
     }
@@ -342,12 +370,41 @@ impl ConversionState {
             .map_err(|error| format!("Cannot reach the running conversion: {error}"))
     }
 
+    /// Files one line of ffmpeg's output: as progress, as words, or as both.
+    ///
+    /// `-progress` writes blocks of `key=value` into the same stream as the
+    /// log. They are what moves the bar, and they are also unreadable — a dozen
+    /// lines a second, most of them `N/A` — so they move it and are not shown.
+    /// The line the length comes from is ffmpeg's own `Duration:` header, and
+    /// that one is worth reading, so it counts and is shown.
     fn record(&self, line: String) {
-        if let Ok(mut guard) = self.inner.lock() {
-            if let Some(running) = guard.as_mut() {
-                running.lines.push(line);
-            }
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        let Some(running) = guard.as_mut() else {
+            return;
+        };
+
+        if let Some(position) = line.strip_prefix("out_time=").and_then(parse_timestamp) {
+            running.position_secs = Some(position);
+            return;
         }
+        if let Some(duration) = line
+            .split_once("Duration:")
+            .and_then(|(_, rest)| rest.split(',').next())
+            .and_then(parse_timestamp)
+        {
+            running.duration_secs = Some(duration);
+        }
+        // Every other progress field, including the ones reading `N/A` before
+        // the first frame is written. Nothing ffmpeg says in words starts this
+        // way: its log lines open with a space, a bracket or a capital.
+        if line.split_once('=').is_some_and(|(key, _)| {
+            !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        }) {
+            return;
+        }
+        running.lines.push(line);
     }
 
     fn was_cancelled(&self) -> bool {
@@ -364,15 +421,19 @@ impl ConversionState {
     }
 }
 
-/// The conversion's output since it was last collected.
+/// The conversion's output since it was last collected, and where it has got to.
 #[tauri::command]
 pub fn take_conversion_output(
     state: tauri::State<'_, ConversionState>,
-) -> Result<Vec<String>, String> {
+) -> Result<ConversionOutput, String> {
     let mut guard = state.lock()?;
     Ok(match guard.as_mut() {
-        Some(running) => std::mem::take(&mut running.lines),
-        None => Vec::new(),
+        Some(running) => ConversionOutput {
+            lines: std::mem::take(&mut running.lines),
+            duration_secs: running.duration_secs,
+            position_secs: running.position_secs,
+        },
+        None => ConversionOutput::default(),
     })
 }
 
@@ -407,6 +468,12 @@ fn convert_to_playable_audio(
     let spawned = std::process::Command::new("ffmpeg")
         .arg("-nostdin")
         .arg("-y")
+        // The bar's readings, into the same stream as the log so there is one
+        // pipe to read. `-nostats` drops ffmpeg's own status line, which says
+        // the same thing by overwriting itself with a carriage return — and a
+        // line that never ends is a line a reader of lines never sees.
+        .arg("-nostats")
+        .args(["-progress", "pipe:2"])
         .arg("-i")
         .arg(source)
         // No video, no cover art: an attached picture would otherwise become a
@@ -1958,9 +2025,11 @@ mod tests {
     }
 
     /// ffmpeg's own output is what the window shows, so it has to reach the
-    /// buffer the window collects from while the conversion is still running.
+    /// buffer the window collects from *while the conversion is still running*.
+    /// Collecting it afterwards would prove nothing: a window that fills up
+    /// once the work is over has shown the user an empty box throughout.
     #[test]
-    fn the_conversion_reports_what_ffmpeg_says() {
+    fn the_conversion_reports_what_ffmpeg_says_while_it_runs() {
         let _one_at_a_time = one_conversion_at_a_time();
         if !ffmpeg_present() {
             eprintln!("skipping: ffmpeg is not installed");
@@ -1968,19 +2037,104 @@ mod tests {
         }
         let dir = temp_dir("conversion-output");
         let source = dir.join("rec.opus");
-        if !make_opus(&source) {
+        // Long enough that there is a middle to catch it in.
+        if !make_opus_of_length(&source, 600) {
             return;
         }
+        let state = Arc::new(ConversionState::default());
+
+        let watcher = Arc::clone(&state);
+        let watching = std::thread::spawn(move || {
+            let mut said = Vec::new();
+            let mut duration = None;
+            let mut position = None;
+            for _ in 0..600 {
+                {
+                    let mut guard = watcher.lock().expect("lock");
+                    if let Some(running) = guard.as_mut() {
+                        said.append(&mut running.lines);
+                        duration = duration.or(running.duration_secs);
+                        position = position.or(running.position_secs);
+                    }
+                }
+                if !said.is_empty() && duration.is_some() && position.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            // Stop it: the point is what arrived by now, not the whole file.
+            let mut guard = watcher.lock().expect("lock");
+            if let Some(running) = guard.as_mut() {
+                running.cancelled = true;
+                if let Some(child) = running.child.as_mut() {
+                    let _ = child.kill();
+                }
+            }
+            (said, duration, position)
+        });
+
+        let error = convert_to_playable_audio(&source, Some(&state)).unwrap_err();
+        let (said, duration, position) = watching.join().expect("watcher");
+
+        assert_eq!(error, CONVERSION_CANCELLED);
+        assert!(
+            said.iter().any(|line| line.contains("Stream mapping")),
+            "the window saw none of ffmpeg's own words: {said:?}"
+        );
+        assert!(
+            said.iter().all(|line| !line.starts_with("out_time=")),
+            "the progress fields were shown as if they were words: {said:?}"
+        );
+        // Near enough 600: the container's own duration, rounded as ffmpeg
+        // prints it, not the length asked for.
+        assert!(
+            duration.is_some_and(|duration| (duration - 600.0).abs() < 1.0),
+            "the recording's length was not read: {duration:?}"
+        );
+        assert!(
+            position.is_some_and(|position| position >= 0.0),
+            "no position to put a bar at"
+        );
+        assert!(state.lock().expect("lock").is_none(), "left running");
+    }
+
+    /// The bar's two readings, out of the stream they share with the log.
+    #[test]
+    fn progress_is_read_out_of_the_output_and_kept_out_of_it() {
         let state = ConversionState::default();
+        state
+            .begin(
+                std::process::Command::new("true")
+                    .spawn()
+                    .expect("spawn true"),
+            )
+            .expect("begin");
 
-        let converted = convert_to_playable_audio(&source, Some(&state)).expect("convert");
-        let _ = std::fs::remove_file(converted);
+        for line in [
+            "Input #0, ogg, from 'rec.opus':",
+            "  Duration: 00:01:30.01, start: 0.000000, bitrate: 80 kb/s",
+            "Stream mapping:",
+            "bitrate=N/A",
+            "out_time=N/A",
+            "progress=continue",
+            "out_time=00:00:12.500000",
+        ] {
+            state.record(line.to_string());
+        }
 
-        // Collected after the fact here; the window collects as it goes. Either
-        // way the lines are ffmpeg's, not a summary invented for the occasion.
-        let guard = state.lock().expect("lock");
-        assert!(guard.is_none(), "the conversion should have finished");
-        drop(guard);
+        let mut guard = state.lock().expect("lock");
+        let running = guard.as_mut().expect("running");
+        assert_eq!(running.duration_secs, Some(90.01));
+        assert_eq!(running.position_secs, Some(12.5));
+        assert_eq!(
+            running.lines,
+            [
+                "Input #0, ogg, from 'rec.opus':",
+                "  Duration: 00:01:30.01, start: 0.000000, bitrate: 80 kb/s",
+                "Stream mapping:",
+            ],
+            "the progress fields are unreadable and are not for reading"
+        );
     }
 
     /// Cancelling stops the conversion, says so distinctly, and leaves nothing.
@@ -2027,10 +2181,6 @@ mod tests {
             before,
             "a cancelled conversion left its output behind"
         );
-    }
-
-    fn make_opus(path: &Path) -> bool {
-        make_opus_of_length(path, 1)
     }
 
     fn make_opus_of_length(path: &Path, seconds: u32) -> bool {

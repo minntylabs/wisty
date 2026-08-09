@@ -12,6 +12,8 @@ type AudioConversionModalProps = {
   open: boolean;
   /** ffmpeg's own output, oldest first. */
   lines: string[];
+  /** How far through the recording it is, 0 to 1, or `null` if not yet known. */
+  progress: number | null;
   onCancel: () => void;
 };
 
@@ -54,6 +56,18 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
             This recording is in a format Wisty cannot play, so it is being converted as
             it is imported. This happens once, when the container is built.
           </DialogDescription>
+          <div
+            class="file-loading-progress-shell"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={props.progress === null ? undefined : Math.round(props.progress * 100)}
+          >
+            <div
+              class={`file-loading-progress-fill ${props.progress === null ? "indeterminate" : ""}`.trim()}
+              style={props.progress === null ? undefined : { width: `${props.progress * 100}%` }}
+            />
+          </div>
           <pre class="conversion-log" ref={log}>
             <For each={props.lines}>{(line) => <div>{line}</div>}</For>
           </pre>

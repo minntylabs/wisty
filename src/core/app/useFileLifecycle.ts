@@ -15,7 +15,7 @@ import { toAppError, type AppErrorCode } from "../errors/appError";
 import { createExternalChangeMonitor, externalChangeKindFromSaveError } from "./externalChangeMonitor";
 import { stripMarkers } from "../tsf/markers";
 import { importTranscript } from "../tsf/importTranscript";
-import { createConversionWatch } from "../tsf/conversionWatch";
+import { createConversionWatch, type ConversionOutput } from "../tsf/conversionWatch";
 import type { CueProblem } from "../tsf/vtt";
 
 type UseFileLifecycleDeps = {
@@ -67,8 +67,8 @@ type UseFileLifecycleDeps = {
    * step is shown while it runs.
    */
   conversion: {
-    takeOutput: () => Promise<string[]>;
-    onOutput: (lines: string[]) => void;
+    takeOutput: () => Promise<ConversionOutput>;
+    onOutput: (output: ConversionOutput) => void;
     /** Nothing is converting any more, whether it finished or was stopped. */
     onFinished: () => void;
   };

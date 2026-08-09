@@ -53,6 +53,8 @@ type AppShellProps = {
   audioConversion: {
     open: boolean;
     lines: string[];
+    /** How far through, 0 to 1, or `null` when that is not yet known. */
+    progress: number | null;
     onCancel: () => void;
   };
   showTransferHitBlocker: boolean;
@@ -172,6 +174,7 @@ export const AppShell = (props: AppShellProps) => {
       <AudioConversionModal
         open={props.audioConversion.open}
         lines={props.audioConversion.lines}
+        progress={props.audioConversion.progress}
         onCancel={props.audioConversion.onCancel}
       />
 

@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createConversionWatch } from "./conversionWatch";
+import { createConversionWatch, type ConversionOutput } from "./conversionWatch";
+
+const said = (...lines: string[]): ConversionOutput => ({
+  lines,
+  durationSecs: null,
+  positionSecs: null
+});
 
 describe("watching a conversion", () => {
   beforeEach(() => {
@@ -13,10 +19,10 @@ describe("watching a conversion", () => {
   const setup = (batches: string[][]) => {
     const seen: string[] = [];
     let call = 0;
-    const takeOutput = vi.fn(async () => batches[call++] ?? []);
+    const takeOutput = vi.fn(async () => said(...(batches[call++] ?? [])));
     const watch = createConversionWatch({
       takeOutput,
-      onOutput: (lines) => seen.push(...lines),
+      onOutput: (output) => seen.push(...output.lines),
       intervalMs: 10
     });
     return { watch, seen, takeOutput };
@@ -35,7 +41,7 @@ describe("watching a conversion", () => {
   it("says nothing when there is nothing to say", async () => {
     const onOutput = vi.fn();
     const watch = createConversionWatch({
-      takeOutput: async () => [],
+      takeOutput: async () => said(),
       onOutput,
       intervalMs: 10
     });
@@ -45,6 +51,26 @@ describe("watching a conversion", () => {
     await watch.stop();
 
     expect(onOutput).not.toHaveBeenCalled();
+  });
+
+  /**
+   * ffmpeg goes quiet once it is encoding — the words are all in the header —
+   * so after the first second the only thing still moving is the position.
+   * Reporting only batches with words in them would freeze the bar there.
+   */
+  it("reports a position even when nothing was said", async () => {
+    const onOutput = vi.fn();
+    const watch = createConversionWatch({
+      takeOutput: async () => ({ lines: [], durationSecs: 600, positionSecs: 42 }),
+      onOutput,
+      intervalMs: 10
+    });
+
+    watch.start();
+    await vi.advanceTimersByTimeAsync(10);
+    await watch.stop();
+
+    expect(onOutput).toHaveBeenCalledWith({ lines: [], durationSecs: 600, positionSecs: 42 });
   });
 
   /**
@@ -81,7 +107,7 @@ describe("watching a conversion", () => {
         if (call === 1) {
           throw new Error("busy");
         }
-        return ["still going"];
+        return said("still going");
       },
       onOutput,
       intervalMs: 10
@@ -91,7 +117,7 @@ describe("watching a conversion", () => {
     await vi.advanceTimersByTimeAsync(25);
     await watch.stop();
 
-    expect(onOutput).toHaveBeenCalledWith(["still going"]);
+    expect(onOutput).toHaveBeenCalledWith(said("still going"));
   });
 
   it("does not start twice", async () => {

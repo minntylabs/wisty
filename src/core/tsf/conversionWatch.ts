@@ -10,13 +10,25 @@
  * operation that knows exactly when it starts and stops.
  */
 
+/** What a running conversion has to report: its words, and its place. */
+export type ConversionOutput = {
+  /** ffmpeg's own lines since the last call, oldest first. */
+  lines: string[];
+  /** The recording's length, once ffmpeg has read it. */
+  durationSecs: number | null;
+  /** How far into the recording it has got. */
+  positionSecs: number | null;
+};
+
 export type ConversionWatchDeps = {
   /** Whatever the conversion has said since the last call. */
-  takeOutput: () => Promise<string[]>;
+  takeOutput: () => Promise<ConversionOutput>;
   /** Called with each batch, in the order it was said. */
-  onOutput: (lines: string[]) => void;
+  onOutput: (output: ConversionOutput) => void;
   intervalMs?: number;
 };
+
+const NOTHING: ConversionOutput = { lines: [], durationSecs: null, positionSecs: null };
 
 const DEFAULT_INTERVAL_MS = 150;
 
@@ -26,15 +38,17 @@ export const createConversionWatch = (deps: ConversionWatchDeps) => {
   let running = false;
 
   const poll = async () => {
-    let lines: string[] = [];
+    let output = NOTHING;
     try {
-      lines = await deps.takeOutput();
+      output = await deps.takeOutput();
     } catch {
       // A conversion that cannot be asked what it is doing is still a
       // conversion. Losing its commentary is not worth ending it over.
     }
-    if (lines.length > 0) {
-      deps.onOutput(lines);
+    // A reading with nothing in it is one no conversion is running behind, and
+    // reporting those would open the window for a recording needing no work.
+    if (output.lines.length > 0 || output.positionSecs !== null) {
+      deps.onOutput(output);
     }
     if (running) {
       timer = setTimeout(() => void poll(), intervalMs);

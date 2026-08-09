@@ -57,6 +57,11 @@ type AppShellProps = {
     durationSecs: number | null;
     positionSecs: number | null;
     onCancel: () => void;
+    /** Development build only; see `dev/conversionProbe`. */
+    probe?: {
+      propShape: "eager" | "lazy";
+      onPropShapeChange: (shape: "eager" | "lazy") => void;
+    };
   };
   showTransferHitBlocker: boolean;
   loading: {
@@ -177,6 +182,7 @@ export const AppShell = (props: AppShellProps) => {
         lines={props.audioConversion.lines}
         durationSecs={props.audioConversion.durationSecs}
         positionSecs={props.audioConversion.positionSecs}
+        probe={props.audioConversion.probe}
         onCancel={props.audioConversion.onCancel}
       />
 

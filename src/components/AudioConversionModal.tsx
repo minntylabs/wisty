@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, lazy } from "solid-js";
 import {
   Root as DialogRoot,
   Portal as DialogPortal,
@@ -9,6 +9,11 @@ import {
 } from "@kobalte/core/dialog";
 import { formatDuration, summariseConversion } from "../core/tsf/conversionSummary";
 import { isPinnedToBottom } from "../core/tsf/logScroll";
+/**
+ * Loaded only where it exists. The ternary folds to `null` in a build, which
+ * takes the dynamic import with it — a static import would ship the probe.
+ */
+const ConversionProbe = import.meta.env.DEV ? lazy(() => import("../dev/conversionProbe")) : null;
 
 type AudioConversionModalProps = {
   open: boolean;
@@ -19,6 +24,14 @@ type AudioConversionModalProps = {
   /** How far into the recording it has got. */
   positionSecs: number | null;
   onCancel: () => void;
+  /**
+   * Set only by a development build running the conversion probe. Absent in a
+   * production build, where the probe is not compiled in at all.
+   */
+  probe?: {
+    propShape: "eager" | "lazy";
+    onPropShapeChange: (shape: "eager" | "lazy") => void;
+  };
 };
 
 /**
@@ -64,6 +77,13 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
       setShowOutput(false);
     }
     wasOpen = open;
+  });
+
+  /** Only read by the probe: how many times output has arrived. */
+  const [batches, setBatches] = createSignal(0);
+  createEffect(() => {
+    props.lines;
+    setBatches((seen) => seen + 1);
   });
 
   const summary = createMemo(() => summariseConversion(props.lines));
@@ -175,6 +195,19 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
               </pre>
             </Show>
           </div>
+
+          <Show when={ConversionProbe ? props.probe : undefined}>
+            {(probe) => {
+              const Probe = ConversionProbe as NonNullable<typeof ConversionProbe>;
+              return (
+                <Probe
+                  batches={batches()}
+                  propShape={probe().propShape}
+                  onPropShapeChange={probe().onPropShapeChange}
+                />
+              );
+            }}
+          </Show>
 
           <div class="modal-actions">
             <button class="button subtle" onClick={props.onCancel}>Cancel Import</button>

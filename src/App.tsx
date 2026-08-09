@@ -15,6 +15,8 @@ import { useEditorSettingsSync } from "./core/app/useEditorSettingsSync";
 import { createCoalescingTrigger } from "./core/app/coalescingTrigger";
 import { useFileLifecycle } from "./core/app/useFileLifecycle";
 import { useGlobalKeyRouting } from "./core/app/useGlobalKeyRouting";
+import type { ConversionOutput } from "./core/tsf/conversionWatch";
+import { createFakeConversion, type FakeConversion } from "./dev/fakeConversion";
 import { useMenuCommandPipeline } from "./core/app/useMenuCommandPipeline";
 import { useMenuState } from "./core/app/useMenuState";
 import { useRememberedPosition } from "./core/app/useRememberedPosition";
@@ -200,6 +202,118 @@ function App() {
   const [conversionDuration, setConversionDuration] = createSignal<number | null>(null);
   const [conversionPosition, setConversionPosition] = createSignal<number | null>(null);
 
+  /**
+   * The conversion probe, which exists only in a development build.
+   *
+   * Alt+Shift+P opens the window on a conversion that never finishes, so it
+   * can be watched for as long as it takes: a real import gives about fifteen
+   * seconds, after three file dialogs. The props shape is switchable because
+   * that is the thing under suspicion — see `dev/conversionProbe`.
+   */
+  const [probePropShape, setProbePropShape] = createSignal<"eager" | "lazy">("lazy");
+  let fakeConversion: FakeConversion | null = null;
+
+  const receiveConversionOutput = (output: ConversionOutput) => {
+    setConverting(true);
+    if (output.lines.length > 0) {
+      setConversionLines((seen) => [...seen, ...output.lines]);
+    }
+    if (output.durationSecs !== null) {
+      setConversionDuration(output.durationSecs);
+    }
+    if (output.positionSecs !== null) {
+      setConversionPosition(output.positionSecs);
+    }
+  };
+
+  const finishConversion = () => {
+    setConverting(false);
+    setConversionLines([]);
+    setConversionDuration(null);
+    setConversionPosition(null);
+  };
+
+  if (import.meta.env.DEV) {
+    onMount(() => {
+      const startProbe = (event: KeyboardEvent) => {
+        if (!event.altKey || !event.shiftKey || event.key.toLowerCase() !== "p" || fakeConversion) {
+          return;
+        }
+        event.preventDefault();
+        fakeConversion = createFakeConversion({
+          onOutput: receiveConversionOutput,
+          onFinished: () => {
+            fakeConversion = null;
+            finishConversion();
+          }
+        });
+      };
+      window.addEventListener("keydown", startProbe);
+      onCleanup(() => window.removeEventListener("keydown", startProbe));
+    });
+  }
+
+  /**
+   * One object, made once. Rebuilding it per read would give `Show` a new value
+   * every batch, which would re-create the probe — and the native `<details>`
+   * it watches — on the very cadence the probe is there to observe.
+   */
+  const conversionProbeControls = import.meta.env.DEV
+    ? {
+        get propShape() {
+          return probePropShape();
+        },
+        onPropShapeChange: setProbePropShape
+      }
+    : undefined;
+
+  const cancelConversion = () => {
+    if (fakeConversion) {
+      fakeConversion.stop();
+      return;
+    }
+    void cancelAudioConversion();
+  };
+
+  /**
+   * The window's props, read one field at a time. Written plainly the whole
+   * object is rebuilt on any access, so asking whether the window is open also
+   * reads the output, and everything watching `open` wakes every time ffmpeg
+   * says another word.
+   *
+   * A development build can switch to that plain shape from inside the window,
+   * because it is what the probe is there to compare against.
+   */
+  const buildAudioConversionProps = () => {
+    if (import.meta.env.DEV && probePropShape() === "eager") {
+      return {
+        open: converting(),
+        lines: conversionLines(),
+        durationSecs: conversionDuration(),
+        positionSecs: conversionPosition(),
+        onCancel: cancelConversion,
+        probe: conversionProbeControls
+      };
+    }
+
+    return {
+      get open() {
+        return converting();
+      },
+      get lines() {
+        return conversionLines();
+      },
+      get durationSecs() {
+        return conversionDuration();
+      },
+      get positionSecs() {
+        return conversionPosition();
+      },
+      onCancel: cancelConversion,
+      probe: conversionProbeControls
+    };
+  };
+
   const confirmImportProblems = (problems: CueProblem[], cueCount: number): Promise<boolean> =>
     new Promise((resolve) => {
       setImportProblems({ lines: describeCueProblems(problems), cueCount, resolve });
@@ -264,27 +378,11 @@ function App() {
     appVersion,
     conversion: {
       takeOutput: takeConversionOutput,
-      onOutput: (output) => {
-        setConverting(true);
-        if (output.lines.length > 0) {
-          setConversionLines((seen) => [...seen, ...output.lines]);
-        }
-        // Each reading is kept until the next one that has it. The last look
-        // the watch takes lands after the conversion has been cleared away, and
-        // letting that empty it would blank the window on its way out.
-        if (output.durationSecs !== null) {
-          setConversionDuration(output.durationSecs);
-        }
-        if (output.positionSecs !== null) {
-          setConversionPosition(output.positionSecs);
-        }
-      },
-      onFinished: () => {
-        setConverting(false);
-        setConversionLines([]);
-        setConversionDuration(null);
-        setConversionPosition(null);
-      }
+      // Each reading is kept until the next one that has it. The last look the
+      // watch takes lands after the conversion has been cleared away, and
+      // letting that empty it would blank the window on its way out.
+      onOutput: receiveConversionOutput,
+      onFinished: finishConversion
     }
   });
 
@@ -643,27 +741,7 @@ function App() {
               closeLargeFileDialog();
             }
           }}
-          audioConversion={{
-            // Read one at a time. Written plainly, the whole object is rebuilt
-            // on any access, so asking whether the window is open also reads
-            // the output — and everything watching `open` wakes up every time
-            // ffmpeg says another word.
-            get open() {
-              return converting();
-            },
-            get lines() {
-              return conversionLines();
-            },
-            get durationSecs() {
-              return conversionDuration();
-            },
-            get positionSecs() {
-              return conversionPosition();
-            },
-            onCancel: () => {
-              void cancelAudioConversion();
-            }
-          }}
+          audioConversion={buildAudioConversionProps()}
           importProblems={{
             open: importProblems() !== null,
             problems: importProblems()?.lines ?? [],

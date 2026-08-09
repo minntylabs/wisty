@@ -16,6 +16,7 @@ import { createCoalescingTrigger } from "./core/app/coalescingTrigger";
 import { useFileLifecycle } from "./core/app/useFileLifecycle";
 import { useGlobalKeyRouting } from "./core/app/useGlobalKeyRouting";
 import type { ConversionOutput } from "./core/tsf/conversionWatch";
+import { appendConversionLines } from "./core/tsf/conversionLines";
 import { createFakeConversion, type FakeConversion } from "./dev/fakeConversion";
 import { useMenuCommandPipeline } from "./core/app/useMenuCommandPipeline";
 import { useMenuState } from "./core/app/useMenuState";
@@ -216,7 +217,7 @@ function App() {
   const receiveConversionOutput = (output: ConversionOutput) => {
     setConverting(true);
     if (output.lines.length > 0) {
-      setConversionLines((seen) => [...seen, ...output.lines]);
+      setConversionLines((seen) => appendConversionLines(seen, output.lines));
     }
     if (output.durationSecs !== null) {
       setConversionDuration(output.durationSecs);
@@ -611,6 +612,7 @@ function App() {
     aboutOpen,
     addedWordsOpen,
     largeFileDialogOpen: () => largeFileDialog() !== null,
+    importDialogOpen: () => converting() || importProblems() !== null,
     confirmDiscardOpen: closeFlow.confirmDiscardOpen,
     resolveConfirmDiscard: closeFlow.resolveConfirmDiscard,
     menuPanelOpen: menuState.menuPanelOpen,

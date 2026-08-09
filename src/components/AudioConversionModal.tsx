@@ -185,7 +185,13 @@ export const AudioConversionModal = (props: AudioConversionModalProps) => {
               type="button"
               class="conversion-disclosure"
               aria-expanded={showOutput()}
-              onClick={() => setShowOutput((shown) => !shown)}
+              onClick={() => {
+                // Showing it again starts at the end, following. The flag
+                // belongs to the view rather than to the reader, and a stale
+                // one would leave a fresh log stuck at its top.
+                following = true;
+                setShowOutput((shown) => !shown);
+              }}
             >
               {showOutput() ? "Hide ffmpeg's output" : "Show ffmpeg's output"}
             </button>

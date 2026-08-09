@@ -37,7 +37,15 @@ export const createConversionWatch = (deps: ConversionWatchDeps) => {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let running = false;
 
-  const poll = async () => {
+  /**
+   * Which watch a look belongs to. A look already in flight when `stop` is
+   * called answers after the caller has moved on — and its answer, delivered
+   * then, would report a conversion that has finished as still running. The
+   * window would reopen with nothing behind it and no way to close it.
+   */
+  let generation = 0;
+
+  const poll = async (belongsTo: number) => {
     let output = NOTHING;
     try {
       output = await deps.takeOutput();
@@ -45,13 +53,16 @@ export const createConversionWatch = (deps: ConversionWatchDeps) => {
       // A conversion that cannot be asked what it is doing is still a
       // conversion. Losing its commentary is not worth ending it over.
     }
+    if (belongsTo !== generation) {
+      return;
+    }
     // A reading with nothing in it is one no conversion is running behind, and
     // reporting those would open the window for a recording needing no work.
     if (output.lines.length > 0 || output.positionSecs !== null) {
       deps.onOutput(output);
     }
     if (running) {
-      timer = setTimeout(() => void poll(), intervalMs);
+      timer = setTimeout(() => void poll(belongsTo), intervalMs);
     }
   };
 
@@ -61,7 +72,8 @@ export const createConversionWatch = (deps: ConversionWatchDeps) => {
         return;
       }
       running = true;
-      void poll();
+      generation += 1;
+      void poll(generation);
     },
     /**
      * Stops, after one last look: the lines explaining a failure are printed
@@ -73,7 +85,10 @@ export const createConversionWatch = (deps: ConversionWatchDeps) => {
         clearTimeout(timer);
         timer = null;
       }
-      await poll();
+      // Disowns whatever is already in flight, and takes the last look under a
+      // generation of its own so that look is still delivered.
+      generation += 1;
+      await poll(generation);
     }
   };
 };

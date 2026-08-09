@@ -15,7 +15,7 @@ use std::fs::{File, Metadata, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -277,13 +277,20 @@ fn prepare_audio_for_container(
 #[derive(Default)]
 pub struct ConversionState {
     inner: Mutex<Option<RunningConversion>>,
+    /// Outlives the conversion it stopped.
+    ///
+    /// Converting is one step of an import, and packaging the container after
+    /// it takes seconds more. A cancellation that only reached the running
+    /// ffmpeg would be ignored if it arrived a moment later, and the import the
+    /// user stopped would finish and open anyway. Cleared when an import
+    /// starts, which is the only thing that makes a cancellation stale.
+    cancelled: AtomicBool,
 }
 
 struct RunningConversion {
     /// Held so it can be killed from another thread. Taken out to be waited on.
     child: Option<std::process::Child>,
     lines: Vec<String>,
-    cancelled: bool,
     /// The recording's length, as ffmpeg reports it before it starts.
     duration_secs: Option<f64>,
     /// How far into the recording it has got.
@@ -314,7 +321,47 @@ fn parse_timestamp(value: &str) -> Option<f64> {
 
 /// Reported distinctly from a failure: the user asking for it to stop is not an
 /// error, and the import that asked ends quietly rather than in a dialog.
-const CONVERSION_CANCELLED: &str = "The conversion was cancelled.";
+const CONVERSION_CANCELLED: &str = "The import was cancelled.";
+
+/// The fields `-progress` writes, which move the bar and are not shown.
+///
+/// Named rather than matched by shape. "Any lowercase word before an equals
+/// sign" also describes things ffmpeg says in words, and a warning silently
+/// filed as a progress reading would vanish from the output with nothing left
+/// to say it had ever been printed.
+const PROGRESS_FIELDS: [&str; 12] = [
+    "frame",
+    "fps",
+    "bitrate",
+    "total_size",
+    "out_time_us",
+    "out_time_ms",
+    "out_time",
+    "dup_frames",
+    "drop_frames",
+    "speed",
+    "progress",
+    // ffmpeg's own status line, which says what the bar says. `-nostats` stops
+    // it being printed; this is here for an ffmpeg that ignores that.
+    "size",
+];
+
+fn is_progress_field(line: &str) -> bool {
+    let Some((key, _)) = line.split_once('=') else {
+        return false;
+    };
+    // `stream_0_0_q`, one per output stream, numbered by ffmpeg.
+    let is_stream_quality = key
+        .strip_prefix("stream_")
+        .and_then(|rest| rest.strip_suffix("_q"))
+        .is_some_and(|middle| {
+            middle.split('_').count() == 2
+                && middle.split('_').all(|part| {
+                    !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
+                })
+        });
+    PROGRESS_FIELDS.contains(&key) || is_stream_quality
+}
 
 /// Why building a container did not happen, by code rather than by message.
 ///
@@ -352,16 +399,39 @@ impl From<String> for CreateTsfError {
 }
 
 impl ConversionState {
-    fn begin(&self, child: std::process::Child) -> Result<(), String> {
-        let mut guard = self.lock()?;
+    /// Hands the running ffmpeg over, or hands it back unstarted.
+    ///
+    /// The child comes back on failure because the caller is the only one left
+    /// who can stop it: a process nobody holds carries on converting into a
+    /// temporary file nobody will collect.
+    fn begin(&self, child: std::process::Child) -> Result<(), (String, std::process::Child)> {
+        let mut guard = match self.lock() {
+            Ok(guard) => guard,
+            Err(error) => return Err((error, child)),
+        };
         *guard = Some(RunningConversion {
             child: Some(child),
             lines: Vec::new(),
-            cancelled: false,
             duration_secs: None,
             position_secs: None,
         });
         Ok(())
+    }
+
+    /// Forgets a cancellation, because a new import is not the stopped one.
+    fn begin_import(&self) {
+        self.cancelled.store(false, Ordering::SeqCst);
+    }
+
+    /// Records the cancellation, then stops the ffmpeg it applies to. In that
+    /// order, so the import cannot read the flag as unset in between.
+    fn request_cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        if let Ok(mut guard) = self.inner.lock() {
+            if let Some(child) = guard.as_mut().and_then(|running| running.child.as_mut()) {
+                let _ = child.kill();
+            }
+        }
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Option<RunningConversion>>, String> {
@@ -396,22 +466,14 @@ impl ConversionState {
         {
             running.duration_secs = Some(duration);
         }
-        // Every other progress field, including the ones reading `N/A` before
-        // the first frame is written. Nothing ffmpeg says in words starts this
-        // way: its log lines open with a space, a bracket or a capital.
-        if line.split_once('=').is_some_and(|(key, _)| {
-            !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
-        }) {
+        if is_progress_field(&line) {
             return;
         }
         running.lines.push(line);
     }
 
     fn was_cancelled(&self) -> bool {
-        self.inner
-            .lock()
-            .map(|guard| guard.as_ref().is_some_and(|running| running.cancelled))
-            .unwrap_or(false)
+        self.cancelled.load(Ordering::SeqCst)
     }
 
     fn finish(&self) {
@@ -437,16 +499,13 @@ pub fn take_conversion_output(
     })
 }
 
-/// Stops the conversion, and with it the import that asked for it.
+/// Stops the import: the conversion now, and the packaging that follows it.
+///
+/// Recorded before the running ffmpeg is killed, so the import cannot read the
+/// flag as unset in the moment between the two.
 #[tauri::command]
 pub fn cancel_audio_conversion(state: tauri::State<'_, ConversionState>) -> Result<(), String> {
-    let mut guard = state.lock()?;
-    if let Some(running) = guard.as_mut() {
-        running.cancelled = true;
-        if let Some(child) = running.child.as_mut() {
-            let _ = child.kill();
-        }
-    }
+    state.request_cancel();
     Ok(())
 }
 
@@ -512,7 +571,16 @@ fn convert_to_playable_audio(
     // nobody watching there is nothing to hand it to, and it stays here.
     let mut unwatched_child = None;
     match state {
-        Some(state) => state.begin(child)?,
+        Some(state) => {
+            if let Err((error, mut child)) = state.begin(child) {
+                // Nobody is holding it now, so it is stopped here rather than
+                // left converting into a file no one will collect.
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&output);
+                return Err(error);
+            }
+        }
         None => unwatched_child = Some(child),
     }
 
@@ -635,6 +703,15 @@ pub fn write_tsf(
     if let Err(error) = result {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
+    }
+
+    // The last moment a cancellation can be honoured, and the cheapest: the
+    // container is still a temporary file, so stopping here leaves nothing
+    // behind and nothing at the name the user chose. Packaging a long recording
+    // takes seconds, and a Cancel clicked during them meant nothing before this.
+    if conversion.is_some_and(|conversion| conversion.was_cancelled()) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(CONVERSION_CANCELLED.to_string());
     }
 
     std::fs::rename(&temporary, output_path).map_err(|error| {
@@ -1244,6 +1321,9 @@ pub fn create_tsf(
     meta: serde_json::Value,
     words: Option<String>,
 ) -> Result<CreateTsfResult, CreateTsfError> {
+    // This import has not been cancelled, whatever the last one did.
+    conversion.begin_import();
+
     let output = PathBuf::from(&output_path);
     let audio = PathBuf::from(&audio_path);
 
@@ -2063,13 +2143,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             // Stop it: the point is what arrived by now, not the whole file.
-            let mut guard = watcher.lock().expect("lock");
-            if let Some(running) = guard.as_mut() {
-                running.cancelled = true;
-                if let Some(child) = running.child.as_mut() {
-                    let _ = child.kill();
-                }
-            }
+            watcher.request_cancel();
             (said, duration, position)
         });
 
@@ -2096,6 +2170,83 @@ mod tests {
             "no position to put a bar at"
         );
         assert!(state.lock().expect("lock").is_none(), "left running");
+    }
+
+    /// Converting is one step of an import; packaging the container is the
+    /// next, and takes seconds of its own on a long recording. A cancellation
+    /// arriving during those seconds used to be read by nobody, and the import
+    /// the user stopped finished and opened anyway.
+    #[test]
+    fn cancelling_after_the_conversion_still_stops_the_import() {
+        let dir = temp_dir("cancel-while-packing");
+        let source = dir.join("rec.wav");
+        // Playable as it is, so nothing converts and the cancellation can only
+        // be caught by the packaging step.
+        std::fs::write(&source, wav_bytes(1)).expect("write wav");
+        let output = dir.join("out.tsf");
+        let state = ConversionState::default();
+        state.begin_import();
+        state.request_cancel();
+
+        let error = super::write_tsf(&output, "hello", &source, draft(), None, Some(&state))
+            .expect_err("a cancelled import should not produce a container");
+
+        assert_eq!(error, CONVERSION_CANCELLED);
+        assert!(
+            !output.exists(),
+            "a cancelled import left a container behind"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).expect("read dir").count(),
+            1,
+            "a cancelled import left its temporary file behind"
+        );
+    }
+
+    /// A cancellation belongs to the import it stopped, and to no later one.
+    #[test]
+    fn a_new_import_is_not_cancelled_by_the_last_one() {
+        let dir = temp_dir("cancel-not-sticky");
+        let source = dir.join("rec.wav");
+        std::fs::write(&source, wav_bytes(1)).expect("write wav");
+        let state = ConversionState::default();
+        state.request_cancel();
+
+        state.begin_import();
+
+        let output = dir.join("out.tsf");
+        super::write_tsf(&output, "hello", &source, draft(), None, Some(&state))
+            .expect("the next import should run");
+        assert!(output.exists());
+    }
+
+    /// The filter drops ffmpeg's progress fields and nothing else. Anything it
+    /// takes for one vanishes from the output with nothing left to say it was
+    /// ever printed.
+    #[test]
+    fn only_the_progress_fields_are_treated_as_progress() {
+        for field in [
+            "out_time=00:00:01.000000",
+            "bitrate=  66.1kbits/s",
+            "progress=continue",
+            "total_size=742950",
+            "speed= 215x",
+            "stream_0_0_q=-1.0",
+            "size=     726kB",
+        ] {
+            assert!(is_progress_field(field), "should be a reading: {field}");
+        }
+
+        for said in [
+            "  Duration: 00:01:30.01, start: 0.000000, bitrate: 80 kb/s",
+            "  configuration: --prefix=/usr --extra-version=3ubuntu5",
+            "[aac @ 0x5581f2a] Queue input is backward in time",
+            "Input #0, ogg, from 'rec.opus':",
+            "deprecated_pixel_format=yuvj420p is used",
+            "Stream mapping:",
+        ] {
+            assert!(!is_progress_field(said), "should be shown: {said}");
+        }
     }
 
     /// The bar's two readings, out of the stream they share with the log.
@@ -2163,13 +2314,7 @@ mod tests {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            let mut guard = stopper.lock().expect("lock");
-            if let Some(running) = guard.as_mut() {
-                running.cancelled = true;
-                if let Some(child) = running.child.as_mut() {
-                    let _ = child.kill();
-                }
-            }
+            stopper.request_cancel();
         });
 
         let error = convert_to_playable_audio(&source, Some(&state)).unwrap_err();

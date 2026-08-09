@@ -38,6 +38,8 @@ type HarnessOverrides = {
   confirmOpenLargeFile?: () => Promise<boolean>;
   readTextFile?: () => Promise<string>;
   createContainer?: (params: { outputPath: string }) => Promise<{ path: string }>;
+  /** What the watched conversion says while the container is being built. */
+  conversionOutput?: string[];
 };
 
 const createHarness = (overrides: HarnessOverrides = {}) => {
@@ -164,7 +166,11 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     confirmImportProblems: async () => true,
     appVersion: () => "2.5.0",
     conversion: {
-      takeOutput: async () => ({ lines: [], durationSecs: null, positionSecs: null }),
+      takeOutput: async () => ({
+        lines: overrides.conversionOutput ?? [],
+        durationSecs: null,
+        positionSecs: null
+      }),
       onOutput: () => {},
       onFinished: () => {}
     },
@@ -187,6 +193,7 @@ const createHarness = (overrides: HarnessOverrides = {}) => {
     showFileTooLarge,
     markersEnabled,
     releasePlayback,
+    fileIo: deps.fileIo,
     events
   };
 };
@@ -1537,5 +1544,68 @@ describe("importing a transcript", () => {
       "Unable to import transcript",
       expect.objectContaining({ message: expect.stringContaining("ffmpeg") })
     );
+  });
+
+  /**
+   * The window closes with the failure, taking its output with it, and the
+   * message carries only ffmpeg's last line. The rest of what it said is the
+   * explanation, so it travels with the error to the one place left to read it.
+   */
+  it("reports what ffmpeg said along with the failure", async () => {
+    const h = createHarness({
+      readTextFile: async () => VTT,
+      conversionOutput: [
+        "Input #0, ogg, from '/recordings/a.opus':",
+        "[aac @ 0x1] Queue input is backward in time"
+      ],
+      createContainer: async () => {
+        throw { code: "IMPORT_FAILED", message: "ffmpeg did not finish: exit status 1" };
+      }
+    });
+
+    await h.lifecycle.importTranscript();
+
+    expect(h.showError).toHaveBeenCalledWith(
+      "Unable to import transcript",
+      expect.objectContaining({
+        details: expect.objectContaining({
+          ffmpegOutput: expect.arrayContaining(["[aac @ 0x1] Queue input is backward in time"])
+        })
+      })
+    );
+  });
+
+  /**
+   * A conversion is one running ffmpeg in one slot in Rust. A second import
+   * over the first leaves the first unwatched and unstoppable, and Cancel
+   * reaches only the newer one.
+   */
+  it("refuses to start while one is already running", async () => {
+    let releaseFirst: () => void = () => {};
+    let firstHasStarted: () => void = () => {};
+    const building = new Promise<void>((resolve) => {
+      firstHasStarted = resolve;
+    });
+    const h = createHarness({
+      readTextFile: async () => VTT,
+      createContainer: async (params: { outputPath: string }) => {
+        firstHasStarted();
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        return { path: params.outputPath };
+      }
+    });
+
+    const first = h.lifecycle.importTranscript();
+    // Not a fixed number of flushes: the import asks three questions and probes
+    // the recording before it builds anything.
+    await building;
+
+    await h.lifecycle.importTranscript();
+    releaseFirst();
+    await first;
+
+    expect(h.fileIo.createContainer).toHaveBeenCalledTimes(1);
   });
 });

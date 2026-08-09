@@ -68,6 +68,22 @@ const directory = (filePath: string) => {
   return slash === 0 ? "/" : filePath.slice(0, slash);
 };
 
+/**
+ * The container's suggested name, beside the recording it is built from.
+ *
+ * Joined rather than concatenated: a recording in the root directory would
+ * otherwise be answered with `//name.tsf`, and one named with no directory at
+ * all with `/name.tsf` — a relative path turned into an absolute one.
+ */
+export const suggestedContainerPath = (audioPath: string) => {
+  const name = `${withoutExtension(fileName(audioPath))}.tsf`;
+  const parent = directory(audioPath);
+  if (parent === "") {
+    return name;
+  }
+  return parent.endsWith("/") ? `${parent}${name}` : `${parent}/${name}`;
+};
+
 /** The cue count, for a caller that wants to say what it built. */
 const countCues = (cues: readonly Cue[]) => cues.length;
 
@@ -97,8 +113,7 @@ export const importTranscript = async (
     return { kind: "cancelled" };
   }
 
-  const suggested = `${directory(audio.filePath)}/${withoutExtension(fileName(audio.filePath))}.tsf`;
-  const output = await deps.dialogs.pickContainerPath(suggested);
+  const output = await deps.dialogs.pickContainerPath(suggestedContainerPath(audio.filePath));
   if (output.kind === "cancelled") {
     return { kind: "cancelled" };
   }

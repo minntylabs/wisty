@@ -120,6 +120,37 @@ describe("watching a conversion", () => {
     expect(onOutput).toHaveBeenCalledWith(said("still going"));
   });
 
+  /**
+   * The caller closes the window the moment `stop` returns. A look still in
+   * flight then would answer into a conversion that is over, reopening the
+   * window with nothing behind it and nothing left to close it.
+   */
+  it("does not deliver a look that was in flight when it stopped", async () => {
+    const seen: string[] = [];
+    let release: (output: ConversionOutput) => void = () => {};
+    let call = 0;
+    const watch = createConversionWatch({
+      takeOutput: () => {
+        call += 1;
+        if (call === 1) {
+          return new Promise<ConversionOutput>((resolve) => {
+            release = resolve;
+          });
+        }
+        return Promise.resolve(said());
+      },
+      onOutput: (output) => seen.push(...output.lines),
+      intervalMs: 10
+    });
+
+    watch.start();
+    await watch.stop();
+    release(said("late line"));
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(seen).toEqual([]);
+  });
+
   it("does not start twice", async () => {
     const { watch, takeOutput } = setup([]);
 

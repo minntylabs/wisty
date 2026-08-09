@@ -16,6 +16,7 @@ import { createExternalChangeMonitor, externalChangeKindFromSaveError } from "./
 import { stripMarkers } from "../tsf/markers";
 import { importTranscript } from "../tsf/importTranscript";
 import { createConversionWatch, type ConversionOutput } from "../tsf/conversionWatch";
+import { appendConversionLines } from "../tsf/conversionLines";
 import type { CueProblem } from "../tsf/vtt";
 
 type UseFileLifecycleDeps = {
@@ -135,6 +136,16 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    */
   const [isOpeningContainer, setIsOpeningContainer] = createSignal(false);
 
+  /**
+   * An import runs from the first file dialog to the container being opened.
+   *
+   * It counts as busy for the same reason a load does, and for one of its own:
+   * a conversion is a single running ffmpeg held in one slot in Rust, so a
+   * second import started over the first leaves the first's process unwatched
+   * and unstoppable, and Cancel reaches only the newer one.
+   */
+  const [isImporting, setIsImporting] = createSignal(false);
+
   let activeLoadId = 0;
   let loadingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
   let activeSaveId = 0;
@@ -154,7 +165,8 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    * would overwrite a file from a half-loaded editor, or reload the editor out
    * from under a save that is still streaming.
    */
-  const fileOperationInProgress = () => isLoading() || isSaving() || isOpeningContainer();
+  const fileOperationInProgress = () =>
+    isLoading() || isSaving() || isOpeningContainer() || isImporting();
 
   /**
    * Whether the document an operation started from is still the open one.
@@ -1038,9 +1050,30 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    * closed would be a file operation the user has to go and find.
    */
   const importTranscriptFile = async () => {
+    // One import at a time, and none while the document is being read or
+    // written: an import ends by replacing the open document, and the
+    // conversion in the middle of it is a single process with one slot to
+    // live in.
+    if (fileOperationInProgress()) {
+      return;
+    }
+    setIsImporting(true);
+
+    /**
+     * Kept because the window is gone by the time a failure is reported, and
+     * with it the output that explains the failure. Bounded the same way the
+     * window's copy is: ffmpeg can warn once per frame.
+     */
+    let ffmpegOutput: string[] = [];
+
     const watch = createConversionWatch({
       takeOutput: deps.conversion.takeOutput,
-      onOutput: deps.conversion.onOutput
+      onOutput: (output) => {
+        if (output.lines.length > 0) {
+          ffmpegOutput = appendConversionLines(ffmpegOutput, output.lines);
+        }
+        deps.conversion.onOutput(output);
+      }
     });
 
     await runWithErrorMessage(async () => {
@@ -1073,13 +1106,22 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
           appVersion: deps.appVersion
         });
       } catch (error) {
+        const failure = toAppError(error, "UNKNOWN", "Unable to import transcript");
         // Stopping the conversion is the user ending the import, not a fault
         // to explain to them.
-        if (toAppError(error, "UNKNOWN", "Unable to import transcript").code === "IMPORT_CANCELLED") {
+        if (failure.code === "IMPORT_CANCELLED") {
           deps.editor.focus();
           return;
         }
-        throw error;
+        if (ffmpegOutput.length === 0) {
+          throw error;
+        }
+        // What ffmpeg said is the explanation for anything that went wrong
+        // while it ran, and the error dialog is the only place left to read it.
+        throw {
+          ...failure,
+          details: { ...(failure.details ?? {}), ffmpegOutput }
+        };
       }
 
       if (result.kind === "cancelled") {
@@ -1090,7 +1132,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await releaseContainer();
       await openContainerAtPath(result.filePath);
       await rememberRecentFile(result.filePath);
-    }, "Unable to import transcript");
+    }, "Unable to import transcript").finally(() => setIsImporting(false));
   };
 
   /**

@@ -1,6 +1,10 @@
 import { createSignal } from "solid-js";
 
-const MENU_ID_BY_MNEMONIC: Record<string, string> = {
+/**
+ * Alt plus one of these opens a menu, and it is checked before any shortcut,
+ * so an `Alt+<letter>` command sharing a letter here would never run.
+ */
+export const MENU_ID_BY_MNEMONIC: Record<string, string> = {
   f: "file",
   e: "edit",
   o: "format",

@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dialogSave = vi.hoisted(() => vi.fn());
+const dialogOpen = vi.hoisted(() => vi.fn());
 const fsStat = vi.hoisted(() => vi.fn());
 const fsExists = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: vi.fn(),
+  open: dialogOpen,
   save: dialogSave
 }));
 
@@ -21,6 +22,8 @@ import {
   getTextFilePresence,
   isContainerPath,
   normalizeStreamChunkSizeBytes,
+  openAudioFilePath,
+  openSubtitleFilePath,
   saveContainerPathAs,
   saveTextExportPathAs
 } from "./fileService";
@@ -65,6 +68,55 @@ describe("Save As extensions", () => {
       kind: "saved",
       filePath: "/home/dan/my.exports/export.txt"
     });
+  });
+});
+
+/**
+ * The system file dialogs are the only part of an import that is not Wisty's
+ * own window, and by default all three say "Open File" or "Save File". The
+ * title is the one part of them that can be written, so each says which of the
+ * three questions it is asking — otherwise the import is three identical
+ * dialogs in a row with no way to tell them apart.
+ */
+describe("import dialog titles", () => {
+  beforeEach(() => {
+    dialogOpen.mockReset();
+    dialogOpen.mockResolvedValue(null);
+    dialogSave.mockReset();
+    dialogSave.mockResolvedValue(null);
+  });
+
+  it("asks for the transcript by name, as step one", async () => {
+    await openSubtitleFilePath();
+    expect(dialogOpen.mock.calls[0][0].title).toBe(
+      "Import step 1 of 3: choose the transcript (VTT or SRT)"
+    );
+  });
+
+  it("asks for the recording by name, as step two", async () => {
+    await openAudioFilePath();
+    expect(dialogOpen.mock.calls[0][0].title).toBe("Import step 2 of 3: choose the recording");
+  });
+
+  it("titles a save the caller has named", async () => {
+    await saveContainerPathAs(undefined, "Import step 3 of 3: save the transcript container as");
+    expect(dialogSave.mock.calls[0][0].title).toBe(
+      "Import step 3 of 3: save the transcript container as"
+    );
+  });
+
+  /**
+   * The same picker saves the open container elsewhere, where a title about
+   * importing would be a lie. Untitled, it gets the system's own wording.
+   */
+  it("leaves an untitled save to the system", async () => {
+    await saveContainerPathAs("/archive/mum.tsf");
+    expect(dialogSave.mock.calls[0][0].title).toBeUndefined();
+  });
+
+  it("names the export for what it is", async () => {
+    await saveTextExportPathAs();
+    expect(dialogSave.mock.calls[0][0].title).toBe("Export as plain text");
   });
 });
 

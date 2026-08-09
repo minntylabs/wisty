@@ -87,11 +87,13 @@ export const openTextFilePath = async (defaultPath?: string): Promise<OpenFilePa
 const openFilePathWithFilter = async (
   name: string,
   extensions: string[],
-  defaultPath?: string
+  defaultPath?: string,
+  title?: string
 ): Promise<OpenFilePathResult> => {
   const selected = normalizeDialogPath(await openDialog({
     multiple: false,
     defaultPath: defaultPath || undefined,
+    title,
     filters: [{ name, extensions }]
   }));
   return selected ? { kind: "opened", filePath: selected } : { kind: "cancelled" };
@@ -105,7 +107,15 @@ const openFilePathWithFilter = async (
  * files it did not produce.
  */
 export const openSubtitleFilePath = (defaultPath?: string) =>
-  openFilePathWithFilter("Timed transcript", ["vtt", "srt"], defaultPath);
+  openFilePathWithFilter(
+    "Timed transcript",
+    ["vtt", "srt"],
+    defaultPath,
+    // An import asks three questions through three system dialogs, all of
+    // which say "Open File" unless told otherwise. The title is the only part
+    // of them Wisty can write, so it carries both the question and the count.
+    "Import step 1 of 3: choose the transcript (VTT or SRT)"
+  );
 
 /**
  * The recording the transcript describes.
@@ -118,7 +128,8 @@ export const openAudioFilePath = (defaultPath?: string) =>
   openFilePathWithFilter(
     "Audio",
     ["m4a", "mp4", "aac", "mp3", "wav", "flac", "ogg", "opus", "webm", "mka"],
-    defaultPath
+    defaultPath,
+    "Import step 2 of 3: choose the recording"
   );
 
 export const saveTextFileAs = async (text: string, defaultPath?: string): Promise<SaveAsResult> => {
@@ -141,9 +152,10 @@ export const saveTextFilePathAs = async (defaultPath?: string): Promise<SaveAsRe
   };
 };
 
-const savePathWithExtension = async (defaultPath: string | undefined, name: string, extension: string): Promise<SaveAsResult> => {
+const savePathWithExtension = async (defaultPath: string | undefined, name: string, extension: string, title?: string): Promise<SaveAsResult> => {
   const selected = await save({
     defaultPath: defaultPath || undefined,
+    title,
     filters: [{ name, extensions: [extension] }]
   });
   if (!selected) return { kind: "cancelled" };
@@ -155,8 +167,15 @@ const savePathWithExtension = async (defaultPath: string | undefined, name: stri
   return { kind: "saved", filePath: selected };
 };
 
-export const saveContainerPathAs = (defaultPath?: string) => savePathWithExtension(defaultPath, "Transcript container", "tsf");
-export const saveTextExportPathAs = (defaultPath?: string) => savePathWithExtension(defaultPath, "Plain text", "txt");
+/**
+ * Where to write a container. The title is the caller's because this answers
+ * two different questions: saving the open container elsewhere, and naming the
+ * one an import is about to build.
+ */
+export const saveContainerPathAs = (defaultPath?: string, title?: string) =>
+  savePathWithExtension(defaultPath, "Transcript container", "tsf", title);
+export const saveTextExportPathAs = (defaultPath?: string) =>
+  savePathWithExtension(defaultPath, "Plain text", "txt", "Export as plain text");
 
 export const saveTextFile = async (filePath: string, text: string): Promise<void> => {
   await writeTextFile(filePath, text);

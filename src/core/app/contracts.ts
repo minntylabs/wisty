@@ -102,7 +102,7 @@ export type FileDialogsPort = {
   /** The recording that transcript describes. */
   openAudioFilePath: (defaultPath?: string) => Promise<OpenTextFilePathResult>;
   saveTextFilePathAs: (defaultPath?: string) => Promise<SaveTextFileAsResult>;
-  saveContainerPathAs: (defaultPath?: string) => Promise<SaveTextFileAsResult>;
+  saveContainerPathAs: (defaultPath?: string, title?: string) => Promise<SaveTextFileAsResult>;
   saveTextExportPathAs: (defaultPath?: string) => Promise<SaveTextFileAsResult>;
 };
 

@@ -1050,7 +1050,11 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
           dialogs: {
             pickSubtitles: () => deps.fileDialogs.openSubtitleFilePath(deps.settings.state.lastDirectory),
             pickAudio: (defaultPath) => deps.fileDialogs.openAudioFilePath(defaultPath),
-            pickContainerPath: (defaultPath) => deps.fileDialogs.saveContainerPathAs(defaultPath)
+            pickContainerPath: (defaultPath) =>
+              deps.fileDialogs.saveContainerPathAs(
+                defaultPath,
+                "Import step 3 of 3: save the transcript container as"
+              )
           },
           readTextFile: deps.fileIo.readTextFile,
           probeAudio: deps.fileIo.probeAudio,

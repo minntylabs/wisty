@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildCommands } from "./buildCommands";
+import { MENU_ID_BY_MNEMONIC } from "../app/useMenuState";
 import type { FormatViewMode } from "../settings/settingsTypes";
 
 const createDeps = (overrides: {
@@ -270,11 +271,11 @@ describe("remember position command", () => {
 });
 
 describe("file.importTranscript command", () => {
-  it("is bound to Ctrl+Shift+T and asks about unsaved work first", async () => {
+  it("is bound to Alt+I and asks about unsaved work first", async () => {
     const deps = createDeps();
     const command = findCommand(buildCommands(deps).definitions, "file.importTranscript");
 
-    expect(command.shortcut).toBe("Ctrl+Shift+T");
+    expect(command.shortcut).toBe("Alt+I");
     await command.run();
     expect(deps.closeFlow.runOrConfirmDiscard).toHaveBeenCalledOnce();
     expect(deps.fileLifecycle.importTranscript).toHaveBeenCalledOnce();
@@ -293,6 +294,20 @@ describe("file.importTranscript command", () => {
 const CLAIMED_BY_THE_WEBVIEW = ["Ctrl+Shift+I", "Ctrl+Shift+C", "F12"];
 
 describe("shortcuts", () => {
+  /**
+   * Alt plus a menu's letter opens that menu, and the router never sees the
+   * event. A command bound to the same combination is simply unreachable.
+   */
+  it("leaves the menu mnemonics alone", () => {
+    const deps = createDeps();
+    const swallowed = buildCommands(deps)
+      .definitions.filter((definition) => /^Alt\+[A-Za-z]$/.test(definition.shortcut ?? ""))
+      .filter((definition) => MENU_ID_BY_MNEMONIC[(definition.shortcut as string).slice(-1).toLowerCase()])
+      .map((definition) => `${definition.shortcut} (${definition.id})`);
+
+    expect(swallowed, "these open a menu instead of running").toEqual([]);
+  });
+
   it("leaves the webview's own shortcuts alone", () => {
     const deps = createDeps();
     const taken = buildCommands(deps)

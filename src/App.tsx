@@ -709,16 +709,28 @@ function App() {
             errorModalQueue.enqueue(payload);
           }}
           addedWordsDialog={{
-            open: addedWordsOpen(),
-            words: addedWords(),
+            get open() {
+              return addedWordsOpen();
+            },
+            get words() {
+              return addedWords();
+            },
             onClose: closeAddedWordsDialog,
             onRemove: (word) => void removeAddedWord(word)
           }}
           largeFileDialog={{
-            open: largeFileDialog() !== null,
-            kind: largeFileDialog()?.kind ?? "confirm",
-            filePath: largeFileDialog()?.filePath ?? "",
-            sizeBytes: largeFileDialog()?.sizeBytes ?? 0,
+            get open() {
+              return largeFileDialog() !== null;
+            },
+            get kind() {
+              return largeFileDialog()?.kind ?? "confirm";
+            },
+            get filePath() {
+              return largeFileDialog()?.filePath ?? "";
+            },
+            get sizeBytes() {
+              return largeFileDialog()?.sizeBytes ?? 0;
+            },
             onCancel: () => {
               const state = largeFileDialog();
               if (state?.kind === "confirm") {
@@ -743,9 +755,15 @@ function App() {
           }}
           audioConversion={buildAudioConversionProps()}
           importProblems={{
-            open: importProblems() !== null,
-            problems: importProblems()?.lines ?? [],
-            cueCount: importProblems()?.cueCount ?? 0,
+            get open() {
+              return importProblems() !== null;
+            },
+            get problems() {
+              return importProblems()?.lines ?? [];
+            },
+            get cueCount() {
+              return importProblems()?.cueCount ?? 0;
+            },
             onCancel: () => closeImportProblems(false),
             onImportAnyway: () => closeImportProblems(true)
           }}
@@ -754,36 +772,83 @@ function App() {
             || (fileLifecycle.savingState.isSaving() && !fileLifecycle.savingState.showSavingOverlay())
           }
           loading={{
-            overlayOpen: fileLifecycle.loadingState.showLoadingOverlay(),
-            filePath: fileLifecycle.loadingState.loadingFilePath(),
-            bytesRead: fileLifecycle.loadingState.loadingBytesRead(),
-            totalBytes: fileLifecycle.loadingState.loadingTotalBytes(),
-            largeLineSafeMode: fileLifecycle.loadingState.loadingLargeLineSafeMode(),
+            get overlayOpen() {
+              return fileLifecycle.loadingState.showLoadingOverlay();
+            },
+            get filePath() {
+              return fileLifecycle.loadingState.loadingFilePath();
+            },
+            get bytesRead() {
+              return fileLifecycle.loadingState.loadingBytesRead();
+            },
+            get totalBytes() {
+              return fileLifecycle.loadingState.loadingTotalBytes();
+            },
+            get largeLineSafeMode() {
+              return fileLifecycle.loadingState.loadingLargeLineSafeMode();
+            },
             onCancel: fileLifecycle.requestCancelLoading
           }}
           saving={{
-            overlayOpen: fileLifecycle.savingState.showSavingOverlay(),
-            filePath: fileLifecycle.savingState.savingFilePath(),
-            charsWritten: fileLifecycle.savingState.savingCharsWritten(),
-            totalChars: fileLifecycle.savingState.savingTotalChars(),
+            get overlayOpen() {
+              return fileLifecycle.savingState.showSavingOverlay();
+            },
+            get filePath() {
+              return fileLifecycle.savingState.savingFilePath();
+            },
+            get charsWritten() {
+              return fileLifecycle.savingState.savingCharsWritten();
+            },
+            get totalChars() {
+              return fileLifecycle.savingState.savingTotalChars();
+            },
             onCancel: fileLifecycle.requestCancelSaving
           }}
           statusBar={{
-            enabled: settingsStore.state.statusBarEnabled,
-            ...cursorPosition(),
-            words: wordCount(),
-            formatViewMode: settingsStore.state.formatViewMode
+            get enabled() {
+              return settingsStore.state.statusBarEnabled;
+            },
+            get currentLine() {
+              return cursorPosition().currentLine;
+            },
+            get totalLines() {
+              return cursorPosition().totalLines;
+            },
+            get currentCharacter() {
+              return cursorPosition().currentCharacter;
+            },
+            get totalCharacters() {
+              return cursorPosition().totalCharacters;
+            },
+            get words() {
+              return wordCount();
+            },
+            get formatViewMode() {
+              return settingsStore.state.formatViewMode;
+            }
           }}
           errorModal={{
-            open: errorModalQueue.open(),
-            entry: errorModalQueue.current(),
+            get open() {
+              return errorModalQueue.open();
+            },
+            get entry() {
+              return errorModalQueue.current();
+            },
             onDismiss: dismissErrorModalAndRefocus
           }}
           externalChange={{
-            visible: fileLifecycle.externalChangeState.isVisible(),
-            kind: fileLifecycle.externalChangeState.change()?.kind,
-            filePath: fileLifecycle.externalChangeState.change()?.filePath ?? "",
-            busy: isInteractionBlocked(),
+            get visible() {
+              return fileLifecycle.externalChangeState.isVisible();
+            },
+            get kind() {
+              return fileLifecycle.externalChangeState.change()?.kind;
+            },
+            get filePath() {
+              return fileLifecycle.externalChangeState.change()?.filePath ?? "";
+            },
+            get busy() {
+              return isInteractionBlocked();
+            },
             // The path is taken at the click, not when the reload runs: a dirty
             // document goes through the discard prompt first, and the conflict
             // can be retracted while it is open.

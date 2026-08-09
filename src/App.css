@@ -795,10 +795,44 @@ body {
   max-width: 94vw;
 }
 
+/* The facts lifted out of ffmpeg's header, as label and value. */
+.conversion-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+.conversion-facts dt {
+  color: var(--status-text);
+}
+
+.conversion-facts dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.conversion-position {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--status-text);
+}
+
+.conversion-details {
+  margin-top: 12px;
+}
+
+.conversion-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--status-text);
+}
+
 /* ffmpeg's own output: monospaced, scrolling, and bounded so a long
    conversion cannot grow the dialog past the window. */
 .conversion-log {
-  margin: 12px 0 0;
+  margin: 8px 0 0;
   padding: 8px;
   max-height: 220px;
   overflow-y: auto;

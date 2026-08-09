@@ -268,3 +268,44 @@ describe("remember position command", () => {
     expect(command.checked?.()).toBe(false);
   });
 });
+
+describe("file.importTranscript command", () => {
+  it("is bound to Ctrl+Shift+I and asks about unsaved work first", async () => {
+    const deps = createDeps();
+    const command = findCommand(buildCommands(deps).definitions, "file.importTranscript");
+
+    expect(command.shortcut).toBe("Ctrl+Shift+I");
+    await command.run();
+    expect(deps.closeFlow.runOrConfirmDiscard).toHaveBeenCalledOnce();
+    expect(deps.fileLifecycle.importTranscript).toHaveBeenCalledOnce();
+  });
+});
+
+/**
+ * Two commands on one shortcut is a bug the router cannot report: it runs
+ * whichever it finds first, and the other simply never happens.
+ */
+describe("shortcuts", () => {
+  it("gives no shortcut to two commands", () => {
+    for (const isMac of [false, true]) {
+      const deps = createDeps();
+      deps.platform.isMac = isMac;
+      const bound = buildCommands(deps)
+        .definitions.filter((definition) => definition.shortcut)
+        .map((definition) => `${definition.shortcut} (${definition.id})`);
+
+      const seen = new Map<string, string>();
+      const clashes: string[] = [];
+      for (const entry of bound) {
+        const shortcut = entry.slice(0, entry.indexOf(" ("));
+        const owner = seen.get(shortcut);
+        if (owner) {
+          clashes.push(`${shortcut}: ${owner} and ${entry}`);
+        }
+        seen.set(shortcut, entry);
+      }
+
+      expect(clashes, `on ${isMac ? "macOS" : "Linux"}`).toEqual([]);
+    }
+  });
+});

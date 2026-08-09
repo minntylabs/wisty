@@ -53,8 +53,9 @@ type AppShellProps = {
   audioConversion: {
     open: boolean;
     lines: string[];
-    /** How far through, 0 to 1, or `null` when that is not yet known. */
-    progress: number | null;
+    /** ffmpeg's readings, each `null` until it has reported one. */
+    durationSecs: number | null;
+    positionSecs: number | null;
     onCancel: () => void;
   };
   showTransferHitBlocker: boolean;
@@ -174,7 +175,8 @@ export const AppShell = (props: AppShellProps) => {
       <AudioConversionModal
         open={props.audioConversion.open}
         lines={props.audioConversion.lines}
-        progress={props.audioConversion.progress}
+        durationSecs={props.audioConversion.durationSecs}
+        positionSecs={props.audioConversion.positionSecs}
         onCancel={props.audioConversion.onCancel}
       />
 

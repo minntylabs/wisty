@@ -196,12 +196,9 @@ function App() {
    */
   const [conversionLines, setConversionLines] = createSignal<string[]>([]);
   const [converting, setConverting] = createSignal(false);
-  /**
-   * How far through the recording ffmpeg is, as a fraction, or `null` while
-   * there is nothing to divide by — a recording whose length ffmpeg has not
-   * reported yet, or cannot.
-   */
-  const [conversionProgress, setConversionProgress] = createSignal<number | null>(null);
+  /** ffmpeg's two readings: the recording's length, and how far into it it is. */
+  const [conversionDuration, setConversionDuration] = createSignal<number | null>(null);
+  const [conversionPosition, setConversionPosition] = createSignal<number | null>(null);
 
   const confirmImportProblems = (problems: CueProblem[], cueCount: number): Promise<boolean> =>
     new Promise((resolve) => {
@@ -272,17 +269,21 @@ function App() {
         if (output.lines.length > 0) {
           setConversionLines((seen) => [...seen, ...output.lines]);
         }
-        const { durationSecs, positionSecs } = output;
-        if (durationSecs !== null && durationSecs > 0 && positionSecs !== null) {
-          // Clamped: ffmpeg can pass its own reported length by a fraction of a
-          // second at the end, and a bar that overshoots looks broken.
-          setConversionProgress(Math.min(1, positionSecs / durationSecs));
+        // Each reading is kept until the next one that has it. The last look
+        // the watch takes lands after the conversion has been cleared away, and
+        // letting that empty it would blank the window on its way out.
+        if (output.durationSecs !== null) {
+          setConversionDuration(output.durationSecs);
+        }
+        if (output.positionSecs !== null) {
+          setConversionPosition(output.positionSecs);
         }
       },
       onFinished: () => {
         setConverting(false);
         setConversionLines([]);
-        setConversionProgress(null);
+        setConversionDuration(null);
+        setConversionPosition(null);
       }
     }
   });
@@ -645,7 +646,8 @@ function App() {
           audioConversion={{
             open: converting(),
             lines: conversionLines(),
-            progress: conversionProgress(),
+            durationSecs: conversionDuration(),
+            positionSecs: conversionPosition(),
             onCancel: () => {
               void cancelAudioConversion();
             }

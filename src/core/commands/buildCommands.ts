@@ -125,6 +125,7 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
     {
       id: "file.importTranscript",
       label: "Import Transcript...",
+      shortcut: commandShortcut(deps.platform.isMac, "I", true),
       // Ends by opening the container it builds, so it replaces the open
       // document and asks about unsaved work first, as Open does.
       run: () => deps.closeFlow.runOrConfirmDiscard(deps.fileLifecycle.importTranscript)

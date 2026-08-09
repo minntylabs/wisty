@@ -178,3 +178,74 @@ describe("remembered positions", () => {
     expect(store.state.rememberedPositions).toEqual({});
   });
 });
+
+describe("settings written before the store can take them", () => {
+  /**
+   * `load` used to set `ready` on its last line, so a read that threw left it
+   * false — and every preference for the rest of the session was applied to the
+   * screen and silently dropped. The user is told once, at startup, and would
+   * never hear about it again.
+   */
+  it("still persists after the settings file could not be read", async () => {
+    const { Store } = await import("@tauri-apps/plugin-store");
+    (Store.load as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      get: vi.fn(async () => {
+        throw new Error("the settings file is unreadable");
+      }),
+      set: vi.fn(async (key: string, value: unknown) => {
+        backing.set(key, value);
+      }),
+      save: vi.fn(async () => {})
+    });
+
+    const store = createSettingsStore();
+    await expect(store.load()).rejects.toThrow("unreadable");
+    expect(store.ready(), "nothing would ever be saved again").toBe(true);
+
+    await store.actions.setFontSize(21);
+    expect(backing.get("fontSize")).toBe(21);
+  });
+
+  it("keeps a setting changed while the file was being read", async () => {
+    // The file holds what was there before the change, so applying it wholesale
+    // would undo on screen something the user had already done.
+    backing.set("fontSize", 12);
+    let releaseRead = () => {};
+    const reading = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const { Store } = await import("@tauri-apps/plugin-store");
+    (Store.load as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      get: vi.fn(async (key: string) => {
+        await reading;
+        return backing.get(key);
+      }),
+      set: vi.fn(async (key: string, value: unknown) => {
+        backing.set(key, value);
+      }),
+      save: vi.fn(async () => {})
+    });
+
+    const store = createSettingsStore();
+    const loading = store.load();
+    await store.actions.setFontSize(30);
+    releaseRead();
+    await loading;
+
+    expect(store.state.fontSize, "the file overwrote a newer choice").toBe(30);
+    // And it reaches disk, rather than being dropped for arriving too early.
+    expect(backing.get("fontSize")).toBe(30);
+  });
+
+  it("leaves untouched settings to come from the file", async () => {
+    backing.set("fontSize", 12);
+    backing.set("fontFamily", "Inter");
+    const store = createSettingsStore();
+    const loading = store.load();
+    await store.actions.setFontSize(30);
+    await loading;
+
+    expect(store.state.fontSize).toBe(30);
+    expect(store.state.fontFamily).toBe("Inter");
+  });
+});

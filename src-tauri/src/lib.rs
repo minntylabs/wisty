@@ -1190,15 +1190,18 @@ pub fn run() {
         // being packaged is a half-written file beside its destination, the
         // size of the recording.
         //
-        // Both events are watched because neither is certain: `CloseRequested`
-        // comes early enough to act before the webview is torn down, and
-        // `Destroyed` catches a close that never asked. Neither fires for a
-        // kill, which is what the sweeps are for.
+        // `Destroyed` only, and deliberately not `CloseRequested`. That one is a
+        // question, not an answer: the frontend vetoes it whenever there is
+        // unsaved work and asks before deciding. Acting on it destroyed an
+        // import the user then chose to keep, and deleted the temporary a save
+        // in progress was still writing into. Neither is recoverable, and both
+        // happened before the prompt was even answered.
+        //
+        // Nothing fires for a kill, which is what the two sweeps are for: the
+        // startup sweep for converted recordings, and the directory sweep for
+        // half-written containers.
         .on_window_event(|window, event| {
-            if matches!(
-                event,
-                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
-            ) {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
                 use tauri::Manager;
                 window
                     .app_handle()

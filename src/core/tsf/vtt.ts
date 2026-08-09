@@ -46,10 +46,11 @@ const TIMESTAMP = /^(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})$/;
 /** The cue timing line, e.g. `00:12:14.120 --> 00:12:16.800 align:start`. */
 const TIMING_LINE = /^(\S+)\s*-->\s*(\S+)(?:\s+.*)?$/;
 
-const parseTimestamp = (value: string): number => {
+/** The seconds a timestamp names, or `null` when it is not one. */
+const readTimestamp = (value: string): number | null => {
   const match = TIMESTAMP.exec(value.trim());
   if (!match) {
-    throw new SubtitleParseError(`Not a timestamp: ${value}`);
+    return null;
   }
   const [, hours, minutes, seconds, fraction] = match;
   // "1" means 100ms, "12" 120ms, "123" 123ms — pad rather than divide by a
@@ -164,14 +165,22 @@ export const parseSubtitles = (source: string): Cue[] => {
       continue;
     }
 
-    const start = parseTimestamp(timing[1]);
+    // A line can look like a timing line — something, an arrow, something —
+    // without being one. Skipping the block costs one cue; throwing discarded
+    // the entire transcript over a single line, which is the opposite of what
+    // this parser does everywhere else: it clamps backwards spans and skips
+    // blocks it cannot read rather than refusing the file.
+    const start = readTimestamp(timing[1]);
+    const declaredEnd = readTimestamp(timing[2]);
+    if (start === null || declaredEnd === null) {
+      continue;
+    }
     // A cue that ends before it starts keeps its text and loses its span.
     // Throwing would discard an entire transcript over one bad timing, and the
     // words are the part worth keeping; a marker with nothing to play is
     // visibly useless, where a guessed end would be quietly wrong.
     // `validateCues` reports it as `backwards` so it can be surfaced before a
     // container is written.
-    const declaredEnd = parseTimestamp(timing[2]);
     const end = Math.max(start, declaredEnd);
     const clamped = declaredEnd < start;
 

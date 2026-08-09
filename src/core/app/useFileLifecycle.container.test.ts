@@ -226,6 +226,172 @@ const untilSaving = async (h: ReturnType<typeof createHarness>) => {
   }
 };
 
+describe("history writes never fail an operation", () => {
+  /**
+   * The save side has always routed these through best-effort helpers, with a
+   * comment saying why: by the time they run the bytes are on disk, so a
+   * settings failure must not be reported as the operation failing. Every open
+   * path called the settings actions directly, so a document that was open and
+   * on screen could still be announced as "Unable to open file".
+   */
+  it("opens the container even when the directory history cannot be written", async () => {
+    const h = createHarness({
+      setLastDirectory: async () => {
+        throw new Error("settings unavailable");
+      }
+    });
+
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    expect(h.showError).not.toHaveBeenCalled();
+    expect(h.document.state).toMatchObject({ kind: "container", filePath: CONTAINER });
+  });
+
+  it("opens the container even when the recent-file list cannot be written", async () => {
+    const h = createHarness();
+    h.addRecentFile.mockRejectedValueOnce(new Error("settings unavailable"));
+
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    expect(h.showError).not.toHaveBeenCalled();
+    expect(h.document.state).toMatchObject({ kind: "container", filePath: CONTAINER });
+  });
+});
+
+describe("one write at a time", () => {
+  /**
+   * Starting a write claims activeSaveId, and the write already running reads
+   * that as a cancellation and abandons itself quietly. Export used to do that
+   * to a save in flight, so the document was silently not written.
+   */
+  it("refuses to export while a save is running", async () => {
+    let releaseSave = () => {};
+    const h = createHarness({
+      saveContainer: async () => {
+        await new Promise<void>((resolve) => {
+          releaseSave = resolve;
+        });
+      }
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    const saving = h.lifecycle.saveFile();
+    await untilSaving(h);
+    await h.lifecycle.exportText();
+
+    expect(h.startSaveFileStream, "the export cancelled the save").not.toHaveBeenCalled();
+
+    releaseSave();
+    await saving;
+    // The sharper damage: the export's own saving state claimed the id, so the
+    // container save's cleanup no-longer matched and the overlay never cleared.
+    expect(h.lifecycle.savingState.isSaving(), "the app was left looking busy").toBe(false);
+  });
+
+  it("refuses a second Save As while a save is running", async () => {
+    let releaseSave = () => {};
+    const h = createHarness({
+      saveContainer: async () => {
+        await new Promise<void>((resolve) => {
+          releaseSave = resolve;
+        });
+      }
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    const saving = h.lifecycle.saveFile();
+    await untilSaving(h);
+    await h.lifecycle.saveFileAs();
+
+    expect(h.saveContainer).toHaveBeenCalledTimes(1);
+
+    releaseSave();
+    await saving;
+  });
+});
+
+describe("checking the file on disk", () => {
+  /**
+   * The check runs when the window regains focus, which can land in the gap
+   * between a save's rename and the new baseline being taken. There the file on
+   * disk is the one Wisty just wrote and the baseline is the one it replaced,
+   * so the check reported the user's own save as somebody else's change.
+   */
+  it("does not ask while a save is running", async () => {
+    let releaseSave = () => {};
+    // A real baseline, and then a different file on disk: without the guard
+    // this is exactly the shape of the save's own write being mistaken for
+    // somebody else's change.
+    let version = { size: 10, modifiedMs: 1, device: 1, inode: 1 };
+    const h = createHarness({
+      getTextFileVersion: async () => version,
+      saveContainer: async () => {
+        version = { size: 99, modifiedMs: 2, device: 1, inode: 1 };
+        await new Promise<void>((resolve) => {
+          releaseSave = resolve;
+        });
+      }
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    const saving = h.lifecycle.saveFile();
+    await untilSaving(h);
+    const raised = await h.lifecycle.checkForExternalChange();
+
+    expect(raised, "the save was reported as an external change").toBe(false);
+    expect(h.lifecycle.externalChangeState.change()).toBeNull();
+    releaseSave();
+    await saving;
+  });
+});
+
+describe("a container changed on disk while it was open", () => {
+  /**
+   * The text saves have carried conflict codes for a while, and the frontend
+   * turns them into the banner — reload, overwrite, dismiss. The container save
+   * reported the same situation as a bare sentence, so it arrived as a generic
+   * failure dialog with nothing to do about it.
+   */
+  it("raises the banner rather than a failure dialog", async () => {
+    const h = createHarness({
+      saveContainer: async () => {
+        throw {
+          code: "SAVE_EXTERNAL_CHANGE",
+          message: "The transcript container changed on disk after it was opened."
+        };
+      }
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+
+    await h.lifecycle.saveFile();
+
+    expect(h.showError, "reported as a plain failure").not.toHaveBeenCalled();
+    expect(h.lifecycle.externalChangeState.change()).toMatchObject({
+      filePath: CONTAINER,
+      kind: "changed"
+    });
+  });
+
+  it("raises the conflict again when the overwrite hits it too", async () => {
+    // Overwrite is the user answering the banner, and a dismissal is of the
+    // version they were shown. A refusal on the way through is a new version,
+    // so the banner has to come back rather than stay out of the way.
+    const h = createHarness({
+      saveContainer: async () => {
+        throw { code: "SAVE_EXTERNAL_CHANGE", message: "changed" };
+      }
+    });
+    await h.lifecycle.openFileAtPath(CONTAINER);
+    await h.lifecycle.saveFile();
+    h.lifecycle.dismissExternalChange();
+    expect(h.lifecycle.externalChangeState.isVisible()).toBe(false);
+
+    await h.lifecycle.overwriteExternalChange();
+
+    expect(h.lifecycle.externalChangeState.isVisible(), "the conflict stayed dismissed").toBe(true);
+  });
+});
+
 describe("opening a container", () => {
   it("loads its transcript into the editor", async () => {
     const h = createHarness();

@@ -354,3 +354,51 @@ describe("validateCues", () => {
     expect(validateCues(cues, 1709.6)).toEqual([]);
   });
 });
+
+describe("a line that only looks like a cue timing", () => {
+  /**
+   * TIMING_LINE takes any line as a timing if it has an arrow between two
+   * non-space runs. Reading the timestamps used to throw when it wasn't one,
+   * discarding the whole transcript — the opposite of what this parser does
+   * everywhere else, where a backwards span is clamped and an unreadable block
+   * is skipped rather than the file refused.
+   */
+  it("keeps the rest of the file", () => {
+    const cues = parseSubtitles(
+      [
+        "WEBVTT",
+        "",
+        "step1 --> step2",
+        "text under a line that is not a timing",
+        "",
+        "00:00:01.000 --> 00:00:02.000",
+        "<v ALICE>The cue that follows it."
+      ].join("\n")
+    );
+
+    expect(cues).toHaveLength(1);
+    expect(cues[0]).toMatchObject({ start: 1, end: 2, text: "The cue that follows it.", speaker: "ALICE" });
+  });
+
+  it("still refuses a file with nothing readable in it", () => {
+    // The message is about the file, not about one line, and that is right:
+    // a file with no cue in it is not a transcript.
+    expect(() => parseSubtitles("WEBVTT\n\nstep1 --> step2\ntext\n")).toThrow(SubtitleParseError);
+  });
+
+  it("skips only the block whose end time is unreadable", () => {
+    const cues = parseSubtitles(
+      [
+        "WEBVTT",
+        "",
+        "00:00:01.000 --> nonsense",
+        "dropped",
+        "",
+        "00:00:03.000 --> 00:00:04.000",
+        "kept"
+      ].join("\n")
+    );
+
+    expect(cues.map((cue) => cue.text)).toEqual(["kept"]);
+  });
+});

@@ -181,3 +181,60 @@ describe("watching a conversion", () => {
     expect(takeOutput.mock.calls.length).toBeLessThanOrEqual(3);
   });
 });
+
+describe("a look that fails", () => {
+  /**
+   * `running: false` is not "unknown" — it is "the conversion has ended", and
+   * the window changes what it says and what its bar measures on it. One
+   * dropped call mid-conversion used to move it on to the packaging step.
+   */
+  it("does not report the conversion as finished", async () => {
+    const seen: boolean[] = [];
+    let call = 0;
+    const watch = createConversionWatch({
+      intervalMs: 1,
+      takeOutput: async () => {
+        call += 1;
+        if (call === 2) {
+          throw new Error("the conversion could not be reached");
+        }
+        return { lines: [], durationSecs: null, positionSecs: null, running: true };
+      },
+      onOutput: (output) => seen.push(output.running)
+    });
+
+    watch.start();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await watch.stop();
+
+    expect(seen.length).toBeGreaterThan(2);
+    expect(seen.slice(0, 3), "a failed look said the conversion had ended").toEqual([true, true, true]);
+  });
+
+  it("starts each conversion knowing nothing about the last", async () => {
+    const seen: boolean[] = [];
+    let reachable = true;
+    const watch = createConversionWatch({
+      intervalMs: 1,
+      takeOutput: async () => {
+        if (!reachable) {
+          throw new Error("unreachable");
+        }
+        return { lines: [], durationSecs: null, positionSecs: null, running: true };
+      },
+      onOutput: (output) => seen.push(output.running)
+    });
+
+    watch.start();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await watch.stop();
+
+    reachable = false;
+    seen.length = 0;
+    watch.start();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await watch.stop();
+
+    expect(seen.every((running) => running === false)).toBe(true);
+  });
+});

@@ -287,6 +287,22 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     setSaveCancelRequested(true);
   };
 
+  /**
+   * Whether a write is already under way, and so whether another may start.
+   *
+   * Starting one claims `activeSaveId`, and the write already running reads
+   * that as a cancellation and abandons itself — quietly, since a cancelled
+   * save is the user's own doing and says nothing. So a second Save, a Save As
+   * or an Export landing on a save in flight used to throw the first one away
+   * with no sign that anything had happened. `saveContainerAtPath` has always
+   * refused for this reason; everything else went unguarded.
+   *
+   * The menus are blocked while a save runs, so this is not reachable from the
+   * UI today. Nothing enforces that, and the cost of being wrong is a file the
+   * user believes was written.
+   */
+  const saveAlreadyRunning = () => isSaving();
+
   const applySafeMode = (enabled: boolean) => {
     setSafeModeActive(enabled);
     deps.editor.setLargeLineSafeMode(enabled);
@@ -632,8 +648,8 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // file at it now is a deletion, which a text open cannot say because its
     // own read has yet to happen.
     await externalChanges.capture(filePath);
-    await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
-    await deps.settings.actions.addRecentFile(filePath);
+    await rememberLastDirectory(filePath);
+    await rememberRecentFile(filePath);
     deps.rememberedPosition.restore(filePath);
     deps.editor.focus();
   };
@@ -720,8 +736,8 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         selected.filePath,
         () => loadEditorFileAsCleanFromFsStream(selected.filePath, size.fileSize)
       );
-      await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(selected.filePath));
-      await deps.settings.actions.addRecentFile(selected.filePath);
+      await rememberLastDirectory(selected.filePath);
+      await rememberRecentFile(selected.filePath);
       deps.rememberedPosition.restore(selected.filePath);
       deps.editor.focus();
     }, "Unable to open file");
@@ -739,8 +755,8 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
           filePath,
           () => loadEditorFileAsCleanFromFsStream(filePath)
         );
-        await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
-        await deps.settings.actions.addRecentFile(filePath);
+        await rememberLastDirectory(filePath);
+        await rememberRecentFile(filePath);
         deps.rememberedPosition.restore(filePath);
         deps.editor.focus();
       } catch (error) {
@@ -763,8 +779,8 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
         filePath,
         () => loadEditorFileAsCleanFromLaunchStream(filePath, fileSizeBytes)
       );
-      await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
-      await deps.settings.actions.addRecentFile(filePath);
+      await rememberLastDirectory(filePath);
+      await rememberRecentFile(filePath);
       deps.rememberedPosition.restore(filePath);
       deps.editor.focus();
     }, "Unable to open launch file");
@@ -781,7 +797,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // known here and its absence is no deletion. A baseline is taken all the
     // same: it is what stops a later save writing over whatever is there.
     await externalChanges.capture(filePath, { missingIsExpected: true });
-    await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
+    await rememberLastDirectory(filePath);
     deps.rememberedPosition.restore(filePath);
     deps.editor.focus();
   };
@@ -799,7 +815,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     // it is about to create is not there yet, and a save has to say so rather
     // than write over whatever arrives at that path in the meantime.
     await externalChanges.capture(filePath, { missingIsExpected: true });
-    await deps.settings.actions.setLastDirectory(deps.fileIo.getDirectoryFromFilePath(filePath));
+    await rememberLastDirectory(filePath);
     deps.editor.focus();
   };
 
@@ -937,7 +953,21 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     const startedAt = deps.document.state.filePath;
     const saveId = beginSavingState(filePath, transcript.length);
     try {
-      await deps.fileIo.saveContainer(filePath, transcript);
+      try {
+        await deps.fileIo.saveContainer(filePath, transcript);
+      } catch (error) {
+        // The same treatment the text saves have always had. Rust refuses a
+        // container whose file changed under it, and that refusal used to
+        // arrive as a plain "Unable to save file" dialog with nothing to do
+        // about it — for the one document kind where being changed underneath
+        // costs a recording rather than some text.
+        const kind = externalChangeKindFromSaveError(error);
+        if (kind) {
+          await externalChanges.raiseFromSaveRace(filePath, kind);
+          return false;
+        }
+        throw error;
+      }
       setSavingCharsWritten(transcript.length);
       if (!documentStillOpenAt(startedAt)) {
         return false;
@@ -954,6 +984,9 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   const saveFileAs = async () => {
+    if (saveAlreadyRunning()) {
+      return;
+    }
     if (deps.document.state.kind === "container") {
       await runWithErrorMessage(async () => {
         const result = await deps.fileDialogs.saveContainerPathAs(deps.document.state.filePath);
@@ -998,6 +1031,9 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   const saveFile = async () => {
+    if (saveAlreadyRunning()) {
+      return;
+    }
     if (deps.document.state.kind === "container") {
       const containerPath = deps.document.state.filePath;
       await runWithErrorMessage(async () => {
@@ -1059,7 +1095,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
   };
 
   const exportText = async () => {
-    if (deps.document.state.kind !== "container") {
+    if (deps.document.state.kind !== "container" || saveAlreadyRunning()) {
       return;
     }
     await runWithErrorMessage(async () => {
@@ -1235,6 +1271,12 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       if (deps.document.state.kind === "container") {
         // The container's own writer. The text one would put the transcript
         // where the archive was and take the recording with it.
+        //
+        // Its answer is not consulted, and need not be: the guard above already
+        // refuses while a save is running, which is the only reason it declines
+        // that this could act on. If the document changed under the write, the
+        // banner belongs to a document that is no longer open and reviving it
+        // would be the wrong thing to do.
         await saveContainerAtPath(change.filePath);
         return;
       }
@@ -1249,6 +1291,26 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
       await rememberLastDirectory(change.filePath);
       deps.editor.focus();
     }, "Unable to save file");
+  };
+
+  /**
+   * Compares the file on disk with the baseline, when it is a fair comparison.
+   *
+   * Called when the window regains focus, which can happen at any moment —
+   * including in the gap between a save's rename and the new baseline being
+   * taken. There the file on disk is the one Wisty has just written and the
+   * baseline is the one it replaced, so the check would report the user's own
+   * save as somebody else's change. Loads have the same shape.
+   *
+   * Not the monitor's business: it is asked a question about two files and
+   * answers it correctly. What it cannot know is that the question was worth
+   * asking, which is why the reload and overwrite actions carry this guard too.
+   */
+  const checkForExternalChange = async () => {
+    if (fileOperationInProgress()) {
+      return false;
+    }
+    return externalChanges.check();
   };
 
   const dismissExternalChange = () => {
@@ -1292,7 +1354,7 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
     chooseEditorFont,
     requestCancelLoading,
     requestCancelSaving,
-    checkForExternalChange: externalChanges.check,
+    checkForExternalChange: checkForExternalChange,
     reloadExternalChange,
     overwriteExternalChange,
     dismissExternalChange,

@@ -55,10 +55,23 @@ export const createConversionWatch = (deps: ConversionWatchDeps) => {
    */
   let generation = 0;
 
+  /**
+   * What the last answer said about whether ffmpeg was running.
+   *
+   * A look that fails has learned nothing, and `NOTHING` says `running: false`
+   * — which is not "unknown" but "the conversion has ended". Delivered as it
+   * stood, one dropped call mid-conversion moved the window on to the packaging
+   * step and changed what its progress bar claimed to measure. Repeating the
+   * last known answer keeps a failed look silent about a question it cannot
+   * answer.
+   */
+  let lastRunning = false;
+
   const poll = async (belongsTo: number) => {
-    let output = NOTHING;
+    let output = { ...NOTHING, running: lastRunning };
     try {
       output = await deps.takeOutput();
+      lastRunning = output.running;
     } catch {
       // A conversion that cannot be asked what it is doing is still a
       // conversion. Losing its commentary is not worth ending it over.
@@ -82,6 +95,8 @@ export const createConversionWatch = (deps: ConversionWatchDeps) => {
         return;
       }
       running = true;
+      // What the last conversion was doing says nothing about this one.
+      lastRunning = false;
       generation += 1;
       void poll(generation);
     },

@@ -250,6 +250,11 @@ impl PreparedAudio {
     fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Whether ffmpeg made this, and so whether it still has to prove itself.
+    fn was_converted(&self) -> bool {
+        self.temporary
+    }
 }
 
 impl Drop for PreparedAudio {
@@ -487,6 +492,13 @@ impl ConversionState {
             Ok(guard) => guard,
             Err(error) => return Err((error, child)),
         };
+        // Refused rather than replaced. Dropping a `Child` neither kills it nor
+        // waits for it, so overwriting a running conversion left ffmpeg
+        // encoding into a temporary nobody holds — and the startup sweep will
+        // not collect that either, because the pid that owns it is alive.
+        if guard.as_ref().is_some_and(|running| !running.finished) {
+            return Err(("A recording is already being converted.".to_string(), child));
+        }
         *guard = Some(RunningConversion {
             child: Some(child),
             finished: false,
@@ -751,14 +763,10 @@ fn convert_to_playable_audio(
         ));
     }
 
-    if !audio_is_playable(&output) {
-        let _ = std::fs::remove_file(&output);
-        return Err(
-            "The converted recording still cannot be played, so it has not been stored."
-                .to_string(),
-        );
-    }
-
+    // Not checked here. `write_tsf` probes what comes back from this — it needs
+    // the duration and codec for meta.json — and that probe now answers whether
+    // the player can read it too. Asking separately meant opening and decoding
+    // the whole of a freshly written recording twice in a row.
     Ok(output)
 }
 
@@ -802,6 +810,17 @@ pub fn write_tsf(
     let audio_path = prepared.path();
 
     let facts = probe_audio(audio_path)?;
+    // The check the conversion used to make on its own output, moved here so
+    // the file is read once. It applies to a converted recording — one that has
+    // just been re-encoded and still cannot be played is a conversion that
+    // failed quietly — and never to one stored as it was, which was tested
+    // before the decision to store it untouched was taken.
+    if prepared.was_converted() && !facts.playable {
+        return Err(
+            "The converted recording still cannot be played, so it has not been stored."
+                .to_string(),
+        );
+    }
     let audio_member = audio_member_name(audio_path);
     let meta = complete_meta(meta_draft, &facts, &audio_member)?;
 
@@ -1232,6 +1251,33 @@ pub fn close_tsf(
 
 const SOURCE_CHANGED: &str = "The transcript container changed on disk after it was opened. Reopen it before saving so no changes are lost.";
 
+/// A refused container save, with a code the frontend can act on.
+///
+/// The text saves have carried codes for a while, and the frontend turns
+/// `SAVE_EXTERNAL_CHANGE` into the conflict banner — reload, overwrite, dismiss.
+/// A container save reported the same situation as a bare sentence, so it
+/// arrived as a generic "Unable to save file" dialog with no offer to do
+/// anything about it, for the one document kind where being changed underneath
+/// costs a recording rather than some text.
+#[derive(serde::Serialize)]
+pub struct TsfSaveError {
+    code: &'static str,
+    message: String,
+}
+
+impl From<String> for TsfSaveError {
+    fn from(message: String) -> Self {
+        // Matched against the constant rather than by wording, so rewording it
+        // cannot silently downgrade every conflict into a generic failure.
+        let code = if message == SOURCE_CHANGED {
+            "SAVE_EXTERNAL_CHANGE"
+        } else {
+            "SAVE_FAILED"
+        };
+        Self { code, message }
+    }
+}
+
 /// Length and modification time only — O(1), and wrong in one direction: an
 /// edit that preserves both slips through. Use it to refuse a save early,
 /// never to decide that publishing one is safe.
@@ -1369,7 +1415,23 @@ fn partial_owner(file_name: &str) -> Option<u32> {
 ///
 /// Same rule as the conversion sweep: a live owner protects a file, unless it
 /// is old enough that the pid must have been reused.
+/// Directories already swept, so it is not done again on every save.
+static SWEPT_DIRECTORIES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 fn sweep_partial_files(parent: &Path) {
+    // Once per directory for the life of the process. What it collects is what
+    // an *earlier* process abandoned, so a second look finds nothing new — and
+    // this is on the path of every save, where a directory listing plus a
+    // `/proc` stat per candidate is a cost the save should not carry twice.
+    {
+        let Ok(mut swept) = SWEPT_DIRECTORIES.lock() else {
+            return;
+        };
+        if swept.iter().any(|seen| seen == parent) {
+            return;
+        }
+        swept.push(parent.to_path_buf());
+    }
     let Ok(entries) = std::fs::read_dir(parent) else {
         return;
     };
@@ -1469,7 +1531,7 @@ pub fn save_tsf(
     state: tauri::State<'_, TsfState>,
     path: String,
     transcript: String,
-) -> Result<(), String> {
+) -> Result<(), TsfSaveError> {
     // The frontend also blocks duplicate saves, but commands are independently
     // invokable. Keep the archive operation single-flight at the authority.
     let _save = state
@@ -1486,7 +1548,8 @@ pub fn save_tsf(
         return Err(format!(
             "This container has unsupported archive members that Wisty cannot preserve: {}",
             open.unsupported_members.join(", ")
-        ));
+        )
+        .into());
     }
     // Cheap first: refusing here costs one stat instead of rezipping the whole
     // recording only to throw the result away. The full fingerprint runs after
@@ -1499,13 +1562,13 @@ pub fn save_tsf(
     let (temporary, file) = create_temporary_file(parent, &output)?;
     if let Err(error) = write_open_archive(file, &transcript, &open) {
         abandon_partial(&temporary);
-        return Err(error);
+        return Err(error.into());
     }
     // Check again immediately before replacement. A timestamp/length check
     // alone misses same-sized edits, so source_is_unchanged also fingerprints.
     if let Err(error) = source_is_unchanged(&open) {
         abandon_partial(&temporary);
-        return Err(error);
+        return Err(error.into());
     }
     std::fs::rename(&temporary, &output).map_err(|error| {
         abandon_partial(&temporary);
@@ -1520,7 +1583,9 @@ pub fn save_tsf(
         .as_mut()
         .ok_or_else(|| "The transcript container was closed while saving".to_string())?;
     if current.path != open.path {
-        return Err("A different transcript container was opened while saving".to_string());
+        return Err("A different transcript container was opened while saving"
+            .to_string()
+            .into());
     }
     current.path = output.canonicalize().unwrap_or(output);
     current.source_metadata = std::fs::metadata(&current.path)
@@ -1892,6 +1957,93 @@ mod tests {
         );
         remove_tracked_partials(Some(&dir));
         assert!(output.exists(), "a finished container was swept away");
+    }
+
+    /// Dropping a `Child` neither kills it nor waits for it, so replacing a
+    /// running conversion left ffmpeg encoding into a temporary nobody held —
+    /// and the startup sweep will not collect that, the owning pid being alive.
+    #[test]
+    fn a_second_conversion_is_refused_rather_than_replacing_the_first() {
+        let state = ConversionState::default();
+        // `true` exits at once, but the record is what is under test and it is
+        // only cleared by finish(), which has not run.
+        let first = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn the first");
+        state.begin(first).expect("the first should start");
+
+        let second = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn the second");
+        let refused = state.begin(second);
+
+        let Err((_reason, mut orphan)) = refused else {
+            panic!("the second conversion replaced the first");
+        };
+        // Handed back, which is the whole point: the caller is the only one
+        // left who can stop it.
+        let _ = orphan.kill();
+        let _ = orphan.wait();
+
+        // And the first is still the one on record.
+        let mut guard = state.lock().expect("lock");
+        let running = guard.as_mut().expect("the first was thrown away");
+        let mut child = running.child.take().expect("the first's process");
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn a_conversion_may_start_once_the_last_one_has_finished() {
+        let state = ConversionState::default();
+        let first = std::process::Command::new("true").spawn().expect("spawn");
+        state.begin(first).expect("the first should start");
+        {
+            let mut guard = state.lock().expect("lock");
+            if let Some(running) = guard.as_mut() {
+                if let Some(mut child) = running.child.take() {
+                    let _ = child.wait();
+                }
+            }
+        }
+        state.finish();
+
+        let second = std::process::Command::new("true").spawn().expect("spawn");
+        assert!(
+            state.begin(second).is_ok(),
+            "a finished conversion still blocked the next one"
+        );
+        let mut guard = state.lock().expect("lock");
+        if let Some(running) = guard.as_mut() {
+            if let Some(mut child) = running.child.take() {
+                let _ = child.wait();
+            }
+        }
+    }
+
+    /// The sweep is on the path of every save, and what it collects is what an
+    /// earlier process abandoned — so a second look finds nothing a first did
+    /// not, and costs a directory listing plus a stat per candidate.
+    #[test]
+    fn a_directory_is_swept_once_and_not_again() {
+        let dir = temp_dir("partial-sweep-once");
+        let audio = dir.join("rec.wav");
+        std::fs::write(&audio, wav_bytes(1)).unwrap();
+
+        // The first write sweeps, taking what pid 0 left behind.
+        let first_leftover = dir.join(".out.tsf.0.1.partial");
+        std::fs::write(&first_leftover, b"half a container").unwrap();
+        write_tsf(&dir.join("a.tsf"), "text", &audio, draft(), None).expect("write");
+        assert!(!first_leftover.exists(), "the first sweep took nothing");
+
+        // The second does not, so one arriving afterwards survives until the
+        // next process looks.
+        let later_leftover = dir.join(".out.tsf.0.2.partial");
+        std::fs::write(&later_leftover, b"half a container").unwrap();
+        write_tsf(&dir.join("b.tsf"), "text", &audio, draft(), None).expect("write");
+        assert!(
+            later_leftover.exists(),
+            "the directory was swept a second time"
+        );
     }
 
     #[test]

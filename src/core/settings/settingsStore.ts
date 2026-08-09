@@ -65,11 +65,44 @@ export const createSettingsStore = () => {
   const [ready, setReady] = createSignal(false);
   let backingStore: Store | null = null;
 
+  /**
+   * Keys changed before the store could accept them.
+   *
+   * Two things used to lose a setting silently. A write arriving before `load`
+   * finished was dropped, and then overwritten by `load`'s own wholesale
+   * `setState`. And a `load` that *failed* never set `ready` at all, so every
+   * preference for the rest of the session was applied to the screen and thrown
+   * away — the user told once, at startup, and never again.
+   *
+   * So a write that cannot be made is remembered instead of discarded, and
+   * replayed from the live state once there is somewhere to put it.
+   */
+  const unsaved = new Set<SettingKey>();
+
   const saveSetting = async <K extends SettingKey>(key: K, value: AppSettings[K]) => {
     if (!ready() || !backingStore) {
+      unsaved.add(key);
       return;
     }
     await backingStore.set(key, value);
+    await backingStore.save();
+  };
+
+  /**
+   * Writes out whatever was changed while the store was unavailable.
+   *
+   * From `state` rather than from what was queued: only the latest value of
+   * each key matters, and that is what the app is already showing.
+   */
+  const flushUnsaved = async () => {
+    if (unsaved.size === 0 || !backingStore) {
+      return;
+    }
+    const keys = [...unsaved];
+    unsaved.clear();
+    for (const key of keys) {
+      await backingStore.set(key, state[key]);
+    }
     await backingStore.save();
   };
 
@@ -199,7 +232,21 @@ export const createSettingsStore = () => {
 
   const load = async () => {
     backingStore = await Store.load(SETTINGS_FILE);
+    try {
+      await readInto();
+    } finally {
+      // Ready as soon as there is somewhere to write, whether or not reading
+      // worked. A settings file that could not be read is a reason to fall back
+      // to defaults, not a reason to stop saving for the rest of the session.
+      setReady(true);
+      await flushUnsaved();
+    }
+  };
 
+  const readInto = async () => {
+    if (!backingStore) {
+      return;
+    }
     const loadedThemeMode = await backingStore.get("themeMode");
     const loadedFontFamily = await backingStore.get("fontFamily");
     const loadedFontSize = await backingStore.get("fontSize");
@@ -218,7 +265,7 @@ export const createSettingsStore = () => {
 
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
 
-    setState({
+    const fromDisk: AppSettings = {
       themeMode: isThemeMode(loadedThemeMode) ? loadedThemeMode : (prefersDark ? "dark" : "light"),
       fontFamily: typeof loadedFontFamily === "string" && loadedFontFamily.trim().length > 0
         ? loadedFontFamily
@@ -248,9 +295,16 @@ export const createSettingsStore = () => {
         ? (loadedRecentFiles as string[]).slice(0, 3)
         : DEFAULT_SETTINGS.recentFiles,
       rememberedPositions: parseRememberedPositions(loadedRememberedPositions)
-    });
+    };
 
-    setReady(true);
+    // Anything changed while this was reading wins. The file is what was on
+    // disk before the change, so applying it wholesale would undo, on screen,
+    // something the user had already done.
+    setState(
+      Object.fromEntries(
+        Object.entries(fromDisk).filter(([key]) => !unsaved.has(key as SettingKey))
+      ) as Partial<AppSettings>
+    );
   };
 
   return {

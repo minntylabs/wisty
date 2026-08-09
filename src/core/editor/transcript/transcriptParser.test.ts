@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Text } from "@codemirror/state";
+import type { DocLines } from "./transcriptParser";
 import {
   indexSpeakers,
   nextTurn,
@@ -186,5 +187,48 @@ describe("speaker resolution", () => {
   it("refuses to guess when the document has a single speaker", () => {
     const doc = docOf("ALICE: one\nALICE: two");
     expect(resolveOtherSpeakerLabel(doc, turnAt(doc, 0)!)).toBeNull();
+  });
+});
+
+describe("indexing the document's speakers", () => {
+  /**
+   * Classifying a word selection asks for the other speaker's label, and
+   * classification runs on every mouse move — so this used to walk the whole
+   * document once per pointer movement, and again for the decorations.
+   */
+  it("scans a document once however often it is asked", () => {
+    const doc = docOf("ALICE: one\nBOB: two\nALICE: three");
+    let reads = 0;
+    const counted: DocLines = {
+      get length() {
+        return doc.length;
+      },
+      get lines() {
+        return doc.lines;
+      },
+      line: (lineNumber: number) => {
+        reads += 1;
+        return doc.line(lineNumber);
+      },
+      lineAt: (pos: number) => doc.lineAt(pos)
+    };
+
+    const first = indexSpeakers(counted);
+    const readsAfterFirst = reads;
+    const second = indexSpeakers(counted);
+
+    expect(first.speakers).toEqual(["ALICE", "BOB"]);
+    expect(second).toBe(first);
+    expect(reads, "the document was walked again").toBe(readsAfterFirst);
+  });
+
+  it("indexes a changed document afresh", () => {
+    // A Text is immutable, so an edit produces a different object — which is
+    // exactly what must not be answered from the previous one's cache.
+    const before = docOf("ALICE: one");
+    const after = docOf("ALICE: one\nBOB: two");
+
+    expect(indexSpeakers(before).speakers).toEqual(["ALICE"]);
+    expect(indexSpeakers(after).speakers).toEqual(["ALICE", "BOB"]);
   });
 });

@@ -824,10 +824,14 @@ export const useFileLifecycle = (deps: UseFileLifecycleDeps) => {
    * that was written.
    *
    * The text is snapshotted before the first chunk rather than sliced from the
-   * live editor. Chunks are separated by awaits on the backend, so the user can
-   * type throughout: reading the editor as it is now would shift every later
-   * slice and write a file that matches no version of the document. The
-   * returned revision is what the caller marks saved — it is the one on disk,
+   * live editor. Chunks are separated by awaits on the backend, and the document
+   * can change across them: reading the editor as it is now would shift every
+   * later slice and write a file that matches no version of the document.
+   *
+   * Typing is not one of the ways it changes — `useGlobalKeyRouting` swallows
+   * every key while a save runs — but a reload, an import finishing or any
+   * programmatic edit is, and the snapshot is what makes those harmless. The
+   * returned revision is what the caller marks saved: it is the one on disk,
    * which is not necessarily the one in the editor by the time this resolves.
    */
   const saveDocumentToPathViaStream = async (

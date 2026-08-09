@@ -2,10 +2,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const writeText = vi.hoisted(() => vi.fn());
 const readText = vi.hoisted(() => vi.fn());
+const invoke = vi.hoisted(() => vi.fn<(command: string, args?: unknown) => Promise<unknown>>(async () => undefined));
 
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ readText, writeText }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (command: string, args?: unknown) => invoke(command, args)
+}));
 
+import { EditorView } from "@codemirror/view";
 import { createEditorAdapter } from "./editorAdapter";
+import { transcriptHoverSelection } from "./transcript/transcriptExtension";
+
+/** The live view inside a host, for dispatching what the adapter cannot. */
+const viewOf = (host: HTMLElement): EditorView => {
+  const view = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement);
+  if (!view) {
+    throw new Error("no editor view in the host");
+  }
+  return view;
+};
 
 const settings = {
   themeMode: "light" as const,
@@ -34,6 +49,8 @@ afterEach(() => {
   document.body.replaceChildren();
   writeText.mockReset();
   readText.mockReset();
+  invoke.mockReset();
+  invoke.mockResolvedValue(undefined);
 });
 
 const createAdapter = (settingsOverrides: Partial<typeof settings> = {}) => {
@@ -41,19 +58,32 @@ const createAdapter = (settingsOverrides: Partial<typeof settings> = {}) => {
   const onCursorPositionChanged = vi.fn();
   const onFormatModeChanged = vi.fn();
   const onWordCountChanged = vi.fn();
+  const onTranscriptModeChanged = vi.fn();
+  const onSpellcheckError = vi.fn();
   const adapter = createEditorAdapter({
     getSettings: () => ({ ...settings, ...settingsOverrides }),
     onDocChanged,
     onCursorPositionChanged,
     onFormatModeChanged,
-    onWordCountChanged
+    onWordCountChanged,
+    onTranscriptModeChanged,
+    onSpellcheckError
   });
   adapters.push(adapter);
   const host = document.createElement("div");
   document.body.append(host);
   adapter.setHost(host);
   adapter.init();
-  return { adapter, host, onDocChanged, onCursorPositionChanged, onFormatModeChanged, onWordCountChanged };
+  return {
+    adapter,
+    host,
+    onDocChanged,
+    onCursorPositionChanged,
+    onFormatModeChanged,
+    onWordCountChanged,
+    onTranscriptModeChanged,
+    onSpellcheckError
+  };
 };
 
 describe("editor adapter", () => {
@@ -302,5 +332,90 @@ describe("word count", () => {
     await vi.runAllTimersAsync();
 
     expect(onWordCountChanged).not.toHaveBeenCalledWith(3);
+  });
+});
+
+describe("transcript mode and the document it belongs to", () => {
+  /**
+   * The mode's clicks rewrite the document, and it was only ever switched off
+   * by the user. Left on it moved to whatever opened next — including an
+   * ordinary text file, where a line like `TODO: fix this` reads as a speaker
+   * turn and one click merges it into the line above.
+   */
+  it("is switched off when the document is replaced", () => {
+    const { adapter, onTranscriptModeChanged } = createAdapter();
+    adapter.setTranscriptMode(true);
+    expect(adapter.isTranscriptModeEnabled()).toBe(true);
+
+    adapter.reset();
+
+    expect(adapter.isTranscriptModeEnabled(), "the mode outlived its document").toBe(false);
+    expect(onTranscriptModeChanged, "the menu was left ticked").toHaveBeenCalledWith(false);
+  });
+
+  it("says nothing when it was not on to begin with", () => {
+    const { adapter, onTranscriptModeChanged } = createAdapter();
+    adapter.reset();
+    expect(onTranscriptModeChanged).not.toHaveBeenCalled();
+  });
+});
+
+describe("spell checking that cannot start", () => {
+  /**
+   * The only caller is a settings effect that discards the promise, so a
+   * dictionary that would not load was an unhandled rejection and spell
+   * checking quietly off with the menu still showing it enabled.
+   */
+  it("reports a dictionary that will not load rather than rejecting", async () => {
+    const { adapter, onSpellcheckError } = createAdapter();
+    const failure = new Error("no such dictionary");
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "spell_load_dictionary") {
+        throw failure;
+      }
+      return undefined;
+    });
+
+    await expect(
+      adapter.configureSpellcheck({ enabled: true, language: "xx_YY" })
+    ).resolves.toBeUndefined();
+
+    expect(onSpellcheckError).toHaveBeenCalledWith(failure);
+  });
+});
+
+describe("what a transcript hover does not disturb", () => {
+  /**
+   * Hovering in transcript mode moves the selection without the caret having
+   * been placed anywhere. The status bar's line and character readout followed
+   * it, so the numbers changed on every mouse move.
+   */
+  it("leaves the cursor readout where the caret actually is", () => {
+    const { adapter, host, onCursorPositionChanged } = createAdapter();
+    adapter.setText("ALICE: one two three\nBOB: four five", { emitChange: false });
+    const view = viewOf(host);
+    view.dispatch({ selection: { anchor: 8 } });
+
+    const reportsBefore = onCursorPositionChanged.mock.calls.length;
+    const at = view.state.doc.toString().indexOf("four");
+    view.dispatch({
+      selection: { anchor: at, head: at + 4 },
+      annotations: transcriptHoverSelection.of(true)
+    });
+
+    expect(onCursorPositionChanged.mock.calls.length, "the readout followed the pointer")
+      .toBe(reportsBefore);
+  });
+
+  it("still reports an ordinary selection change", () => {
+    const { adapter, host, onCursorPositionChanged } = createAdapter();
+    adapter.setText("ALICE: one two three\nBOB: four five", { emitChange: false });
+    const view = viewOf(host);
+    view.dispatch({ selection: { anchor: 8 } });
+
+    const reportsBefore = onCursorPositionChanged.mock.calls.length;
+    view.dispatch({ selection: { anchor: 12 } });
+
+    expect(onCursorPositionChanged.mock.calls.length).toBeGreaterThan(reportsBefore);
   });
 });

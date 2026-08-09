@@ -94,13 +94,7 @@ export const summariseConversion = (lines: string[]): ConversionSummary => {
   return summary;
 };
 
-/** `m:ss`, or `h:mm:ss` past the hour, for a position or a length. */
-export const formatDuration = (seconds: number): string => {
-  const whole = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(whole / 60) % 60;
-  const hours = Math.floor(whole / 3600);
-  const paddedSeconds = String(whole % 60).padStart(2, "0");
-  return hours > 0
-    ? `${hours}:${String(minutes).padStart(2, "0")}:${paddedSeconds}`
-    : `${minutes}:${paddedSeconds}`;
-};
+// Re-exported so the window's existing callers are undisturbed; it lives in
+// its own module because the import's messages need it too and this one is
+// about reading ffmpeg.
+export { formatDuration } from "./duration";

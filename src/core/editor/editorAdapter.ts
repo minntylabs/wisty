@@ -61,13 +61,21 @@ type EditorAdapterOptions = {
   /** Escape was pressed in a transcript. Silences whatever is playing. */
   onStopPlayback?: () => void;
   /**
-   * A spell-check action taken from the editor's own context menu failed.
+   * Spell checking failed at something the user can act on.
    *
-   * Adding a word writes a file, so it can fail for reasons the user can act
-   * on. Nothing else is watching that menu — it is built and handled inside the
-   * extension — so without this the failure had nowhere to go.
+   * Two sources, neither of which anything else is watching: the context menu's
+   * own Add to Dictionary and Ignore All, which write a file; and loading a
+   * dictionary, which happens whenever the setting changes and leaves spell
+   * checking silently off when it fails.
    */
-  onSpellActionError?: (error: unknown) => void;
+  onSpellcheckError?: (error: unknown) => void;
+  /**
+   * The editor turned transcript mode off by itself.
+   *
+   * It does that whenever the document is replaced, and nothing outside here
+   * would otherwise know — leaving the menu ticked for a mode that is gone.
+   */
+  onTranscriptModeChanged?: (enabled: boolean) => void;
 };
 
 type SetTextOptions = {
@@ -133,7 +141,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
 
   const spellService = createSpellService();
   const spellExtension = createSpellcheckExtension(spellService, (error) =>
-    options.onSpellActionError?.(error)
+    options.onSpellcheckError?.(error)
   );
   let spellEnabled = false;
   let spellLoadedLanguage: string | undefined;
@@ -342,12 +350,16 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
         formatting.extension,
         EditorView.updateListener.of((update) => {
           if (update.docChanged || update.selectionSet) {
-            emitCursorPositionIfChanged(update.state);
+            // A transcript hover moves the selection without the caret having
+            // been placed anywhere, so neither the status bar's readout nor the
+            // remembered position should follow it. The readout used to, and
+            // its line and character numbers changed on every mouse move.
             const onlyTranscriptHover =
               update.selectionSet
               && !update.docChanged
               && update.transactions.every((tr) => tr.annotation(transcriptHoverSelection));
             if (!onlyTranscriptHover) {
+              emitCursorPositionIfChanged(update.state);
               options.onViewPositionChanged?.();
             }
           }
@@ -590,6 +602,21 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     const emitChange = resetOptions.emitChange ?? true;
     void resetOptions.addToHistory;
 
+    // Transcript mode does not survive the document it was switched on for.
+    //
+    // It is a per-session tidying tool whose clicks rewrite the document, and
+    // it was only ever switched off by the user. Left on, its handlers moved to
+    // whatever opened next — including an ordinary text file, where any line of
+    // the form `name:` reads as a speaker turn. `TODO: fix this` and
+    // `https://example.com` both qualify, and a single click would merge one
+    // into the line above.
+    //
+    // Done here because every path that replaces the document passes through
+    // this function, and before the state is rebuilt so the extension is simply
+    // not installed in it.
+    const wasTranscriptMode = transcriptEnabled;
+    transcriptEnabled = false;
+
     const nextState = createEditorState("");
     editorView.setState(nextState);
     // Replacing the state outright is not a transaction, so the update
@@ -600,6 +627,12 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     editorView.scrollDOM.scrollTop = 0;
     editorView.scrollDOM.scrollLeft = 0;
     emitCursorPositionIfChanged(editorView.state);
+
+    // Told afterwards, so the menu's tick follows the editor rather than the
+    // other way round: nothing outside here knows the mode has been dropped.
+    if (wasTranscriptMode) {
+      options.onTranscriptModeChanged?.(false);
+    }
 
     if (emitChange) {
       options.onDocChanged({ revision });
@@ -645,12 +678,28 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   const configureSpellcheck = async ({ enabled, language }: { enabled: boolean; language: string }) => {
     const generation = ++spellConfigurationGeneration;
     if (enabled && language && (language !== spellLoadedLanguage || spellDictionaryDirty)) {
-      const loaded = await spellService.loadDictionary(language);
+      // Reported rather than thrown. The only caller is a settings effect that
+      // discards the promise, so a dictionary that would not load — missing,
+      // unreadable, or a language the backend does not have — was an unhandled
+      // rejection in the console and spell checking quietly off, with the menu
+      // still showing it enabled.
+      let loaded = false;
+      try {
+        loaded = await spellService.loadDictionary(language);
+      } catch (error) {
+        if (generation !== spellConfigurationGeneration) {
+          return;
+        }
+        spellLoadedLanguage = undefined;
+        options.onSpellcheckError?.(error);
+      }
       if (generation !== spellConfigurationGeneration) {
         return;
       }
-      spellLoadedLanguage = loaded ? language : undefined;
-      spellDictionaryDirty = false;
+      if (loaded) {
+        spellLoadedLanguage = language;
+        spellDictionaryDirty = false;
+      }
     }
 
     if (generation !== spellConfigurationGeneration) {

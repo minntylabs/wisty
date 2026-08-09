@@ -1,4 +1,5 @@
 import type { CueProblem } from "./vtt";
+import { formatDuration } from "./duration";
 
 /**
  * Cue problems, said in a way that points at the likely cause.
@@ -10,18 +11,12 @@ import type { CueProblem } from "./vtt";
  * the mistake this import is most likely to make.
  */
 
-const seconds = (value: number) => {
-  const minutes = Math.floor(value / 60);
-  const remainder = Math.floor(value % 60);
-  return `${minutes}:${String(remainder).padStart(2, "0")}`;
-};
-
 /** The line for one kind of problem, given how many cues have it. */
 const describe = (problem: CueProblem, count: number): string => {
   const cues = count === 1 ? "1 cue" : `${count} cues`;
   switch (problem.kind) {
     case "beyond-audio":
-      return `${cues} run past the end of the recording, which is ${seconds(problem.audioDuration)} long. `
+      return `${cues} run past the end of the recording, which is ${formatDuration(problem.audioDuration)} long. `
         + "This usually means the transcript belongs to a different recording.";
     case "overlap":
       return `${cues} start before the one before them has ended.`;

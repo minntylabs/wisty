@@ -194,8 +194,27 @@ export type SpeakerIndex = {
   labelTextBySpeaker: Map<string, string>;
 };
 
-/** Scans the whole document for its speakers. Only needed on commit, not on hover. */
+/**
+ * The last index built, keyed by the document it was built from.
+ *
+ * That comment above used to say "only needed on commit, not on hover", and it
+ * was not true: classifying a word selection asks for the other speaker's
+ * label, and classification runs on every mouse move — so hovering scanned the
+ * whole document, once per pointer movement, plus again for the decorations.
+ *
+ * A `Text` is immutable and persistent, so its identity is a sound key: the
+ * same document object always has the same speakers, and any edit produces a
+ * different one. Weak so a document that has been replaced is not held here.
+ */
+const speakerIndexes = new WeakMap<DocLines, SpeakerIndex>();
+
+/** Scans the whole document for its speakers. Memoised per document. */
 export const indexSpeakers = (doc: DocLines): SpeakerIndex => {
+  const cached = speakerIndexes.get(doc);
+  if (cached) {
+    return cached;
+  }
+
   const speakers: string[] = [];
   const labelTextBySpeaker = new Map<string, string>();
 
@@ -208,7 +227,9 @@ export const indexSpeakers = (doc: DocLines): SpeakerIndex => {
     labelTextBySpeaker.set(turn.speaker, turn.labelText);
   }
 
-  return { speakers, labelTextBySpeaker };
+  const index = { speakers, labelTextBySpeaker };
+  speakerIndexes.set(doc, index);
+  return index;
 };
 
 /**

@@ -507,12 +507,30 @@ const transcriptTheme = EditorView.baseTheme({
   ".cm-transcript-label": {
     cursor: "pointer"
   },
+  /**
+   * The glyph saying what a click will do, taking up no room in the line.
+   *
+   * It is an inline widget, so laid out normally it is a character: it widened
+   * the line, pushed the following words along, and could rewrap the paragraph
+   * — all while the pointer was only hovering. Text moving under the pointer in
+   * a mode whose clicks are destructive is the worst of it.
+   *
+   * `width: 0` with `overflow: visible` keeps the box out of the line's
+   * measurement while still painting the glyph, and `top` lifts it above the
+   * text it now overlaps. No margin, because a margin on a zero-width box is
+   * width again.
+   */
   ".cm-transcript-hint": {
     // Purely advisory: it must never intercept the click it is describing.
     pointerEvents: "none",
-    marginLeft: "0.35em",
-    fontSize: "0.85em",
-    verticalAlign: "baseline",
+    position: "relative",
+    display: "inline-block",
+    width: "0",
+    overflow: "visible",
+    whiteSpace: "nowrap",
+    top: "-0.75em",
+    left: "0.15em",
+    fontSize: "0.8em",
     opacity: "0.9"
   },
 

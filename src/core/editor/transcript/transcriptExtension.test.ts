@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { history, undo } from "@codemirror/commands";
 import { EditorState, Extension } from "@codemirror/state";
@@ -397,4 +399,39 @@ describe("alongside time markers", () => {
       t.view.destroy();
     });
   }
+});
+
+/**
+ * The hint glyph is an inline widget, so by default it is a character in the
+ * line: it widened the line, pushed the following words along and could rewrap
+ * the paragraph, all while the pointer was merely hovering. Text moving under
+ * the pointer is bad anywhere and worse in a mode whose clicks rewrite the
+ * document.
+ *
+ * Asserted by reading the rule rather than by measuring, because jsdom does no
+ * layout — every width it reports is zero, so a measuring test would pass
+ * whatever the stylesheet said.
+ */
+describe("the hint takes up no room in the line", () => {
+  const source = readFileSync(join(__dirname, "transcriptExtension.ts"), "utf8");
+  const rule = source.slice(
+    source.indexOf('".cm-transcript-hint": {'),
+    source.indexOf("}", source.indexOf('".cm-transcript-hint": {'))
+  );
+
+  it("declares no width", () => {
+    expect(rule).toContain('width: "0"');
+  });
+
+  it("still paints outside that box", () => {
+    expect(rule).toContain('overflow: "visible"');
+  });
+
+  it("adds no margin, which on a zero-width box is width again", () => {
+    expect(rule).not.toMatch(/margin/i);
+  });
+
+  it("is lifted clear of the text it now overlaps", () => {
+    expect(rule).toMatch(/top: "-[\d.]+em"/);
+  });
 });

@@ -189,7 +189,8 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
+  /* Tight between the tick and its label; the shortcut adds its own margin. */
+  gap: 8px;
   border-radius: 0;
   font-size: 14px;
   font-weight: 400;
@@ -219,7 +220,22 @@ body {
   color: var(--menu-shortcut);
 }
 
+.menu-item-check {
+  flex: 0 0 auto;
+  width: 12px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* Takes the slack, so the shortcut stays hard right and the tick hard left. */
+.menu-item-label {
+  flex: 1 1 auto;
+}
+
 .menu-item-shortcut {
+  flex: 0 0 auto;
+  margin-left: 8px;
   font-size: 14px;
   color: var(--menu-shortcut);
 }

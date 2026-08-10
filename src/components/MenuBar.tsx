@@ -48,10 +48,26 @@ const ScrollArea = (props: { children: JSX.Element }) => {
   );
 };
 
-const commandLabel = (definition: CommandDefinition) => {
-  const label = definition.getLabel ? definition.getLabel() : definition.label;
-  return label;
-};
+const commandLabel = (definition: CommandDefinition) =>
+  definition.getLabel ? definition.getLabel() : definition.label;
+
+/**
+ * The tick column.
+ *
+ * `aria-checked` on the item says the state to a screen reader and to nothing
+ * else — there is no default rendering for it — so a sighted user was left with
+ * no indication of any toggle's state anywhere in the menus. This is the other
+ * half of that, hidden from assistive technology because the role already
+ * carries it and hearing "tick" after "checked" is noise.
+ *
+ * Rendered for every item, checkable or not, so that one menu's labels line up
+ * with each other rather than stepping in and out by the width of a tick.
+ */
+const CheckGutter = (props: { checked?: () => boolean }) => (
+  <span class="menu-item-check" aria-hidden="true">
+    {props.checked?.() ? "✓" : ""}
+  </span>
+);
 
 export const MenuBar = () => {
   const commands = useCommandsContext();
@@ -68,6 +84,7 @@ export const MenuBar = () => {
         <Show when={visible()}>
           <MenubarSub>
             <MenubarSubTrigger class="menu-item menu-submenu-trigger">
+              <CheckGutter />
               <span class="menu-item-label">{item.getLabel ? item.getLabel() : item.label}</span>
               <span class="menu-item-shortcut menu-submenu-arrow">›</span>
             </MenubarSubTrigger>
@@ -98,6 +115,7 @@ export const MenuBar = () => {
             menu.onMenuCommandSelected(command.id);
           }}
         >
+          <CheckGutter checked={command.checked} />
           <span class="menu-item-label">{commandLabel(command)}</span>
           <Show when={command.shortcut}>
             <span class="menu-item-shortcut">{command.shortcut}</span>

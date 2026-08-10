@@ -30,7 +30,8 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-const showMenu = (checkedInitially: boolean) => {
+const showMenu = (checkedInitially: boolean, options: { withToggle?: boolean } = {}) => {
+  const withToggle = options.withToggle ?? true;
   const [checked, setChecked] = createSignal(checkedInitially);
   const definitions = [
     {
@@ -47,7 +48,7 @@ const showMenu = (checkedInitially: boolean) => {
       id: "view",
       label: "View",
       items: [
-        { type: "command", commandId: "view.wrap" },
+        ...(withToggle ? [{ type: "command" as const, commandId: "view.wrap" }] : []),
         { type: "command", commandId: "file.save" }
       ]
     }
@@ -102,6 +103,17 @@ describe("showing which settings are on", () => {
   it("reserves the column on items that cannot be checked, so labels line up", () => {
     showMenu(true);
     expect(itemNamed("Save")?.querySelector(".menu-item-check")).not.toBeNull();
+  });
+
+  /**
+   * A column that can never hold anything is just an indent. File and Edit have
+   * nothing checkable in them, and should not be pushed across to line up with
+   * menus that have.
+   */
+  it("leaves the column out of a menu with nothing checkable in it", () => {
+    showMenu(true, { withToggle: false });
+    expect(itemNamed("Save")).toBeDefined();
+    expect(itemNamed("Save")?.querySelector(".menu-item-check")).toBeNull();
   });
 
   it("hides the tick from assistive technology, which reads the role instead", () => {

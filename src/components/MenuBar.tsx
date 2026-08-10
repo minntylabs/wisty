@@ -60,8 +60,10 @@ const commandLabel = (definition: CommandDefinition) =>
  * half of that, hidden from assistive technology because the role already
  * carries it and hearing "tick" after "checked" is noise.
  *
- * Rendered for every item, checkable or not, so that one menu's labels line up
- * with each other rather than stepping in and out by the width of a tick.
+ * Rendered for every item of a menu that has anything checkable in it, so its
+ * labels line up with each other rather than stepping in and out by the width
+ * of a tick — and for no item of a menu that has not, where the column would be
+ * an indent that never means anything.
  */
 const CheckGutter = (props: { checked?: () => boolean }) => (
   <span class="menu-item-check" aria-hidden="true">
@@ -74,7 +76,26 @@ export const MenuBar = () => {
   const menu = useMenuContext();
   let closeReason: "none" | "escape" | "trigger-toggle" = "none";
 
-  const renderItem = (item: MenuItem): JSX.Element => {
+  /**
+   * Whether this menu needs a tick column at all.
+   *
+   * Its own items only: a submenu is a separate popover and answers this for
+   * itself, and its trigger in the parent is never checked. Hidden items do not
+   * count — a column reserved for something that is not there is the indent
+   * this is meant to avoid.
+   */
+  const hasCheckableItem = (items: readonly MenuItem[]) =>
+    items.some((item) => {
+      if (item.type !== "command") {
+        return false;
+      }
+      if (item.visible && !item.visible()) {
+        return false;
+      }
+      return Boolean(commands.registry.get(item.commandId)?.checked);
+    });
+
+  const renderItem = (item: MenuItem, showChecks: () => boolean): JSX.Element => {
     const visible = () => !item.visible || item.visible();
     if (item.type === "separator") {
       return <Show when={visible()}><MenubarSeparator class="menu-separator" /></Show>;
@@ -84,14 +105,18 @@ export const MenuBar = () => {
         <Show when={visible()}>
           <MenubarSub>
             <MenubarSubTrigger class="menu-item menu-submenu-trigger">
-              <CheckGutter />
+              <Show when={showChecks()}>
+                <CheckGutter />
+              </Show>
               <span class="menu-item-label">{item.getLabel ? item.getLabel() : item.label}</span>
               <span class="menu-item-shortcut menu-submenu-arrow">›</span>
             </MenubarSubTrigger>
             <MenubarPortal>
               <MenubarSubContent class="menu-popover">
                 <ScrollArea>
-                  <For each={item.items()}>{(child) => renderItem(child)}</For>
+                  <For each={item.items()}>
+                    {(child) => renderItem(child, () => hasCheckableItem(item.items()))}
+                  </For>
                 </ScrollArea>
               </MenubarSubContent>
             </MenubarPortal>
@@ -115,7 +140,9 @@ export const MenuBar = () => {
             menu.onMenuCommandSelected(command.id);
           }}
         >
-          <CheckGutter checked={command.checked} />
+          <Show when={showChecks()}>
+            <CheckGutter checked={command.checked} />
+          </Show>
           <span class="menu-item-label">{commandLabel(command)}</span>
           <Show when={command.shortcut}>
             <span class="menu-item-shortcut">{command.shortcut}</span>
@@ -180,7 +207,7 @@ export const MenuBar = () => {
               >
                 <ScrollArea>
                   <For each={section.items}>
-                    {(item) => renderItem(item)}
+                    {(item) => renderItem(item, () => hasCheckableItem(section.items))}
                   </For>
                 </ScrollArea>
               </MenubarContent>

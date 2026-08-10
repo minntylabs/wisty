@@ -262,18 +262,6 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
       }
     },
     {
-      id: "edit.transcriptMode",
-      label: "Transcript Mode",
-      shortcut: "F4",
-      refocusEditorOnMenuSelect: true,
-      run: () => {
-        const enabled = !deps.transcriptMode.enabled();
-        deps.transcriptMode.setEnabled(enabled);
-        deps.editor.setTranscriptMode(enabled);
-      },
-      checked: () => deps.transcriptMode.enabled()
-    },
-    {
       id: "format.bold",
       label: "Bold",
       shortcut: commandShortcut(deps.platform.isMac, "B"),
@@ -354,6 +342,18 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
       run: () =>
         deps.settings.actions.setActiveLineHighlightEnabled(!deps.settings.state.activeLineHighlightEnabled),
       checked: () => deps.settings.state.activeLineHighlightEnabled
+    },
+    {
+      id: "view.transcriptMode",
+      label: "Transcript Mode",
+      shortcut: "F4",
+      refocusEditorOnMenuSelect: true,
+      run: () => {
+        const enabled = !deps.transcriptMode.enabled();
+        deps.transcriptMode.setEnabled(enabled);
+        deps.editor.setTranscriptMode(enabled);
+      },
+      checked: () => deps.transcriptMode.enabled()
     },
     {
       id: "view.rememberPosition",
@@ -440,9 +440,7 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
         { type: "command", commandId: "edit.paste" },
         { type: "separator" },
         { type: "command", commandId: "edit.find" },
-        { type: "command", commandId: "edit.find.altReplaceKey" },
-        { type: "separator" },
-        { type: "command", commandId: "edit.transcriptMode" }
+        { type: "command", commandId: "edit.find.altReplaceKey" }
       ]
     },
     {
@@ -482,6 +480,10 @@ export const buildCommands = (deps: BuildCommandsDeps): { definitions: CommandDe
         { type: "command", commandId: "view.activeLineHighlight" },
         { type: "command", commandId: "view.statusBar" },
         { type: "command", commandId: "view.rememberPosition" },
+        { type: "separator" },
+        // A mode rather than a display preference — it changes what a click
+        // does — so it sits apart from the toggles above it.
+        { type: "command", commandId: "view.transcriptMode" },
         {
           type: "submenu",
           id: "view.spellCheck",

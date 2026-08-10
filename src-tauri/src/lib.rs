@@ -1068,20 +1068,72 @@ fn finish_save_stream(
 
     drop(stream.writer);
 
-    if let Err(error) = replace_expected_source(
+    // The temporary is that function's to remove from here on. It is the only
+    // thing that knows whether the file still sitting there is this save's
+    // unwanted output or the user's original, recovered from a swap that could
+    // not be undone.
+    replace_expected_source(
         &stream.temp_path,
         &stream.target_path,
         stream.expected_source.as_ref(),
-    ) {
-        let _ = std::fs::remove_file(&stream.temp_path);
-        return Err(error);
-    }
+    )?;
 
     Ok(SaveFileStreamFinishResult {
         bytes_written_total: stream.bytes_written_total,
     })
 }
 
+/// Whether a filesystem simply cannot do what was asked, as opposed to refusing
+/// this particular attempt.
+///
+/// `hard_link` and `RENAME_EXCHANGE` are both optional: vfat has no hard links
+/// at all and answers `EPERM`, and a filesystem without `RENAME_EXCHANGE`
+/// answers `EINVAL`. Neither says anything about the file being saved, so
+/// neither is a reason to refuse the save — only a reason to publish it the
+/// older way.
+fn is_unsupported(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EPERM)
+            | Some(libc::EINVAL)
+            | Some(libc::ENOSYS)
+            | Some(libc::EOPNOTSUPP)
+            | Some(libc::EACCES)
+    )
+}
+
+/// Publishes the save the way every filesystem can: look, then rename.
+///
+/// This is what the code did before the atomic paths were added, and it is
+/// still the fallback for filesystems that cannot do better. It carries the
+/// window those paths exist to close — an external writer landing between the
+/// check and the rename is overwritten — which is a real but small risk, and a
+/// far smaller one than being unable to save at all.
+fn replace_by_checked_rename(
+    temporary: &Path,
+    target: &Path,
+    expected: &ExpectedSource,
+) -> Result<(), SaveStreamError> {
+    if let Err(conflict) = ensure_expected_source(target, expected) {
+        let _ = std::fs::remove_file(temporary);
+        return Err(conflict);
+    }
+    std::fs::rename(temporary, target).map_err(|error| {
+        let _ = std::fs::remove_file(temporary);
+        SaveStreamError::failed(format!(
+            "Unable to finalize save for '{}': {error}",
+            target.to_string_lossy()
+        ))
+    })
+}
+
+/// Moves the finished temporary onto the target, refusing if the target is not
+/// what the document expects.
+///
+/// Owns the temporary: every path out of here either renames it into place or
+/// removes it. The one exception is spelled out where it happens — a swap that
+/// could not be undone leaves the user's original there, and deleting it then
+/// would destroy the only copy.
 fn replace_expected_source(
     temporary: &Path,
     target: &Path,
@@ -1089,6 +1141,7 @@ fn replace_expected_source(
 ) -> Result<(), SaveStreamError> {
     let Some(expected) = expected else {
         return std::fs::rename(temporary, target).map_err(|error| {
+            let _ = std::fs::remove_file(temporary);
             SaveStreamError::failed(format!(
                 "Unable to finalize save for '{}': {error}",
                 target.to_string_lossy()
@@ -1096,16 +1149,30 @@ fn replace_expected_source(
         });
     };
     if matches!(expected, ExpectedSource::Absent) {
-        return match std::fs::hard_link(temporary, target)
-            .and_then(|()| std::fs::remove_file(temporary))
-        {
-            Ok(()) => Ok(()),
+        // A hard link fails if anything is already there, which is exactly the
+        // assertion being made — so the link both publishes the file and proves
+        // the path was still empty, with no window between the two.
+        return match std::fs::hard_link(temporary, target) {
+            Ok(()) => std::fs::remove_file(temporary).map_err(|error| {
+                SaveStreamError::failed(format!("Unable to remove replaced save file: {error}"))
+            }),
+            // No hard links here — vfat and friends. The file was created, so
+            // there is nothing to report but plenty to do.
+            Err(error) if is_unsupported(&error) => {
+                replace_by_checked_rename(temporary, target, expected)
+            }
             Err(error) => match ensure_expected_source(target, expected) {
-                Err(external_change) => Err(external_change),
-                Ok(()) => Err(SaveStreamError::failed(format!(
-                    "Unable to finalize save for '{}': {error}",
-                    target.to_string_lossy()
-                ))),
+                Err(external_change) => {
+                    let _ = std::fs::remove_file(temporary);
+                    Err(external_change)
+                }
+                Ok(()) => {
+                    let _ = std::fs::remove_file(temporary);
+                    Err(SaveStreamError::failed(format!(
+                        "Unable to finalize save for '{}': {error}",
+                        target.to_string_lossy()
+                    )))
+                }
             },
         };
     }
@@ -1127,15 +1194,27 @@ fn replace_expected_source(
         )
     };
     if exchanged != 0 {
-        ensure_expected_source(target, expected)?;
+        let error = std::io::Error::last_os_error();
+        // The filesystem cannot swap, which says nothing about the file: fall
+        // back rather than leaving the document unsaveable. Without this, a
+        // target on a filesystem lacking RENAME_EXCHANGE could never be saved.
+        if is_unsupported(&error) {
+            return replace_by_checked_rename(temporary, target, expected);
+        }
+        if let Err(conflict) = ensure_expected_source(target, expected) {
+            let _ = std::fs::remove_file(temporary);
+            return Err(conflict);
+        }
+        let _ = std::fs::remove_file(temporary);
         return Err(SaveStreamError::failed(format!(
-            "Unable to finalize save for '{}': {}",
-            target.to_string_lossy(),
-            std::io::Error::last_os_error()
+            "Unable to finalize save for '{}': {error}",
+            target.to_string_lossy()
         )));
     }
-    if let Err(error) = ensure_expected_source(temporary, expected) {
-        let _ = unsafe {
+    // The swap has happened, so the target now holds the new text and the
+    // temporary holds what was there before — which is what gets validated.
+    if let Err(conflict) = ensure_expected_source(temporary, expected) {
+        let undone = unsafe {
             libc::renameat2(
                 libc::AT_FDCWD,
                 temporary_c.as_ptr(),
@@ -1144,7 +1223,26 @@ fn replace_expected_source(
                 libc::RENAME_EXCHANGE,
             )
         };
-        return Err(error);
+        if undone == 0 {
+            let _ = std::fs::remove_file(temporary);
+            return Err(conflict);
+        }
+        // The swap could not be undone, so the file the user opened is sitting
+        // at the temporary path and the target holds text they have not agreed
+        // to publish. Putting it back by rename loses this save, which is the
+        // right way round: the save can be repeated, the original cannot.
+        if std::fs::rename(temporary, target).is_ok() {
+            return Err(conflict);
+        }
+        // Nothing could be moved anywhere. The temporary is deliberately left
+        // alone — it is now the only copy of the original — and named, because
+        // no other part of the app knows it exists.
+        return Err(SaveStreamError::failed(format!(
+            "The save could not be completed and '{}' could not be put back. \
+             The version you opened is at '{}'.",
+            target.to_string_lossy(),
+            temporary.to_string_lossy()
+        )));
     }
     std::fs::remove_file(temporary).map_err(|error| {
         SaveStreamError::failed(format!("Unable to remove replaced save file: {error}"))
@@ -1338,9 +1436,10 @@ mod window_title;
 mod tests {
     use super::{
         atspi_bus_override, cancel_save_stream, discard_open_save_streams, ensure_expected_source,
-        finish_save_stream, modified_ms, save_temp_owner, start_save_stream, write_save_chunk,
-        ExpectedSource, LaunchArgState, TextFileVersion, SAVE_EXTERNAL_APPEARED,
-        SAVE_EXTERNAL_CHANGE, SAVE_EXTERNAL_DELETE, SAVE_EXTERNAL_NOT_A_FILE,
+        finish_save_stream, is_unsupported, modified_ms, replace_by_checked_rename,
+        save_temp_owner, start_save_stream, write_save_chunk, ExpectedSource, LaunchArgState,
+        TextFileVersion, SAVE_EXTERNAL_APPEARED, SAVE_EXTERNAL_CHANGE, SAVE_EXTERNAL_DELETE,
+        SAVE_EXTERNAL_NOT_A_FILE,
     };
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::Path;
@@ -1461,6 +1560,79 @@ mod tests {
             "save left extra files behind: {entries:?}"
         );
         entries.pop()
+    }
+
+    /// Both of the atomic publishing paths are optional filesystem features,
+    /// and a filesystem that lacks one answers with an errno about the
+    /// operation rather than about the file. Treating that as a save failure
+    /// made a document on such a filesystem unsaveable — which is how a vfat
+    /// USB stick could not take a newly created file at all.
+    #[test]
+    fn a_filesystem_that_cannot_do_something_is_told_apart_from_a_refusal() {
+        for code in [
+            libc::EPERM,
+            libc::EINVAL,
+            libc::ENOSYS,
+            libc::EOPNOTSUPP,
+            libc::EACCES,
+        ] {
+            assert!(
+                is_unsupported(&std::io::Error::from_raw_os_error(code)),
+                "errno {code} should be read as unsupported"
+            );
+        }
+        for code in [libc::EEXIST, libc::ENOSPC, libc::EIO, libc::ENOENT] {
+            assert!(
+                !is_unsupported(&std::io::Error::from_raw_os_error(code)),
+                "errno {code} says something about the file, not the filesystem"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fallback_publishes_a_save_over_an_unchanged_file() {
+        let directory = test_directory("fallback-lands");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "before").unwrap();
+        let expected = expect_present(&path);
+        let temporary = directory.join("temp");
+        std::fs::write(&temporary, "after").unwrap();
+
+        assert!(replace_by_checked_rename(&temporary, &path, &expected).is_ok());
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after");
+        assert_eq!(only_file_in(&directory), Some(path));
+    }
+
+    #[test]
+    fn the_fallback_refuses_a_changed_file_and_leaves_nothing_behind() {
+        let directory = test_directory("fallback-refuses");
+        let path = directory.join("notes.txt");
+        std::fs::write(&path, "before").unwrap();
+        let expected = expect_present(&path);
+        std::fs::write(&path, "somebody else").unwrap();
+        let temporary = directory.join("temp");
+        std::fs::write(&temporary, "after").unwrap();
+
+        let error = replace_by_checked_rename(&temporary, &path, &expected).unwrap_err();
+
+        assert_eq!(error.code, SAVE_EXTERNAL_CHANGE);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "somebody else");
+        // The temporary is this function's to clean up; nothing else knows it.
+        assert_eq!(only_file_in(&directory), Some(path));
+    }
+
+    #[test]
+    fn the_fallback_creates_a_file_at_a_path_that_is_still_empty() {
+        let directory = test_directory("fallback-creates");
+        let path = directory.join("new.txt");
+        let temporary = directory.join("temp");
+        std::fs::write(&temporary, "fresh").unwrap();
+
+        assert!(replace_by_checked_rename(&temporary, &path, &ExpectedSource::Absent).is_ok());
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
+        assert_eq!(only_file_in(&directory), Some(path));
     }
 
     #[test]

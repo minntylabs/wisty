@@ -318,13 +318,62 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     return { annotations: isolateHistory.of("after") };
   });
 
+  /**
+   * The line ending a document is written with, from the text it starts with.
+   *
+   * Only a document that is *entirely* CRLF is declared as such. Setting
+   * `lineSeparator` makes CodeMirror split on that string and nothing else, so
+   * declaring CRLF for a file with a single stray LF would stop that LF being a
+   * line break at all and silently join two lines on screen. Mixed endings are
+   * left to CodeMirror's default, which accepts all three and joins with LF.
+   *
+   * The check counts rather than searching, because "contains a CRLF" is true
+   * of a mixed file and is the wrong question.
+   */
+  const detectLineSeparator = (text: string): string | undefined => {
+    const carriageReturns = (text.match(/\r/g) ?? []).length;
+    if (carriageReturns === 0) {
+      return "\n";
+    }
+    const crlfs = (text.match(/\r\n/g) ?? []).length;
+    const lineFeeds = (text.match(/\n/g) ?? []).length;
+    return carriageReturns === crlfs && lineFeeds === crlfs ? "\r\n" : undefined;
+  };
+
+  /**
+   * Applied where a document's text arrives, since that is what decides it.
+   *
+   * Mixed endings configure nothing at all rather than configuring a guess:
+   * unset, CodeMirror accepts CR, LF and CRLF as breaks and joins with LF,
+   * which is the only sane reading of a file that uses more than one.
+   */
+  const lineSeparatorFor = (text: string) => {
+    const separator = detectLineSeparator(text);
+    return separator === undefined ? [] : EditorState.lineSeparator.of(separator);
+  };
+
+  /**
+   * Whether this document's line ending has been settled yet.
+   *
+   * Nothing in the application calls `setText`; every load resets the editor to
+   * empty and then appends. So deciding only in `createEditorState` decided it
+   * from an empty string every time, and `state.lineBreak` was "\n" for every
+   * document however it was written — which quietly undid the whole point of
+   * detecting it.
+   *
+   * The first batch of text decides, and later ones do not: a large file
+   * arrives in pieces, and a boundary that splits a CRLF would otherwise flip
+   * the answer partway through the load.
+   */
+  let lineSeparatorDecided = false;
+
   const createEditorState = (doc: string) => {
     const settings = options.getSettings();
 
     return EditorState.create({
       doc,
       extensions: [
-        lineBreakCompartment.of(EditorState.lineSeparator.of(doc.includes("\r\n") ? "\r\n" : "\n")),
+        lineBreakCompartment.of(lineSeparatorFor(doc)),
         EditorState.allowMultipleSelections.of(true),
         search(),
         history({
@@ -564,6 +613,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     // produces no transaction, so the listener would never ask.
     wordCounter.invalidate();
     countWordsIfShown();
+    lineSeparatorDecided = true;
     dispatchTextChange({
       from: 0,
       to: editorView.state.doc.length,
@@ -571,9 +621,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     }, {
       emitChange: setTextOptions.emitChange,
       addToHistory: true,
-      effects: lineBreakCompartment.reconfigure(
-        EditorState.lineSeparator.of(text.includes("\r\n") ? "\r\n" : "\n")
-      )
+      effects: lineBreakCompartment.reconfigure(lineSeparatorFor(text))
     });
   };
 
@@ -591,13 +639,17 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     }
 
     const from = editorView.state.doc.length;
+    // The first text this document receives is what settles its line ending.
+    const decides = !lineSeparatorDecided;
+    lineSeparatorDecided = true;
     dispatchTextChange({
       from,
       to: from,
       insert: text
     }, {
       emitChange: appendOptions.emitChange,
-      addToHistory: appendOptions.addToHistory ?? false
+      addToHistory: appendOptions.addToHistory ?? false,
+      effects: decides ? lineBreakCompartment.reconfigure(lineSeparatorFor(text)) : undefined
     });
   };
 
@@ -623,6 +675,8 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     // not installed in it.
     const wasTranscriptMode = transcriptEnabled;
     transcriptEnabled = false;
+    // A new document, so its line ending is not known until its text arrives.
+    lineSeparatorDecided = false;
 
     const nextState = createEditorState("");
     editorView.setState(nextState);
@@ -845,13 +899,19 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     if (!view) {
       return false;
     }
-    const state = view.state;
+    const documentAtRequest = revision;
     const text = await readText();
-    if (!text || editorView !== view || view.state !== state) {
+    // Only that this is still the same document. Comparing whole states was too
+    // strict: any transaction during the clipboard read cancelled the paste,
+    // and in transcript mode the pointer dispatches a selection on every mouse
+    // move — so moving the mouse while pressing Ctrl+V did nothing at all, and
+    // said nothing about why. Cut needs the stricter test because it deletes;
+    // paste only needs to land in the document that was on screen.
+    if (!text || editorView !== view || revision !== documentAtRequest) {
       return false;
     }
     view.dispatch({
-      ...state.replaceSelection(text),
+      ...view.state.replaceSelection(text),
       userEvent: "input.paste",
       annotations: [
         Transaction.addToHistory.of(true),

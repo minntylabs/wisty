@@ -362,9 +362,23 @@ pub fn play_span(
     if !start.is_finite() || !end.is_finite() {
         return Err(format!("A span needs finite times, got {start} and {end}"));
     }
-    if start < 0.0 || end <= start || end - start > MAX_SPAN_SECS {
+    if start < 0.0 {
         return Err(format!(
-            "A span must be between zero and {MAX_SPAN_SECS:.0} seconds, got {start} to {end}"
+            "A span cannot start before the recording, got {start}"
+        ));
+    }
+    if end <= start {
+        return Err(format!(
+            "A span must end after it starts, got {start} to {end}"
+        ));
+    }
+    // Said as a length, because that is what is being refused. Quoting the two
+    // positions alongside a limit on the distance between them read as though
+    // one of them were out of range.
+    if end - start > MAX_SPAN_SECS {
+        return Err(format!(
+            "A span may be at most {MAX_SPAN_SECS:.0} seconds long, got {:.0}",
+            end - start
         ));
     }
 

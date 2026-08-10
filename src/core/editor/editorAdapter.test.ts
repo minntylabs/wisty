@@ -133,6 +133,29 @@ describe("clipboard selections", () => {
     expect(writeText).toHaveBeenCalledWith("one\r\ntwo");
   });
 
+  /**
+   * The guard was `view.state !== state`, which any transaction tripped. In
+   * transcript mode the pointer dispatches a selection on every mouse move, so
+   * moving the mouse while pressing Ctrl+V silently did nothing.
+   */
+  it("still pastes when only the selection moved during the clipboard read", async () => {
+    const { adapter, host } = createAdapter();
+    adapter.setText("one two three", { emitChange: false });
+    const view = viewOf(host);
+    let resolveClipboard: (text: string) => void;
+    readText.mockImplementation(
+      () => new Promise<string>((resolve) => { resolveClipboard = resolve; })
+    );
+
+    const paste = adapter.pasteSelection();
+    // Stands in for a hover selection, which is not a document change.
+    view.dispatch({ selection: { anchor: 4, head: 7 } });
+    resolveClipboard!("PASTED");
+    await expect(paste).resolves.toBe(true);
+
+    expect(adapter.getText()).toBe("one PASTED three");
+  });
+
   it("does not paste into a document replaced while reading the clipboard", async () => {
     const { adapter } = createAdapter();
     let resolveClipboard: (text: string) => void;
@@ -451,5 +474,70 @@ describe("what a transcript hover does not disturb", () => {
     view.dispatch({ selection: { anchor: 12 } });
 
     expect(onCursorPositionChanged.mock.calls.length).toBeGreaterThan(reportsBefore);
+  });
+});
+
+describe("the line ending a document is written with", () => {
+  /**
+   * Nothing in the application calls setText: every load resets the editor to
+   * empty and then appends. Deciding only when the state is created decided it
+   * from an empty string every time, so state.lineBreak was "\n" for every
+   * document however it was written.
+   */
+  it("is taken from the first text a load appends, not from the empty start", () => {
+    const { adapter, host } = createAdapter();
+    adapter.reset({ emitChange: false });
+    adapter.append("one\r\ntwo\r\nthree", { emitChange: false });
+
+    expect(viewOf(host).state.lineBreak).toBe("\r\n");
+  });
+
+  it("is LF for a document written with LF", () => {
+    const { adapter, host } = createAdapter();
+    adapter.reset({ emitChange: false });
+    adapter.append("one\ntwo", { emitChange: false });
+
+    expect(viewOf(host).state.lineBreak).toBe("\n");
+  });
+
+  /**
+   * A large file arrives in pieces. Letting a later batch re-decide would flip
+   * the answer partway through a load, and a boundary that splits a CRLF would
+   * do exactly that.
+   */
+  it("is settled by the first batch and not revisited", () => {
+    const { adapter, host } = createAdapter();
+    adapter.reset({ emitChange: false });
+    adapter.append("one\r\ntwo\r\n", { emitChange: false });
+    adapter.append("three\nfour", { emitChange: false });
+
+    expect(viewOf(host).state.lineBreak).toBe("\r\n");
+  });
+
+  it("starts undecided again for the next document", () => {
+    const { adapter, host } = createAdapter();
+    adapter.reset({ emitChange: false });
+    adapter.append("one\r\ntwo", { emitChange: false });
+    expect(viewOf(host).state.lineBreak).toBe("\r\n");
+
+    adapter.reset({ emitChange: false });
+    adapter.append("one\ntwo", { emitChange: false });
+    expect(viewOf(host).state.lineBreak).toBe("\n");
+  });
+
+  /**
+   * Declaring CRLF makes CodeMirror split on that and nothing else, so a stray
+   * LF would stop being a line break and two lines would silently join. A mixed
+   * file is left to the default, which accepts all three.
+   */
+  it("leaves a mixed-ending document to the default rather than guessing", () => {
+    const { adapter, host } = createAdapter();
+    adapter.reset({ emitChange: false });
+    adapter.append("one\r\ntwo\nthree", { emitChange: false });
+
+    const view = viewOf(host);
+    expect(view.state.lineBreak).toBe("\n");
+    // The point of not declaring CRLF: the lone LF is still a break.
+    expect(view.state.doc.lines).toBe(3);
   });
 });

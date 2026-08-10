@@ -104,7 +104,10 @@ export const MenuBar = () => {
       return (
         <Show when={visible()}>
           <MenubarSub>
-            <MenubarSubTrigger class="menu-item menu-submenu-trigger">
+            <MenubarSubTrigger
+              class="menu-item menu-submenu-trigger"
+              textValue={item.getLabel ? item.getLabel() : item.label}
+            >
               <Show when={showChecks()}>
                 <CheckGutter />
               </Show>
@@ -133,6 +136,12 @@ export const MenuBar = () => {
       <Show when={visible()}>
         <MenubarItem
           class="menu-item"
+          // Typing a letter jumps to the item whose text starts with it, and
+          // Kobalte works that text out from the item's own DOM when it is not
+          // told. That would now begin with the tick, so a checked item became
+          // unreachable by its first letter — and it would end with the
+          // shortcut, so "save as" would never match either.
+          textValue={commandLabel(command)}
           role={command.checked ? "menuitemcheckbox" : undefined}
           aria-checked={command.checked ? command.checked() : undefined}
           disabled={!menuItemEnabled(command, commands.interactionBlocked())}

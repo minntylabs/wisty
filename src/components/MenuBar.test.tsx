@@ -7,6 +7,8 @@
  * Both are asserted here.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "solid-js/web";
 import { createSignal } from "solid-js";
@@ -140,5 +142,28 @@ describe("showing which settings are on", () => {
 
     expect(itemNamed("Word Wrap")?.querySelector(".menu-item-check")?.textContent).toBe("✓");
     expect(itemNamed("Word Wrap")?.getAttribute("aria-checked")).toBe("true");
+  });
+});
+
+/**
+ * Typing a letter jumps to the item whose text starts with it. Kobalte works
+ * that text out from the item's own DOM unless it is given `textValue` — and
+ * the item's DOM now begins with the tick and ends with the shortcut, so a
+ * checked item stopped being reachable by its own first letter.
+ *
+ * Asserted by reading the source, as `appShellProps` and `dialogPanelStyles`
+ * do: the typeahead needs a collator and real focus management, neither of
+ * which jsdom provides, so a rendering test here would pass either way.
+ */
+describe("every menu item names itself for typeahead", () => {
+  const source = readFileSync(join(__dirname, "MenuBar.tsx"), "utf8");
+
+  it.each(["MenubarItem", "MenubarSubTrigger"])("%s carries a textValue", (component) => {
+    const opening = new RegExp(`<${component}\\b[^>]*?>`, "gs");
+    const tags = source.match(opening) ?? [];
+    expect(tags.length, `no <${component}> found — has it been renamed?`).toBeGreaterThan(0);
+    for (const tag of tags) {
+      expect(tag, `<${component}> must set textValue`).toContain("textValue=");
+    }
   });
 });

@@ -7,8 +7,7 @@ read/write, and will attempt to open files up to 1 GB).
 
 Wisty was originally a fork of [Parchment](https://github.com/tywil04/parchment) but has been completely rewritten in Typescript using AI tools.
 
-![wisty light](images/wisty-light.png)
-![wisty dark](images/wisty-dark.png)
+![Wisty editing an audio-linked interview transcript in Transcript Mode](images/wisty-transcript-mode.png)
 
 Wisty has a basic Formatted mode for displaying styled markdown and also has spell-checking options.
 

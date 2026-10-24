@@ -1,6 +1,9 @@
 # Wisty
 
-Wisty is a text editor for Linux with a clean look. It doesn't have code highlighting but has some special modes related to editing transcripts, which will be documented later. It only handles UTF-8 files and has support for very large files (streamed read/write, will attempt to open files up to 1GB).
+Wisty is a text editor for Linux with a clean look and specialised tools for
+reviewing and tidying interview transcripts. It doesn't have code highlighting.
+It only handles UTF-8 files and has support for very large files (streamed
+read/write, and will attempt to open files up to 1 GB).
 
 > [!CAUTION]
 > **Do not install or use any of the builds currently published on GitHub
@@ -26,6 +29,44 @@ Wisty is a Linux application and there are no plans to port it to Windows or mac
 
 - **Markdown-style formatting** — bold (`**text**`), italic (`*text*` / `_text_`) and ATX headings (`#` .. `######`) are recognised and can be shown either as raw markup ("Plain" view) or with the markers hidden and the content styled ("Formatted" view).
 - Text wrapping, adjustable font, light/dark theme, spell check with installable dictionaries.
+
+## Interview transcription workflow
+
+Wisty can import a timed transcript in **WebVTT (`.vtt`) or SRT (`.srt`)
+format together with its audio recording**. Each timed cue is associated with
+the corresponding text, and Wisty saves the transcript and audio together in a
+single `.tsf` file. Speaker information is preserved when it is supplied in
+WebVTT voice spans; SRT does not have a standard way to carry speaker names.
+
+When a `.tsf` file is open, speaker icons beside the transcript text play the
+audio associated with individual passages. This makes it quick to listen to an
+unclear phrase while correcting the transcript, without finding the same point
+manually in a separate audio player.
+
+Wisty does not transcribe recordings itself. A local speech-to-text model or
+another transcription tool can be used to produce the timed VTT or SRT file
+before importing it into Wisty.
+
+### Transcript Mode
+
+**View → Transcript Mode** provides a fast mouse-driven way to tidy speaker
+turns. It is intended for transcripts whose lines begin with speaker labels such
+as `ALICE:` and `BOB:`.
+
+- Hover over a word to select it.
+- Use the mouse wheel while hovering to expand or contract the selection one
+  word at a time.
+- Left-click the highlighted words to move them to the preceding or following
+  speaker turn. A selection in the middle of a turn can instead split the turn
+  and attribute the selected words to the other speaker.
+- Hover over a speaker label and left-click it to merge that turn into the turn
+  above, or right-click it to delete the whole turn.
+- The colour and symbol beside a selection preview which action a click will
+  perform. Press `Escape` to clear the transient selection without making an
+  edit.
+
+These clicks modify the document, so check the indicated action before clicking.
+Normal undo remains available if a correction is not what you intended.
 
 ## Installation
 

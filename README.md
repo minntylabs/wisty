@@ -56,9 +56,14 @@ as `ALICE:` and `BOB:`.
 - Hover over a word to select it.
 - Use the mouse wheel while hovering to expand or contract the selection one
   word at a time.
-- Left-click the highlighted words to move them to the preceding or following
-  speaker turn. A selection in the middle of a turn can instead split the turn
-  and attribute the selected words to the other speaker.
+- Left-click the highlighted words to apply an action determined by their
+  position in the current speaker turn (the labelled line):
+  - a selection at the beginning moves to the end of the preceding speaker's
+    turn
+  - a selection at the end moves to the beginning of the following speaker's
+    turn
+  - a selection in the middle splits the current turn into three, placing the
+    selected words in a new turn attributed to the other speaker
 - Hover over a speaker label and left-click it to merge that turn into the turn
   above, or right-click it to delete the whole turn.
 - The colour and symbol beside a selection preview which action a click will
@@ -67,6 +72,12 @@ as `ALICE:` and `BOB:`.
 
 These clicks modify the document, so check the indicated action before clicking.
 Normal undo remains available if a correction is not what you intended.
+
+Transcript Mode is designed primarily for interviews with two speakers. For a
+middle split, Wisty uses the document's other speaker as the new turn's label.
+If a transcript does not contain exactly two speakers, Wisty only performs the
+split when an adjacent turn provides a different speaker label; otherwise the
+selection is left unchanged.
 
 ## Installation
 

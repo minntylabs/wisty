@@ -6,13 +6,9 @@ It only handles UTF-8 files and has support for very large files (streamed
 read/write, and will attempt to open files up to 1 GB).
 
 > [!CAUTION]
-> **Do not install or use any of the builds currently published on GitHub
-> Releases.** Every existing release, including the latest release (v2.4.2),
-> predates security updates for vulnerable bundled dependencies as well as
-> subsequent application fixes. Those releases are obsolete and unsupported.
-> No replacement binary release is currently available. The current `main`
-> branch contains the security updates, but it is ongoing personal development
-> and has changed substantially from the released versions.
+> **Do not install or use a Wisty release older than v2.5.0.** Releases up to and
+> including v2.4.2 predate security updates for vulnerable bundled dependencies
+> as well as subsequent application fixes. They are obsolete and unsupported.
 
 Wisty was originally a fork of [Parchment](https://github.com/tywil04/parchment) but has been completely rewritten in Typescript using AI tools.
 
@@ -81,10 +77,40 @@ selection is left unchanged.
 
 ## Installation
 
-There is currently no supported prebuilt release. Do not install the tarballs,
-`.deb`, `.rpm`, or `.AppImage` files on the GitHub Releases page. If you need to
-use Wisty, build the current `main` branch from source after installing the
-[build prerequisites](#build-prerequisites-from-source), then run:
+Download v2.5.0 or newer from
+[GitHub Releases](https://github.com/minntylabs/wisty/releases). Do not install
+an older release.
+
+### User-only install
+
+The user-install tarball does not require `sudo`. Download
+`wisty-user-install-<version>-linux-<arch>.tar.gz`, then run:
+
+```bash
+tar -xzf wisty-user-install-*.tar.gz
+cd wisty-user-install-*
+./install.sh
+```
+
+It installs:
+
+- the executable to `~/.local/bin/wisty`
+- the desktop entry to `~/.local/share/applications/wisty.desktop`
+- icons under `~/.local/share/icons/hicolor/`
+
+If `~/.local/bin` is not already on your `PATH`, the installer offers to add it.
+The extracted directory also contains `uninstall.sh`.
+
+### Other packages
+
+The release also provides `.deb`, `.rpm`, and `.AppImage` packages. All of these
+require the Linux runtime libraries listed below; the `.deb` and `.rpm` packages
+declare those dependencies for their package managers.
+
+### Build from source
+
+After installing the [build prerequisites](#build-prerequisites-from-source),
+run:
 
 ```bash
 npm ci
@@ -96,19 +122,12 @@ The packaging command prints the path of the generated archive and leaves its
 contents in `dist-user/wisty-user-install-<version>-linux-<arch>/`. Run
 `install.sh` from that directory.
 
-This user-only installation does not require `sudo`. It installs:
-
-- the executable to `~/.local/bin/wisty`
-- the desktop entry to `~/.local/share/applications/wisty.desktop`
-- icons under `~/.local/share/icons/hicolor/`
-
-If `~/.local/bin` is not already on your `PATH`, the installer offers to add it.
-
 ## Linux runtime libraries
 
-wisty requires **WebKitGTK 4.1** at runtime (`libwebkit2gtk-4.1`).
-
-It also requires GTK runtime libraries (GTK 3) and related system components used by Tauri/WebKitGTK.
+Wisty requires **WebKitGTK 4.1**, **GTK 3**, and the **ALSA runtime library**.
+ALSA is used for transcript audio playback. The AppImage and user-install
+tarball use the copies supplied by the operating system rather than bundling
+these libraries.
 
 You may already have these, if not, install them like this:
 
@@ -118,16 +137,28 @@ You may already have these, if not, install them like this:
 sudo apt install -y libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1
 ```
 
+For ALSA, install `libasound2t64` on Ubuntu 24.04 and newer:
+
+```bash
+sudo apt install -y libasound2t64
+```
+
+On Debian and older Ubuntu releases, install `libasound2` instead:
+
+```bash
+sudo apt install -y libasound2
+```
+
 ### Fedora
 
 ```bash
-sudo dnf install -y webkit2gtk4.1 gtk3 libappindicator-gtk3
+sudo dnf install -y webkit2gtk4.1 gtk3 libappindicator-gtk3 alsa-lib
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S --needed webkit2gtk-4.1 gtk3 libappindicator-gtk3
+sudo pacman -S --needed webkit2gtk-4.1 gtk3 libappindicator-gtk3 alsa-lib
 ```
 
 ## Build prerequisites (from source)

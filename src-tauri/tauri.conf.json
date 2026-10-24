@@ -84,9 +84,15 @@
     ],
     "linux": {
       "deb": {
+        "depends": [
+          "libasound2"
+        ],
         "desktopTemplate": "wisty.desktop.hbs"
       },
       "rpm": {
+        "depends": [
+          "alsa-lib"
+        ],
         "desktopTemplate": "wisty.desktop.hbs"
       }
     },

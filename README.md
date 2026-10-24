@@ -5,11 +5,6 @@ reviewing and tidying interview transcripts. It doesn't have code highlighting.
 It only handles UTF-8 files and has support for very large files (streamed
 read/write, and will attempt to open files up to 1 GB).
 
-> [!CAUTION]
-> **Do not install or use a Wisty release older than v2.5.0.** Releases up to and
-> including v2.4.2 predate security updates for vulnerable bundled dependencies
-> as well as subsequent application fixes. They are obsolete and unsupported.
-
 Wisty was originally a fork of [Parchment](https://github.com/tywil04/parchment) but has been completely rewritten in Typescript using AI tools.
 
 ![wisty light](images/wisty-light.png)
@@ -79,7 +74,8 @@ selection is left unchanged.
 
 Download v2.5.0 or newer from
 [GitHub Releases](https://github.com/minntylabs/wisty/releases). Do not install
-an older release.
+an older release. Releases before v2.5.0 are retained for historical purposes
+but are unsupported and predate dependency security updates.
 
 ### User-only install
 

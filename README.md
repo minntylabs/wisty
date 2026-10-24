@@ -2,6 +2,15 @@
 
 Wisty is a text editor for Linux with a clean look. It doesn't have code highlighting but has some special modes related to editing transcripts, which will be documented later. It only handles UTF-8 files and has support for very large files (streamed read/write, will attempt to open files up to 1GB).
 
+> [!CAUTION]
+> **Do not install or use any of the builds currently published on GitHub
+> Releases.** Every existing release, including the latest release (v2.4.2),
+> predates security updates for vulnerable bundled dependencies as well as
+> subsequent application fixes. Those releases are obsolete and unsupported.
+> No replacement binary release is currently available. The current `main`
+> branch contains the security updates, but it is ongoing personal development
+> and has changed substantially from the released versions.
+
 Wisty was originally a fork of [Parchment](https://github.com/tywil04/parchment) but has been completely rewritten in Typescript using AI tools.
 
 ![wisty light](images/wisty-light.png)
@@ -20,45 +29,28 @@ Wisty is a Linux application and there are no plans to port it to Windows or mac
 
 ## Installation
 
-The simplest approach (IMHO) is a user-only install (sudo not required, installs in your home dir). 
-
-### Install from user tarball
-
-1. Download the latest `wisty-user-install-<version>-linux-<arch>.tar.gz` from [Releases](https://github.com/timothy-strange/wisty/releases/).
-2. Extract it:
+There is currently no supported prebuilt release. Do not install the tarballs,
+`.deb`, `.rpm`, or `.AppImage` files on the GitHub Releases page. If you need to
+use Wisty, build the current `main` branch from source after installing the
+[build prerequisites](#build-prerequisites-from-source), then run:
 
 ```bash
-tar -xzf wisty-user-install-*.tar.gz
-cd wisty-user-install-*
+npm ci
+npm run tauri -- build
+npm run package:user-tarball
 ```
 
-3. Run the installer:
+The packaging command prints the path of the generated archive and leaves its
+contents in `dist-user/wisty-user-install-<version>-linux-<arch>/`. Run
+`install.sh` from that directory.
 
-```bash
-./install.sh
-```
+This user-only installation does not require `sudo`. It installs:
 
-The installer will:
+- the executable to `~/.local/bin/wisty`
+- the desktop entry to `~/.local/share/applications/wisty.desktop`
+- icons under `~/.local/share/icons/hicolor/`
 
-- install the binary to `~/.local/bin/wisty`
-- install the desktop entry to `~/.local/share/applications/wisty.desktop`
-- install icons to:
-  - `~/.local/share/icons/hicolor/32x32/apps/wisty.png`
-  - `~/.local/share/icons/hicolor/64x64/apps/wisty.png`
-  - `~/.local/share/icons/hicolor/128x128/apps/wisty.png`
-  - `~/.local/share/icons/hicolor/256x256/apps/wisty.png`
-
-If `~/.local/bin` is not already on your `PATH`, the installer will prompt you and offer to add it so `wisty` can be run from the command line.
-
-To uninstall, run `./uninstall.sh` from the extracted archive. It removes the files above and can also remove the PATH block (with confirmation).
-
-### Other package formats
-
-You can also download packaged builds from Releases:
-
-- `.deb`
-- `.rpm`
-- `.AppImage`
+If `~/.local/bin` is not already on your `PATH`, the installer offers to add it.
 
 ## Linux runtime libraries
 

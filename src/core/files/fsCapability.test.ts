@@ -32,6 +32,7 @@ const MANIFEST_PATH = join(__dirname, "..", "..", "..", "src-tauri", "gen", "sch
 const COMMAND_FOR_IMPORT: Record<string, string> = {
   exists: "fs:exists",
   open: "fs:open",
+  readDir: "fs:read_dir",
   readTextFile: "fs:read_text_file",
   stat: "fs:stat",
   writeTextFile: "fs:write_text_file"

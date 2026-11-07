@@ -576,6 +576,9 @@ function App() {
     showAbout: openAboutDialog
   });
 
+  // Generica mode (colours, completion, checker) follows the open file's name.
+  createEffect(() => editorAdapter.setFilePath(documentStore.state.filePath));
+
   const commandRegistry = createCommandRegistry(definitions, (commandId, error) => {
     const appError = toAppError(error, "UNKNOWN", "Unable to complete that action");
     errorModalQueue.enqueue({

@@ -18,6 +18,7 @@ import { createSpellcheckExtension, requestSpellRescan } from "../spellcheck/spe
 import { createWordCounter } from "./wordCount";
 import { createTranscriptExtension, transcriptHoverSelection } from "./transcript/transcriptExtension";
 import { createMarkers, setMarkersVisibleEffect } from "./markers/markerExtension";
+import { createGenericaMode } from "./generica/genericaExtension";
 
 type DocChangedPayload = {
   revision: number;
@@ -168,6 +169,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
   const transcriptCompartment = new Compartment();
   const markerCompartment = new Compartment();
   const lineBreakCompartment = new Compartment();
+  const generica = createGenericaMode();
 
   const formatting = createFormatting(() => options.getSettings().formatViewMode);
 
@@ -398,6 +400,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
         spellCompartment.of(spellEnabled ? spellExtension : []),
         transcriptCompartment.of(transcriptEnabled ? transcriptExtension : []),
         markerCompartment.of(markersEnabled ? markers.extension : []),
+        generica.initial(),
         styleCompartment.of(createStyleExtension()),
         formatting.extension,
         EditorView.updateListener.of((update) => {
@@ -796,6 +799,9 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
 
   const isTranscriptModeEnabled = () => transcriptEnabled;
 
+  /** Generica mode follows the open file: on for `.tale`. */
+  const setFilePath = (path: string) => generica.setFilePath(editorView ?? null, path);
+
   /**
    * Installs or removes marker handling, following the document rather than a
    * user preference: only a transcript container has markers, and a document
@@ -977,6 +983,7 @@ export const createEditorAdapter = (options: EditorAdapterOptions) => {
     setViewPosition,
     setTranscriptMode,
     isTranscriptModeEnabled,
+    setFilePath,
     setMarkersEnabled,
     setMarkersVisible,
     listSpellDictionaries,

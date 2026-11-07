@@ -167,6 +167,8 @@ export type EditorPort = {
   setLargeLineSafeMode: (enabled: boolean) => void;
   setFormatMode: (mode: FormatViewMode) => void;
   setMarkersEnabled: (enabled: boolean) => void;
+  /** Tells the editor which file is open, for modes that follow the file type. */
+  setFilePath?: (path: string) => void;
   setMarkersVisible: (visible: boolean) => void;
   getFormatMode: () => FormatViewMode;
   toggleBold: () => void;

@@ -69,6 +69,32 @@ If a transcript does not contain exactly two speakers, Wisty only performs the
 split when an adjacent turn provides a different speaker label; otherwise the
 selection is left unchanged.
 
+## Generica mode (`.tale` files)
+
+Files ending `.tale` (the script language Generica, used by the game *Tales
+from Next Week*) switch on a writing mode by themselves. Nothing to turn on.
+
+- **Colours** for section headings, jumps (`->`), Control's lines, the
+  player's replies (`>`), `send:` and `task:` lines, `{placeholders}` and task
+  names.
+- **Auto-complete** (pops up as you type; `Ctrl-Space` asks for it, and for the
+  line words such as `marker:`): the known phrases after `marker:`, `done when:`,
+  `fails when:`, `send:`, `is:`, `placed:`, `at:` and `kind:`; task names after
+  `task:`; section names after `->`; placeholders after `{`.
+- **Go to a section**: `F12` on a `-> name` line (or `Ctrl`-click the name) jumps
+  to that section; on a `task: name` line it jumps to the task if it is in the
+  same file.
+- **Checker**: about a second after you stop typing, the game's own checker
+  (`godot --headless --path <game> -- --story-check`) is run on what is on
+  screen, and its faults are underlined (hover for the message). It needs
+  Godot: Wisty looks for `WISTY_GODOT`, then `godot` on the search path, then
+  `~/.local/bin/godot`.
+
+The phrase list is read from `phrases.txt`, found by looking in the open
+file's folder and the folders above it; the game folder is the next folder up
+that holds `project.godot`. Nothing is fixed to a path. The checker works on a
+scratch copy of the story folder, so the game's files are never touched.
+
 ## Installation
 
 Download v2.5.0 or newer from

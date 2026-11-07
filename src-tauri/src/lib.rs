@@ -1392,7 +1392,8 @@ pub fn run() {
             tsf::close_tsf,
             playback::play_span,
             playback::stop_playback,
-            playback::release_playback
+            playback::release_playback,
+            story_check::run_story_check
         ])
         // Closing in the middle of an import leaves two things behind, and
         // nothing else will collect either.
@@ -1429,6 +1430,7 @@ pub fn run() {
 }
 mod playback;
 mod spellcheck;
+mod story_check;
 mod tsf;
 mod window_title;
 
